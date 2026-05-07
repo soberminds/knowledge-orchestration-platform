@@ -1,0 +1,118 @@
+# RAG 知识库项目（FastAPI + LangChain + Chroma + DeepSeek）
+
+一个可本地运行的知识库问答项目：支持 Markdown/TXT/PDF/DOCX 入库，先检索再生成，最终由 DeepSeek 输出答案。
+
+## 这套项目做了什么（校正版）
+
+- 文档上传和本地文档自动入库
+- 文档切片、Embedding、向量检索（RAG 核心流程）
+- DeepSeek 负责最终回答生成
+- FastAPI 提供后端 API
+- Vue 3 + Element Plus 提供前端问答界面
+- 预留了 LangChain Tool，方便后续接入 Agent
+
+## RAG 三个核心步骤（按当前代码解释）
+
+### 1. 文档切片（Chunking）
+
+- 作用：把长文档切成小片段，便于检索和拼接上下文。
+- 为什么要切：大模型上下文有限，整本 PDF 不能一次塞进去。
+- 当前实现：`app/services/knowledge_base.py` 的 `split_documents()` 使用 `RecursiveCharacterTextSplitter`。
+- 关键说明：**chunk 是“检索片段”，不是“一问一答对”**。
+
+### 2. Embedding（向量化）
+
+- 作用：把文本转成向量，便于做“语义相似度”比较。
+- 当前实现：`app/services/embeddings.py` 里 `LocalSentenceTransformerEmbeddings`（本地 `sentence-transformers`）。
+- 关键说明：当前项目**没有用 `OpenAIEmbeddings`**，也**没有调用 DeepSeek 的 embedding 接口**。
+
+### 3. 向量检索（Vector Search）
+
+- 作用：把用户问题也向量化，再去向量库里找最相关的 K 段文本。
+- 当前实现：`app/services/knowledge_base.py` 的 `retrieve()` 调用 `langchain_chroma.Chroma.similarity_search_with_relevance_scores(...)`。
+- 关键说明：当前项目**没有使用** `as_retriever()` + `qa_chain.run()` 这条链路，而是“显式检索 + 自定义 Prompt + DeepSeek 生成”。
+
+## 你问的两个关键问题
+
+### Q1：`预留了 LangChain Tool` 是什么意思？
+
+意思是：我们把“知识库搜索”封装成了一个标准工具函数，后续可以让 Agent 自动调用。
+
+- 代码位置：`app/services/tools.py`
+- 入口函数：`build_search_tool(...)`
+- 工具名：`search_knowledge_base`
+
+未来如果你接 LangChain Agent / LangGraph，Agent 可以在推理过程中主动调用这个工具先查资料，再组织回答。
+
+### Q2：检索到底有没有用 LangChain？
+
+有，用了，而且是关键路径在用：
+
+- `langchain_text_splitters.RecursiveCharacterTextSplitter`（切片）
+- `langchain_core.embeddings.Embeddings` 接口（Embedding 适配）
+- `langchain_chroma.Chroma`（向量库封装与检索）
+
+但不是“全自动 QA Chain”那种写法。  
+当前项目是“半框架化”方式：**检索用 LangChain，生成调用 DeepSeek SDK，Prompt 逻辑自定义**。这在工程里很常见，也更可控。
+
+## 技术栈
+
+- 后端：FastAPI
+- 检索框架：LangChain（text splitter + embeddings interface + chroma vectorstore）
+- 向量库：Chroma
+- Embedding：sentence-transformers（本地）
+- LLM：DeepSeek（OpenAI 兼容 API）
+- 前端：Vue 3 + Element Plus
+- 部署：Docker
+
+## 核心后端文件
+
+- `app/core/settings.py`：环境变量与全局配置
+- `app/services/files.py`：文档读取（md/txt/pdf/docx）
+- `app/services/embeddings.py`：本地 embedding 适配到 LangChain 接口
+- `app/services/knowledge_base.py`：索引构建、检索、问答主链路
+- `app/services/tools.py`：Agent Tool 预留
+- `app/api/routes.py`：HTTP API（upload/ingest/search/chat）
+- `app/main.py`：FastAPI 入口与启动流程
+
+## 本地运行
+
+### 1) 配置环境变量
+
+复制 `.env.example` 为 `.env`，填入：
+
+- `DEEPSEEK_API_KEY`
+- `DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`）
+- `DEEPSEEK_MODEL`（建议 `deepseek-v4-flash`）
+
+> 安全提醒：不要把真实 API Key 写死在代码或提交到仓库。
+
+### 2) 安装后端依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3) 启动后端
+
+```bash
+uvicorn app.main:app --reload
+```
+
+访问：`http://127.0.0.1:8000/docs`
+
+### 4) 启动前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+访问：`http://127.0.0.1:5173`
+
+## 简历可用描述（可直接改写）
+
+- 基于 FastAPI + LangChain + Chroma + DeepSeek 搭建本地 RAG 知识库，支持 Markdown/TXT/PDF/DOCX 文档入库、切片检索与引用溯源。  
+- 使用本地 sentence-transformers 完成向量化，结合 Chroma 语义检索实现“检索增强生成”问答链路。  
+- 采用“显式检索 + 自定义 Prompt + DeepSeek 生成”的工程化方案，并预留 LangChain Tool 以支持后续 Agent 化扩展。  
