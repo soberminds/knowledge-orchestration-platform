@@ -116,3 +116,26 @@ npm run dev
 - 基于 FastAPI + LangChain + Chroma + DeepSeek 搭建本地 RAG 知识库，支持 Markdown/TXT/PDF/DOCX 文档入库、切片检索与引用溯源。  
 - 使用本地 sentence-transformers 完成向量化，结合 Chroma 语义检索实现“检索增强生成”问答链路。  
 - 采用“显式检索 + 自定义 Prompt + DeepSeek 生成”的工程化方案，并预留 LangChain Tool 以支持后续 Agent 化扩展。  
+
+## Windows（Python 3.11）推荐启动方式
+
+> `.venv311` 是本地虚拟环境目录，不需要提交到 GitHub。
+
+```powershell
+cd "e:\00-我的AI Agent\RGA知识库"
+
+# 方式 A：如果 python3.11 已在 PATH
+python3.11 -m venv .venv311
+
+# 方式 B：如果 python3.11 不在 PATH，使用完整路径
+# C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python311\python.exe -m venv .venv311
+
+.\.venv311\Scripts\activate
+python -m pip install -U pip
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+说明：
+- 这样做可以固定使用 Python 3.11，避免 Python 3.12 在 Windows 上安装 `chroma-hnswlib` 时触发本地 C++ 编译报错。
+- 虚拟环境只用于本机开发隔离依赖，不应提交到仓库。
