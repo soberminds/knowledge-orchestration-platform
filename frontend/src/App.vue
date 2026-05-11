@@ -58,7 +58,7 @@ function setTopK(value: number) {
 onMounted(async () => {
   chatWorkspace.initialize();
   try {
-    await dashboard.refreshDashboard();
+    await dashboard.refreshDashboard({ retries: 2 });
   } catch {
     // Error text is already captured in composable state.
   }

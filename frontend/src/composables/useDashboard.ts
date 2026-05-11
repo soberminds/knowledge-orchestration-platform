@@ -8,6 +8,14 @@ import {
   type HealthResponse,
 } from "../api";
 
+const RETRY_DELAYS_MS = [0, 600, 1200];
+
+function wait(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 export function useDashboard() {
   const health = ref<HealthResponse | null>(null);
   const documents = ref<DocumentInfo[]>([]);
@@ -29,18 +37,41 @@ export function useDashboard() {
     errorMessage.value = "";
   }
 
-  async function refreshDashboard() {
+  async function refreshDashboard(options?: { retries?: number }) {
     refreshing.value = true;
     clearError();
+    const retries = Math.max(0, options?.retries ?? 0);
+    let lastError: unknown = null;
+
     try {
-      const [healthData, docs] = await Promise.all([getHealth(), listDocuments()]);
-      health.value = healthData;
-      documents.value = docs;
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
+        const delayMs = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+        if (delayMs > 0) {
+          await wait(delayMs);
+        }
+
+        try {
+          const [healthData, docs] = await Promise.all([getHealth(), listDocuments()]);
+          health.value = healthData;
+          documents.value = docs;
+          clearError();
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempt >= retries) {
+            throw error;
+          }
+        }
+      }
     } catch (error) {
       errorMessage.value = error instanceof Error ? error.message : "Failed to refresh dashboard";
       throw error;
     } finally {
       refreshing.value = false;
+    }
+
+    if (lastError) {
+      throw lastError;
     }
   }
 

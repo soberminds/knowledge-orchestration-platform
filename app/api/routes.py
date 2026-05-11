@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import mimetypes
+from pathlib import Path
 from typing import Iterator
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
+from app.core.settings import settings
 from app.dependencies import get_knowledge_base_service
 from app.schemas import (
     CitationRef,
@@ -25,6 +29,7 @@ from app.services.knowledge_base import KnowledgeBaseService, SearchHit
 
 
 router = APIRouter(prefix="/api", tags=["rag"])
+logger = logging.getLogger(__name__)
 
 
 def _to_source_hit(hit: SearchHit) -> SourceHit:
@@ -48,31 +53,103 @@ def _to_citation_ref(payload: dict) -> CitationRef:
         page=int(payload["page"]) if payload.get("page") is not None else None,
         chunk_indices=[int(value) for value in payload.get("chunk_indices", [])],
         score=float(payload["score"]) if payload.get("score") is not None else None,
+        preview=str(payload.get("preview", "")),
     )
+
+
+def _resolve_file_path(path_value: str) -> Path:
+    if not path_value:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    candidate = (settings.root_dir / path_value).resolve()
+    allowed_roots = [settings.docs_dir.resolve(), settings.uploads_dir.resolve()]
+    if not any(root == candidate or root in candidate.parents for root in allowed_roots):
+        raise HTTPException(status_code=403, detail="File path is not allowed.")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
+    return candidate
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> HealthResponse:
+    indexed_chunks = 0
+    status = "ok"
+    try:
+        indexed_chunks = await run_in_threadpool(service.count_chunks)
+    except Exception as exc:
+        status = "degraded"
+        logger.warning("Health chunk count failed, falling back to 0: %s", exc)
+
     return HealthResponse(
-        status="ok",
+        status=status,
         collection_name=service.settings.collection_name,
-        indexed_chunks=service.count_chunks(),
+        indexed_chunks=indexed_chunks,
     )
 
 
 @router.get("/documents", response_model=list[DocumentInfo])
 async def list_documents(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> list[DocumentInfo]:
-    infos: list[DocumentInfo] = []
-    for item in service.source_file_infos():
-        infos.append(
-            DocumentInfo(
-                path=str(item["path"]),
-                size_bytes=int(item["size_bytes"]),
-                modified_at=str(item["modified_at"]),
-                extension=str(item["extension"]),
+    try:
+        infos: list[DocumentInfo] = []
+        for item in service.source_file_infos():
+            infos.append(
+                DocumentInfo(
+                    path=str(item["path"]),
+                    size_bytes=int(item["size_bytes"]),
+                    modified_at=str(item["modified_at"]),
+                    extension=str(item["extension"]),
+                )
             )
-        )
-    return infos
+        return infos
+    except Exception as exc:
+        logger.warning("List documents failed, returning empty list: %s", exc)
+        return []
+
+
+@router.get("/file")
+async def open_file(path: str) -> FileResponse:
+    file_path = _resolve_file_path(path)
+    media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+    )
+
+
+@router.get("/file/page-text")
+async def file_page_text(path: str, page: int | None = None) -> dict:
+    file_path = _resolve_file_path(path)
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader
+        except Exception as exc:  # pragma: no cover
+            raise HTTPException(status_code=500, detail=f"PDF parser unavailable: {exc}") from exc
+
+        reader = PdfReader(str(file_path))
+        if page is None:
+            page = 1
+        if page < 1 or page > len(reader.pages):
+            raise HTTPException(status_code=400, detail=f"page out of range: 1..{len(reader.pages)}")
+        text = (reader.pages[page - 1].extract_text() or "").strip()
+        return {"path": path, "page": page, "text": text}
+
+    if suffix in {".txt", ".md", ".markdown"}:
+        text = file_path.read_text(encoding="utf-8", errors="ignore")
+        return {"path": path, "page": 1, "text": text}
+
+    if suffix == ".docx":
+        try:
+            from docx import Document as DocxDocument
+        except Exception as exc:  # pragma: no cover
+            raise HTTPException(status_code=500, detail=f"DOCX parser unavailable: {exc}") from exc
+
+        doc = DocxDocument(str(file_path))
+        paragraphs = [paragraph.text.strip() for paragraph in doc.paragraphs if paragraph.text.strip()]
+        return {"path": path, "page": 1, "text": "\n".join(paragraphs)}
+
+    raise HTTPException(status_code=400, detail=f"Unsupported extension: {suffix}")
 
 
 @router.post("/ingest", response_model=IngestResponse)

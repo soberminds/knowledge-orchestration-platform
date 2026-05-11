@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 import threading
@@ -10,18 +11,59 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
+from app.core.settings import settings
+from chromadb import PersistentClient
+from chromadb.config import Settings as ChromaSettings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
-from chromadb.config import Settings as ChromaSettings
 
-from app.core.settings import settings
 from app.schemas import ChatHistoryItem
 from app.services.embeddings import get_embedding_model
 from app.services.files import file_info, iter_source_files, load_documents_from_file
 
 QuestionMode = Literal["overview", "technical", "comparison", "list", "general"]
+
+
+def _patch_posthog_capture_signature() -> None:
+    """Compat patch for posthog>=7 used with chromadb 0.5.x telemetry."""
+    try:
+        import posthog
+    except Exception:
+        return
+
+    capture_fn = getattr(posthog, "capture", None)
+    if capture_fn is None or getattr(capture_fn, "__chroma_compat_patch__", False):
+        return
+
+    try:
+        params = list(inspect.signature(capture_fn).parameters.values())
+    except Exception:
+        return
+
+    # posthog>=7 switched to capture(event=..., **kwargs); chromadb still calls
+    # capture(distinct_id, event, properties). Adapt without changing behavior.
+    if params and params[0].name == "event":
+        original_capture = capture_fn
+
+        def _capture_compat(
+            distinct_id: str,
+            event: str,
+            properties: dict[str, Any] | None = None,
+            **kwargs: Any,
+        ):
+            payload = dict(kwargs)
+            if properties is not None:
+                payload.setdefault("properties", properties)
+            payload.setdefault("distinct_id", distinct_id)
+            try:
+                return original_capture(event, **payload)
+            except Exception:
+                return None
+
+        setattr(_capture_compat, "__chroma_compat_patch__", True)
+        posthog.capture = _capture_compat
 
 
 @dataclass(frozen=True)
@@ -49,6 +91,7 @@ class KnowledgeBaseService:
     """Main knowledge-base service used by API routes."""
 
     def __init__(self) -> None:
+        _patch_posthog_capture_signature()
         self.settings = settings
         self._lock = threading.RLock()
         self._embedder = None
@@ -94,6 +137,10 @@ class KnowledgeBaseService:
             client_settings=client_settings,
             collection_metadata={"hnsw:space": "cosine"},
         )
+
+    def _build_chroma_client(self) -> PersistentClient:
+        client_settings = ChromaSettings(anonymized_telemetry=False)
+        return PersistentClient(path=str(self.settings.chroma_dir), settings=client_settings)
 
     def ensure_directories(self) -> None:
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -214,8 +261,21 @@ class KnowledgeBaseService:
         raise RuntimeError("Could not generate a unique filename for upload")
 
     def count_chunks(self) -> int:
-        payload = self.vector_store.get(include=[])
-        return len(payload.get("ids", []))
+        self.ensure_directories()
+        client = self._build_chroma_client()
+        try:
+            collection = client.get_collection(name=self.settings.collection_name)
+        except Exception:
+            return 0
+
+        try:
+            return int(collection.count())
+        except Exception:
+            try:
+                payload = collection.get(include=[])
+                return len(payload.get("ids", []))
+            except Exception:
+                return 0
 
     def _compose_search_query(self, question: str, history: list[ChatHistoryItem] | None) -> str:
         if not history:
@@ -519,6 +579,7 @@ class KnowledgeBaseService:
                     "page": page,
                     "chunk_indices": [int(hit.chunk_index) for hit in group["hits"]],
                     "score": score,
+                    "preview": group["hits"][0].preview if group["hits"] else "",
                 }
             )
 

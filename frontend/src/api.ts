@@ -17,6 +17,7 @@ export interface CitationRef {
   page?: number | null;
   chunk_indices: number[];
   score?: number | null;
+  preview: string;
 }
 
 export interface ChatResponse {
@@ -48,6 +49,12 @@ export interface HealthResponse {
   status: string;
   collection_name: string;
   indexed_chunks: number;
+}
+
+export interface FilePageTextResponse {
+  path: string;
+  page: number;
+  text: string;
 }
 
 interface ChatStreamDeltaEvent {
@@ -261,4 +268,17 @@ export async function uploadDocuments(files: FileList | File[]): Promise<IngestR
   }
 
   return payload as IngestResponse;
+}
+
+export function buildFileUrl(path: string): string {
+  return `${API_BASE}/api/file?path=${encodeURIComponent(path)}`;
+}
+
+export async function getFilePageText(path: string, page?: number): Promise<FilePageTextResponse> {
+  const params = new URLSearchParams();
+  params.set("path", path);
+  if (page !== undefined && page !== null) {
+    params.set("page", String(page));
+  }
+  return requestJson<FilePageTextResponse>(`/api/file/page-text?${params.toString()}`);
 }

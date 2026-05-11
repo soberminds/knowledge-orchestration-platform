@@ -12,13 +12,31 @@ const emit = defineEmits<{
   (event: "citation-click", label: string): void;
 }>();
 
-const containerRef = ref<HTMLElement | null>(null);
+const tooltipVisible = ref(false);
+const tooltipText = ref("");
+const tooltipStyle = ref<Record<string, string>>({});
+
+function escapeAttr(raw: string): string {
+  return raw
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 const markdown = new MarkdownIt({
   html: false,
   linkify: true,
   breaks: true,
   typographer: true,
+});
+
+const citationMap = computed(() => {
+  const map = new Map<string, CitationRef>();
+  for (const item of props.citations ?? []) {
+    map.set(item.label, item);
+  }
+  return map;
 });
 
 const knownLabels = computed(() => {
@@ -39,7 +57,20 @@ const preparedContent = computed(() => {
   });
 });
 
-const renderedHtml = computed(() => markdown.render(preparedContent.value));
+const renderedHtml = computed(() => {
+  let html = markdown.render(preparedContent.value);
+  for (const [label, citation] of citationMap.value.entries()) {
+    const preview = citation.preview || "";
+    const escapedPreview = escapeAttr(preview);
+    const anchorRegex = new RegExp(`<a href="#cite-${label}">\\[${label}\\]</a>`, "g");
+    html = html.replace(
+      anchorRegex,
+      `<a href="#cite-${label}" class="citation-chip" data-citation-label="${label}" data-citation-preview="${escapedPreview}">[${label}]</a>`,
+    );
+  }
+  return html;
+});
+
 const useRawFallback = computed(() => {
   if (!props.content) {
     return false;
@@ -71,17 +102,57 @@ function onContainerClick(event: MouseEvent) {
   }
   emit("citation-click", label);
 }
+
+function onContainerMouseMove(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target) {
+    tooltipVisible.value = false;
+    return;
+  }
+  const anchor = target.closest("a");
+  if (!anchor) {
+    tooltipVisible.value = false;
+    return;
+  }
+  const href = anchor.getAttribute("href") ?? "";
+  if (!href.startsWith("#cite-")) {
+    tooltipVisible.value = false;
+    return;
+  }
+
+  const preview = anchor.getAttribute("data-citation-preview") ?? "";
+  if (!preview.trim()) {
+    tooltipVisible.value = false;
+    return;
+  }
+
+  tooltipText.value = preview;
+  tooltipStyle.value = {
+    left: `${event.clientX + 14}px`,
+    top: `${event.clientY + 14}px`,
+  };
+  tooltipVisible.value = true;
+}
+
+function onContainerMouseLeave() {
+  tooltipVisible.value = false;
+}
 </script>
 
 <template>
   <pre v-if="useRawFallback" class="raw-fallback">{{ content }}</pre>
   <div
     v-else
-    ref="containerRef"
     class="markdown-body"
     v-html="renderedHtml"
     @click="onContainerClick"
+    @mousemove="onContainerMouseMove"
+    @mouseleave="onContainerMouseLeave"
   ></div>
+
+  <div v-if="tooltipVisible" class="citation-tooltip" :style="tooltipStyle">
+    {{ tooltipText }}
+  </div>
 </template>
 
 <style scoped>
@@ -141,19 +212,35 @@ function onContainerClick(event: MouseEvent) {
   color: #0f766e;
 }
 
-.markdown-body :deep(a[href^="#cite-"]) {
+.markdown-body :deep(a.citation-chip) {
   display: inline-block;
   margin: 0 2px;
-  padding: 0.04rem 0.4rem;
+  padding: 0.03rem 0.45rem;
   border: 1px solid #9fd9d1;
   border-radius: 999px;
   background: #ecfdf8;
   color: #0f766e;
   text-decoration: none;
-  font-weight: 600;
+  font-weight: 700;
+  line-height: 1.2;
 }
 
-.markdown-body :deep(a[href^="#cite-"]:hover) {
+.markdown-body :deep(a.citation-chip:hover) {
   background: #dff7f2;
+}
+
+.citation-tooltip {
+  position: fixed;
+  max-width: 360px;
+  z-index: 2800;
+  background: #fff;
+  border: 1px solid #d9e8e2;
+  box-shadow: 0 10px 32px rgba(2, 12, 27, 0.18);
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: #334155;
+  font-size: 0.84rem;
+  line-height: 1.62;
+  pointer-events: none;
 }
 </style>

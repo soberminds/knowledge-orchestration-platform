@@ -43,6 +43,10 @@ def _load_env_file(path: Path) -> None:
 ROOT_DIR = Path(__file__).resolve().parents[2]
 _load_env_file(ROOT_DIR / ".env")
 
+# Silence Chroma telemetry by default to avoid noisy runtime errors.
+# Users can still override these in `.env` when needed.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "FALSE")
+
 
 def _env_int(name: str, default: int) -> int:
     """把环境变量转成整数。"""
@@ -95,4 +99,3 @@ class Settings:
 
 
 settings = Settings()
-

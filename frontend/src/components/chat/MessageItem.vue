@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import type { CitationRef } from "../../api";
+import { buildFileUrl, getFilePageText, type CitationRef } from "../../api";
 import type { UiMessage } from "../../types/chat";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 
@@ -9,37 +9,131 @@ const props = defineProps<{
 }>();
 
 const sourceDetailsRef = ref<HTMLDetailsElement | null>(null);
+const activeCitationLabel = ref<string>("");
+
+const viewerVisible = ref(false);
+const viewerLoading = ref(false);
+const viewerError = ref("");
+const viewerTextHtml = ref("");
+const viewerRawText = ref("");
+const viewerSourcePath = ref("");
+const viewerPage = ref<number | null>(null);
+const viewerFileUrl = ref("");
+const viewerSnippet = ref("");
+
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function normalizeSnippet(text: string): string {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/^\.{3,}/, "")
+    .replace(/\.{3,}$/, "")
+    .replace(/^…+/, "")
+    .replace(/…+$/, "")
+    .trim();
+}
+
+function highlightText(content: string, snippet: string): string {
+  const safeContent = escapeHtml(content);
+  const keyword = normalizeSnippet(snippet);
+  if (!keyword) {
+    return safeContent.replace(/\n/g, "<br/>");
+  }
+
+  const candidateKeywords = [keyword];
+  if (keyword.length > 60) {
+    candidateKeywords.push(keyword.slice(0, 48));
+  }
+  if (keyword.length > 30) {
+    candidateKeywords.push(keyword.slice(0, 24));
+  }
+
+  let highlighted = safeContent;
+  for (const candidate of candidateKeywords) {
+    const escapedKeyword = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(escapedKeyword, "g");
+    const replaced = safeContent.replace(regex, (match) => `<mark class="citation-highlight">${match}</mark>`);
+    if (replaced !== safeContent) {
+      highlighted = replaced;
+      break;
+    }
+  }
+
+  return highlighted.replace(/\n/g, "<br/>");
+}
 
 const citationItems = computed<CitationRef[]>(() => {
   if (props.message.citations.length) {
     return props.message.citations;
   }
-  // Backward-compatible fallback for old messages without citation metadata.
+
   return props.message.sources.map((source, index) => ({
     label: `S${index + 1}`,
     source: source.source,
     page: source.page ?? null,
     chunk_indices: [source.chunk_index],
     score: source.score ?? null,
+    preview: source.preview,
   }));
+});
+
+const citationMap = computed(() => {
+  const map = new Map<string, CitationRef>();
+  for (const citation of citationItems.value) {
+    map.set(citation.label, citation);
+  }
+  return map;
 });
 
 function citationElementId(label: string) {
   return `${props.message.id}-cite-${label}`;
 }
 
-async function focusCitation(label: string) {
-  const details = sourceDetailsRef.value;
-  if (!details) {
-    return;
+async function openCitationViewer(citation: CitationRef) {
+  activeCitationLabel.value = citation.label;
+  viewerSourcePath.value = citation.source;
+  viewerPage.value = citation.page ?? 1;
+  viewerSnippet.value = citation.preview || "";
+  viewerFileUrl.value = buildFileUrl(citation.source) + (citation.page ? `#page=${citation.page}` : "");
+  viewerVisible.value = true;
+  viewerLoading.value = true;
+  viewerError.value = "";
+  viewerRawText.value = "";
+  viewerTextHtml.value = "";
+
+  try {
+    const payload = await getFilePageText(citation.source, citation.page ?? 1);
+    viewerRawText.value = payload.text || "";
+    viewerTextHtml.value = highlightText(payload.text || "", citation.preview || "");
+  } catch (error) {
+    viewerError.value = error instanceof Error ? error.message : "Failed to load citation text.";
+  } finally {
+    viewerLoading.value = false;
   }
-  details.open = true;
-  await nextTick();
-  const target = document.getElementById(citationElementId(label));
-  target?.scrollIntoView({
-    block: "nearest",
-    behavior: "smooth",
-  });
+}
+
+async function focusCitation(label: string) {
+  activeCitationLabel.value = label;
+  const details = sourceDetailsRef.value;
+  if (details) {
+    details.open = true;
+    await nextTick();
+    const target = document.getElementById(citationElementId(label));
+    target?.scrollIntoView({
+      block: "nearest",
+      behavior: "smooth",
+    });
+  }
+
+  const citation = citationMap.value.get(label);
+  if (citation) {
+    await openCitationViewer(citation);
+  }
 }
 </script>
 
@@ -76,8 +170,11 @@ async function focusCitation(label: string) {
               v-for="citation in citationItems"
               :id="citationElementId(citation.label)"
               :key="`${message.id}-citation-${citation.label}`"
+              :class="['citation-row', activeCitationLabel === citation.label ? 'is-active' : '']"
             >
-              <span class="citation-label">[{{ citation.label }}]</span>
+              <button class="citation-link" @click.prevent="openCitationViewer(citation)">
+                [{{ citation.label }}]
+              </button>
               <span class="citation-source">{{ citation.source }}</span>
               <span v-if="citation.page !== null && citation.page !== undefined">p{{ citation.page }}</span>
               <span v-if="citation.score !== null && citation.score !== undefined">score {{ citation.score }}</span>
@@ -100,18 +197,55 @@ async function focusCitation(label: string) {
       </details>
     </div>
   </article>
+
+  <el-dialog
+    v-model="viewerVisible"
+    width="88%"
+    top="4vh"
+    append-to-body
+    :title="viewerSourcePath || 'Citation Viewer'"
+    class="citation-dialog"
+  >
+    <section class="viewer-shell">
+      <aside class="viewer-pane text-pane">
+        <header>
+          <strong>引用定位</strong>
+          <small v-if="viewerPage !== null">page {{ viewerPage }}</small>
+        </header>
+        <p v-if="viewerSnippet" class="snippet-pill">{{ viewerSnippet }}</p>
+        <el-skeleton v-if="viewerLoading" :rows="8" animated />
+        <p v-else-if="viewerError" class="viewer-error">{{ viewerError }}</p>
+        <div v-else class="citation-text" v-html="viewerTextHtml"></div>
+      </aside>
+
+      <aside class="viewer-pane file-pane">
+        <header>
+          <strong>原文件</strong>
+          <a :href="viewerFileUrl" target="_blank" rel="noreferrer">新窗口打开</a>
+        </header>
+        <iframe
+          v-if="viewerFileUrl"
+          class="file-frame"
+          :src="viewerFileUrl"
+          title="source file viewer"
+        ></iframe>
+      </aside>
+    </section>
+  </el-dialog>
 </template>
 
 <style scoped>
 .message-row {
-  max-width: 860px;
+  width: 100%;
+  max-width: 100%;
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr);
   gap: 12px;
 }
 
 .message-row.is-user {
-  margin-left: auto;
+  justify-self: end;
+  width: min(78%, 900px);
   grid-template-columns: minmax(0, 1fr) 40px;
 }
 
@@ -204,17 +338,29 @@ async function focusCitation(label: string) {
   gap: 5px;
 }
 
-.citation-index li {
+.citation-row {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   font-size: 0.82rem;
   color: #334155;
+  border-radius: 8px;
+  padding: 4px 6px;
 }
 
-.citation-label {
+.citation-row.is-active {
+  background: #d8f3ea;
+}
+
+.citation-link {
+  border: 1px solid #9fd9d1;
+  background: #ecfdf8;
+  border-radius: 999px;
   color: #0f766e;
   font-weight: 700;
+  padding: 2px 8px;
+  cursor: pointer;
 }
 
 .citation-source {
@@ -257,6 +403,76 @@ async function focusCitation(label: string) {
   line-height: 1.65;
 }
 
+.viewer-shell {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  height: 74vh;
+}
+
+.viewer-pane {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.viewer-pane > header {
+  padding: 10px 12px;
+  border-bottom: 1px solid #eef0f3;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.viewer-pane > header small {
+  color: #64748b;
+}
+
+.text-pane {
+  padding-bottom: 10px;
+}
+
+.snippet-pill {
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #e4f7ef;
+  border: 1px solid #9fd9d1;
+  color: #115e59;
+  font-size: 0.86rem;
+}
+
+.viewer-error {
+  margin: 12px;
+  color: #b42318;
+}
+
+.citation-text {
+  margin: 10px 12px;
+  overflow: auto;
+  line-height: 1.76;
+  color: #1f2937;
+  white-space: normal;
+}
+
+.citation-text :deep(mark.citation-highlight) {
+  background: #bff3dd;
+  color: #114b5f;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.file-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0 0 12px 12px;
+}
+
 @keyframes blink {
   0%,
   49% {
@@ -268,9 +484,15 @@ async function focusCitation(label: string) {
   }
 }
 
-@media (max-width: 720px) {
-  .message-row {
-    max-width: 100%;
+@media (max-width: 980px) {
+  .viewer-shell {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 72vh;
+  }
+
+  .file-pane {
+    min-height: 340px;
   }
 }
 </style>

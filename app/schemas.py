@@ -43,6 +43,7 @@ class CitationRef(BaseModel):
     page: int | None = None
     chunk_indices: list[int] = Field(default_factory=list)
     score: float | None = None
+    preview: str = ""
 
 
 class ChatResponse(BaseModel):
