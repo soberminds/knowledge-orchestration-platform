@@ -11,6 +11,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: "files-change", files: File[]): void;
   (event: "upload"): void;
+  (event: "open-document", path: string): void;
 }>();
 
 const fileInputRef = ref<HTMLInputElement | null>(null);
@@ -48,6 +49,10 @@ function formatBytes(bytes: number) {
     return `${(bytes / 1024).toFixed(1)} KB`;
   }
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function openDocument(path: string) {
+  emit("open-document", path);
 }
 </script>
 
@@ -97,12 +102,13 @@ function formatBytes(bytes: number) {
     <section class="list-card">
       <article v-for="doc in documents" :key="doc.path" class="list-item">
         <div class="item-main">
-          <strong>{{ doc.path }}</strong>
+          <button class="doc-link" type="button" @click="openDocument(doc.path)">{{ doc.path }}</button>
           <span>{{ formatDateTime(doc.modified_at) }}</span>
         </div>
         <div class="item-meta">
           <el-tag size="small" type="info">{{ doc.extension }}</el-tag>
           <small>{{ formatBytes(doc.size_bytes) }}</small>
+          <el-button size="small" text type="primary" @click="openDocument(doc.path)">View</el-button>
         </div>
       </article>
 
@@ -195,6 +201,21 @@ function formatBytes(bytes: number) {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.doc-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #0f172a;
+  font-size: 0.95rem;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.doc-link:hover {
+  color: #0f766e;
 }
 
 .item-main span,

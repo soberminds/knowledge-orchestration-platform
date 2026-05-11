@@ -130,7 +130,11 @@ class Settings:
         ".bat",
         ".ps1",
         ".pdf",
+        ".doc",
         ".docx",
+        ".xlsx",
+        ".xlsm",
+        ".xls",
     )
 
 

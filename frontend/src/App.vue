@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import ChatWorkspace from "./components/chat/ChatWorkspace.vue";
 import LeftSidebar from "./components/sidebar/LeftSidebar.vue";
+import UnifiedFileViewer from "./components/viewer/UnifiedFileViewer.vue";
 import DocumentsWorkspace from "./components/workspaces/DocumentsWorkspace.vue";
 import IndexWorkspace from "./components/workspaces/IndexWorkspace.vue";
 import SearchWorkspace from "./components/workspaces/SearchWorkspace.vue";
@@ -19,6 +20,10 @@ const navTabs: NavTab[] = [
 
 const activeTab = ref<WorkspaceTab>("chat");
 const topK = ref(4);
+const documentViewerVisible = ref(false);
+const documentViewerPath = ref("");
+const documentViewerError = ref("");
+const documentViewerRef = ref<InstanceType<typeof UnifiedFileViewer> | null>(null);
 
 const dashboard = useDashboard();
 const chatWorkspace = useChatWorkspace(topK);
@@ -53,6 +58,16 @@ function setTopK(value: number) {
     return;
   }
   topK.value = Math.max(1, Math.min(10, Math.round(value)));
+}
+
+function openDocumentFromWorkspace(path: string) {
+  documentViewerPath.value = path;
+  documentViewerError.value = "";
+  documentViewerVisible.value = true;
+}
+
+function onDocumentViewerOpened() {
+  documentViewerRef.value?.refreshViewer?.();
 }
 
 onMounted(async () => {
@@ -107,6 +122,7 @@ onMounted(async () => {
         :uploading="dashboard.uploading.value"
         @files-change="dashboard.setSelectedFiles"
         @upload="dashboard.uploadAndBuild"
+        @open-document="openDocumentFromWorkspace"
       />
 
       <IndexWorkspace
@@ -130,6 +146,45 @@ onMounted(async () => {
         @update:top-k="setTopK"
         @run-search="searchWorkspace.runSearch"
       />
+
+      <el-dialog
+        v-model="documentViewerVisible"
+        width="92%"
+        top="3vh"
+        append-to-body
+        :title="documentViewerPath || 'Document Viewer'"
+        @opened="onDocumentViewerOpened"
+      >
+        <section class="viewer-host">
+          <el-alert
+            v-if="documentViewerError"
+            :title="documentViewerError"
+            type="error"
+            show-icon
+            :closable="false"
+            class="viewer-error-banner"
+          />
+          <UnifiedFileViewer
+            ref="documentViewerRef"
+            :source-path="documentViewerPath"
+            :page="1"
+            :snippet="''"
+            :active="documentViewerVisible"
+            @error="documentViewerError = $event"
+          />
+        </section>
+      </el-dialog>
     </section>
   </main>
 </template>
+
+<style scoped>
+.viewer-host {
+  display: grid;
+  gap: 10px;
+}
+
+.viewer-error-banner {
+  margin-bottom: 2px;
+}
+</style>

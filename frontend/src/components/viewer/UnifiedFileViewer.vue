@@ -4,6 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { buildFileUrl, getFilePageText } from "../../api";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.js?url";
+import SpreadsheetGridViewer from "./SpreadsheetGridViewer.vue";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -27,7 +28,15 @@ const errorMessage = ref("");
 const textHtml = ref("");
 const pageCount = ref(1);
 const currentPage = ref(1);
-const zoomPercent = ref(110);
+const pageLabel = ref("Preview");
+const zoomPercent = ref(90);
+const contentFormat = ref<"plain" | "markdown" | "table">("plain");
+const tableHeaders = ref<string[]>([]);
+const tableRows = ref<string[][]>([]);
+const tableDataStartRow = ref(1);
+const tableTruncated = ref(false);
+const tableTotalRows = ref(0);
+const tableTotalColumns = ref(0);
 
 const fileUrl = computed(() => buildFileUrl(props.sourcePath));
 const extension = computed(() => {
@@ -39,8 +48,11 @@ const extension = computed(() => {
   return part.slice(dot + 1).toLowerCase();
 });
 const isPdf = computed(() => extension.value === "pdf");
-const isMarkdown = computed(() => extension.value === "md" || extension.value === "markdown");
+const isMarkdownByExtension = computed(() => extension.value === "md" || extension.value === "markdown");
+const shouldRenderMarkdown = computed(() => contentFormat.value === "markdown" || isMarkdownByExtension.value);
+const isTableFormat = computed(() => contentFormat.value === "table");
 const hasSnippet = computed(() => (props.snippet ?? "").trim().length > 0);
+const hasPagination = computed(() => pageCount.value > 1);
 
 const markdown = new MarkdownIt({
   html: false,
@@ -94,16 +106,15 @@ function buildSnippetTokens(snippet: string): string[] {
 
 function textMatchesSnippet(text: string, snippet: string): boolean {
   const left = normalizeForMatch(text);
-  if (!left) {
+  if (!left || left.length < 3) {
     return false;
   }
-  if (left.length < 3) {
-    return false;
-  }
+
   const tokens = buildSnippetTokens(snippet);
   if (!tokens.length) {
     return false;
   }
+
   if (left.length <= 4) {
     return tokens.some((token) => token.includes(left) && left.length >= 4);
   }
@@ -116,12 +127,7 @@ function markSnippetInText(raw: string, snippet: string): string {
     return safe.replace(/\n/g, "<br/>");
   }
 
-  const candidates = [
-    snippet.trim(),
-    snippet.trim().slice(0, 60),
-    snippet.trim().slice(0, 30),
-  ].filter((item) => item.length > 0);
-
+  const candidates = [snippet.trim(), snippet.trim().slice(0, 70), snippet.trim().slice(0, 36)].filter((item) => item.length > 0);
   for (const candidate of candidates) {
     const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const regex = new RegExp(escaped, "g");
@@ -140,15 +146,16 @@ function buildSnippetCandidates(snippet: string): string[] {
     return [];
   }
   const candidates = [value];
-  if (value.length > 80) {
-    candidates.push(value.slice(0, 64));
+  if (value.length > 100) {
+    candidates.push(value.slice(0, 72));
   }
-  if (value.length > 48) {
-    candidates.push(value.slice(0, 40));
+  if (value.length > 56) {
+    candidates.push(value.slice(0, 42));
   }
-  if (value.length > 24) {
-    candidates.push(value.slice(0, 22));
+  if (value.length > 28) {
+    candidates.push(value.slice(0, 24));
   }
+
   const deduped: string[] = [];
   const seen = new Set<string>();
   for (const item of candidates) {
@@ -212,24 +219,53 @@ function highlightMarkdownHtml(markdownHtml: string, snippet: string): string {
   return markdownHtml;
 }
 
+function resetTablePayload() {
+  tableHeaders.value = [];
+  tableRows.value = [];
+  tableDataStartRow.value = 1;
+  tableTruncated.value = false;
+  tableTotalRows.value = 0;
+  tableTotalColumns.value = 0;
+}
+
 async function renderTextDocument(localToken: number) {
-  const payload = await getFilePageText(props.sourcePath, props.page ?? 1);
+  const payload = await getFilePageText(props.sourcePath, currentPage.value);
   if (localToken !== runToken) {
     return;
   }
 
-  pageCount.value = 1;
-  currentPage.value = 1;
+  pageCount.value = Math.max(1, payload.page_count ?? 1);
+  currentPage.value = Math.min(Math.max(1, payload.page ?? currentPage.value), pageCount.value);
+  pageLabel.value = payload.page_label ?? (pageCount.value > 1 ? `Page ${currentPage.value}` : "Preview");
+  if (payload.format === "table") {
+    contentFormat.value = "table";
+  } else if (payload.format === "markdown") {
+    contentFormat.value = "markdown";
+  } else {
+    contentFormat.value = "plain";
+  }
+
+  if (contentFormat.value === "table") {
+    tableHeaders.value = payload.table_headers ?? [];
+    tableRows.value = payload.table_rows ?? [];
+    tableDataStartRow.value = Math.max(1, payload.table_data_start_row ?? 1);
+    tableTruncated.value = Boolean(payload.table_truncated);
+    tableTotalRows.value = Math.max(0, payload.table_total_rows ?? tableRows.value.length);
+    tableTotalColumns.value = Math.max(0, payload.table_total_columns ?? tableHeaders.value.length);
+    textHtml.value = "";
+    return;
+  }
+
+  resetTablePayload();
 
   const rawText = payload.text || "";
-  if (isMarkdown.value) {
+  if (shouldRenderMarkdown.value) {
     const markdownHtml = markdown.render(rawText);
     textHtml.value = highlightMarkdownHtml(markdownHtml, props.snippet ?? "");
     return;
   }
 
-  const marked = markSnippetInText(rawText, props.snippet ?? "");
-  textHtml.value = marked;
+  textHtml.value = markSnippetInText(rawText, props.snippet ?? "");
 }
 
 async function renderPdfPage(localToken: number) {
@@ -239,6 +275,7 @@ async function renderPdfPage(localToken: number) {
 
   const pageNumber = Math.min(Math.max(1, currentPage.value), pageCount.value);
   currentPage.value = pageNumber;
+  pageLabel.value = `Page ${pageNumber}`;
   const page = await pdfDoc.getPage(pageNumber);
   if (localToken !== runToken) {
     return;
@@ -349,8 +386,14 @@ async function loadDocument() {
   errorMessage.value = "";
   textHtml.value = "";
   pageCount.value = 1;
-  currentPage.value = Math.max(1, props.page ?? 1);
+  pageLabel.value = "Preview";
+  contentFormat.value = "plain";
+  resetTablePayload();
   pdfDoc = null;
+
+  if (currentPage.value <= 0) {
+    currentPage.value = 1;
+  }
 
   try {
     if (!isPdf.value) {
@@ -366,10 +409,12 @@ async function loadDocument() {
     if (localToken !== runToken) {
       return;
     }
+
     pageCount.value = Math.max(1, pdfDoc.numPages || 1);
-    currentPage.value = Math.min(Math.max(1, props.page ?? 1), pageCount.value);
+    currentPage.value = Math.min(Math.max(1, currentPage.value), pageCount.value);
     await nextTick();
     await renderPdfPage(localToken);
+
     if (afterOpenTimer !== null) {
       window.clearTimeout(afterOpenTimer);
     }
@@ -391,30 +436,38 @@ async function loadDocument() {
 }
 
 function goPrevPage() {
-  if (!isPdf.value || currentPage.value <= 1) {
+  if (currentPage.value <= 1) {
     return;
   }
   currentPage.value -= 1;
-  void renderPdfPage(runToken);
+  if (isPdf.value) {
+    void renderPdfPage(runToken);
+    return;
+  }
+  void loadDocument();
 }
 
 function goNextPage() {
-  if (!isPdf.value || currentPage.value >= pageCount.value) {
+  if (currentPage.value >= pageCount.value) {
     return;
   }
   currentPage.value += 1;
-  void renderPdfPage(runToken);
+  if (isPdf.value) {
+    void renderPdfPage(runToken);
+    return;
+  }
+  void loadDocument();
 }
 
 function zoomIn() {
-  zoomPercent.value = Math.min(220, zoomPercent.value + 10);
+  zoomPercent.value = Math.min(240, zoomPercent.value + 10);
   if (isPdf.value) {
     void renderPdfPage(runToken);
   }
 }
 
 function zoomOut() {
-  zoomPercent.value = Math.max(60, zoomPercent.value - 10);
+  zoomPercent.value = Math.max(50, zoomPercent.value - 10);
   if (isPdf.value) {
     void renderPdfPage(runToken);
   }
@@ -423,6 +476,9 @@ function zoomOut() {
 watch(
   () => [props.sourcePath, props.page, props.snippet],
   () => {
+    if (props.page && props.page > 0) {
+      currentPage.value = Math.floor(props.page);
+    }
     void loadDocument();
   },
   { immediate: true },
@@ -434,7 +490,9 @@ watch(
     if (!active) {
       return;
     }
-    requestSettledPdfRender();
+    if (isPdf.value) {
+      requestSettledPdfRender();
+    }
   },
 );
 
@@ -472,16 +530,18 @@ defineExpose({
     <header class="viewer-toolbar">
       <div class="file-name">{{ sourcePath }}</div>
       <div class="toolbar-actions">
-        <template v-if="isPdf">
+        <template v-if="hasPagination">
           <button type="button" class="tool-btn" @click="goPrevPage" :disabled="currentPage <= 1">-</button>
-          <span class="tool-meta">{{ currentPage }} / {{ pageCount }}</span>
+          <span class="tool-meta">{{ pageLabel }} {{ currentPage }} / {{ pageCount }}</span>
           <button type="button" class="tool-btn" @click="goNextPage" :disabled="currentPage >= pageCount">+</button>
           <span class="tool-sep"></span>
+        </template>
+        <template v-if="isPdf">
           <button type="button" class="tool-btn" @click="zoomOut">-</button>
           <span class="tool-meta">{{ zoomPercent }}%</span>
           <button type="button" class="tool-btn" @click="zoomIn">+</button>
         </template>
-        <a :href="fileUrl" target="_blank" rel="noreferrer" class="open-link">打开原文件</a>
+        <a :href="fileUrl" target="_blank" rel="noreferrer" class="open-link">Open Source File</a>
       </div>
     </header>
 
@@ -498,10 +558,20 @@ defineExpose({
 
       <template v-else>
         <section v-if="hasSnippet" class="text-hit-callout">
-          <small>引用定位片段</small>
+          <small>Citation Snippet</small>
           <p>{{ snippet }}</p>
         </section>
-        <article class="text-page markdown-body" v-html="textHtml"></article>
+        <SpreadsheetGridViewer
+          v-if="isTableFormat"
+          :headers="tableHeaders"
+          :rows="tableRows"
+          :data-start-row="tableDataStartRow"
+          :snippet="snippet"
+          :truncated="tableTruncated"
+          :total-rows="tableTotalRows"
+          :total-columns="tableTotalColumns"
+        />
+        <article v-else class="text-page markdown-body" v-html="textHtml"></article>
       </template>
     </div>
   </section>
@@ -645,13 +715,13 @@ defineExpose({
 }
 
 .pdf-text-layer :deep(.pdf-text-item.is-hit) {
-  background: rgba(52, 211, 153, 0.42);
-  box-shadow: 0 0 0 1px rgba(16, 163, 127, 0.32);
+  background: rgba(52, 211, 153, 0.46);
+  box-shadow: 0 0 0 1px rgba(16, 163, 127, 0.34);
   border-radius: 3px;
 }
 
 .text-page {
-  max-width: 860px;
+  max-width: 960px;
   margin: 0 auto;
   padding: 16px 20px;
   border: 1px solid #dde6f2;
@@ -685,6 +755,26 @@ defineExpose({
 .markdown-body :deep(ol) {
   margin: 0.45rem 0;
   padding-left: 1.4rem;
+}
+
+.markdown-body :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.8rem 0;
+  table-layout: auto;
+}
+
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  border: 1px solid #dbe3ef;
+  padding: 0.42rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-body :deep(th) {
+  background: #f8fafc;
+  font-weight: 700;
 }
 
 .markdown-body :deep(blockquote) {

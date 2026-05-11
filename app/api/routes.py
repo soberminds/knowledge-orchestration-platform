@@ -25,7 +25,7 @@ from app.schemas import (
     SearchResponse,
     SourceHit,
 )
-from app.services.files import TEXT_FILE_EXTENSIONS
+from app.services.files import read_file_page_text
 from app.services.knowledge_base import KnowledgeBaseService, SearchHit
 
 
@@ -120,37 +120,15 @@ async def open_file(path: str) -> FileResponse:
 @router.get("/file/page-text")
 async def file_page_text(path: str, page: int | None = None) -> dict:
     file_path = _resolve_file_path(path)
-    suffix = file_path.suffix.lower()
-
-    if suffix == ".pdf":
-        try:
-            from pypdf import PdfReader
-        except Exception as exc:  # pragma: no cover
-            raise HTTPException(status_code=500, detail=f"PDF parser unavailable: {exc}") from exc
-
-        reader = PdfReader(str(file_path))
-        if page is None:
-            page = 1
-        if page < 1 or page > len(reader.pages):
-            raise HTTPException(status_code=400, detail=f"page out of range: 1..{len(reader.pages)}")
-        text = (reader.pages[page - 1].extract_text() or "").strip()
-        return {"path": path, "page": page, "text": text}
-
-    if suffix in TEXT_FILE_EXTENSIONS:
-        text = file_path.read_text(encoding="utf-8", errors="ignore")
-        return {"path": path, "page": 1, "text": text}
-
-    if suffix == ".docx":
-        try:
-            from docx import Document as DocxDocument
-        except Exception as exc:  # pragma: no cover
-            raise HTTPException(status_code=500, detail=f"DOCX parser unavailable: {exc}") from exc
-
-        doc = DocxDocument(str(file_path))
-        paragraphs = [paragraph.text.strip() for paragraph in doc.paragraphs if paragraph.text.strip()]
-        return {"path": path, "page": 1, "text": "\n".join(paragraphs)}
-
-    raise HTTPException(status_code=400, detail=f"Unsupported extension: {suffix}")
+    try:
+        payload = read_file_page_text(file_path, page=page)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Failed to read file: {exc}") from exc
+    return {"path": path, **payload}
 
 
 @router.post("/ingest", response_model=IngestResponse)

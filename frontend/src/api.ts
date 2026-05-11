@@ -54,7 +54,17 @@ export interface HealthResponse {
 export interface FilePageTextResponse {
   path: string;
   page: number;
+  page_count?: number;
+  page_label?: string;
+  format?: "plain" | "markdown" | "table";
   text: string;
+  table_headers?: string[];
+  table_rows?: string[][];
+  table_data_start_row?: number;
+  table_header_row_number?: number;
+  table_total_rows?: number;
+  table_total_columns?: number;
+  table_truncated?: boolean;
 }
 
 interface ChatStreamDeltaEvent {
