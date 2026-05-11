@@ -1,18 +1,13 @@
-"""HTTP API 路由。
-
-这里把知识库能力暴露给前端页面：
-- 健康检查
-- 查看文档
-- 上传文档
-- 重建索引
-- 搜索
-- 聊天问答
-"""
+"""HTTP API routes."""
 
 from __future__ import annotations
 
+import json
+from typing import Iterator
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from starlette.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.dependencies import get_knowledge_base_service
 from app.schemas import (
@@ -32,7 +27,6 @@ router = APIRouter(prefix="/api", tags=["rag"])
 
 
 def _to_source_hit(hit: SearchHit) -> SourceHit:
-    """把内部检索结构转成接口返回结构。"""
     return SourceHit(
         source=hit.source,
         chunk_index=hit.chunk_index,
@@ -42,9 +36,12 @@ def _to_source_hit(hit: SearchHit) -> SourceHit:
     )
 
 
+def _sse_payload(data: dict) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> HealthResponse:
-    """健康检查接口，前端首页会显示它。"""
     return HealthResponse(
         status="ok",
         collection_name=service.settings.collection_name,
@@ -54,8 +51,7 @@ async def health(service: KnowledgeBaseService = Depends(get_knowledge_base_serv
 
 @router.get("/documents", response_model=list[DocumentInfo])
 async def list_documents(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> list[DocumentInfo]:
-    """列出当前知识库可见的所有文档。"""
-    infos = []
+    infos: list[DocumentInfo] = []
     for item in service.source_file_infos():
         infos.append(
             DocumentInfo(
@@ -70,7 +66,6 @@ async def list_documents(service: KnowledgeBaseService = Depends(get_knowledge_b
 
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> IngestResponse:
-    """把 data/docs 和 data/uploads 里的文件全部重建成新索引。"""
     try:
         stats = await run_in_threadpool(service.rebuild_index)
     except Exception as exc:
@@ -87,7 +82,6 @@ async def upload_files(
     files: list[UploadFile] = File(...),
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
 ) -> IngestResponse:
-    """接收前端上传的文件，保存后自动重建索引。"""
     if not files:
         raise HTTPException(status_code=400, detail="Please upload at least one file.")
 
@@ -98,6 +92,7 @@ async def upload_files(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     return IngestResponse(
         documents_loaded=stats.documents_loaded,
         chunks_indexed=stats.chunks_indexed,
@@ -110,7 +105,6 @@ async def search(
     request: SearchRequest,
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
 ) -> SearchResponse:
-    """只做检索，不调用大模型。"""
     try:
         hits = await run_in_threadpool(service.search, request.query, request.top_k)
     except Exception as exc:
@@ -126,7 +120,6 @@ async def chat(
     request: ChatRequest,
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
 ) -> ChatResponse:
-    """先检索，再把命中的片段交给 DeepSeek 生成答案。"""
     try:
         result = await run_in_threadpool(service.answer, request.question, request.history, request.top_k)
     except Exception as exc:
@@ -137,3 +130,34 @@ async def chat(
         sources=[_to_source_hit(hit) for hit in result["hits"]],
     )
 
+
+@router.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+) -> StreamingResponse:
+    def event_stream() -> Iterator[str]:
+        try:
+            for event in service.stream_answer(request.question, request.history, request.top_k):
+                if event.get("type") == "done":
+                    payload = {
+                        "type": "done",
+                        "answer": event.get("answer", ""),
+                        "rewritten_question": event.get("rewritten_question", ""),
+                        "sources": [_to_source_hit(hit).model_dump() for hit in event.get("hits", [])],
+                    }
+                    yield _sse_payload(payload)
+                    continue
+                yield _sse_payload(event)
+        except Exception as exc:
+            yield _sse_payload({"type": "error", "error": str(exc)})
+
+    return StreamingResponse(
+        iterate_in_threadpool(event_stream()),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

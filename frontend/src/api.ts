@@ -41,6 +41,31 @@ export interface HealthResponse {
   indexed_chunks: number;
 }
 
+interface ChatStreamDeltaEvent {
+  type: "delta";
+  delta: string;
+}
+
+interface ChatStreamDoneEvent {
+  type: "done";
+  answer: string;
+  rewritten_question: string;
+  sources: SourceHit[];
+}
+
+interface ChatStreamErrorEvent {
+  type: "error";
+  error: string;
+}
+
+type ChatStreamEvent = ChatStreamDeltaEvent | ChatStreamDoneEvent | ChatStreamErrorEvent;
+
+export interface ChatStreamHandlers {
+  onDelta?: (delta: string) => void | Promise<void>;
+  onDone?: (payload: ChatStreamDoneEvent) => void | Promise<void>;
+  onError?: (message: string) => void | Promise<void>;
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -63,6 +88,42 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   return payload as T;
 }
 
+function parseSseChunks(rawEvent: string): ChatStreamEvent[] {
+  const lines = rawEvent.split(/\r?\n/);
+  const dataLines = lines
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart());
+
+  if (!dataLines.length) {
+    return [];
+  }
+
+  const payload = dataLines.join("\n").trim();
+  if (!payload) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(payload) as ChatStreamEvent;
+    return [parsed];
+  } catch {
+    return [];
+  }
+}
+
+function findSseBoundary(buffer: string): { index: number; length: number } | null {
+  const crlfBoundary = buffer.indexOf("\r\n\r\n");
+  const lfBoundary = buffer.indexOf("\n\n");
+
+  if (crlfBoundary === -1 && lfBoundary === -1) {
+    return null;
+  }
+  if (crlfBoundary !== -1 && (lfBoundary === -1 || crlfBoundary < lfBoundary)) {
+    return { index: crlfBoundary, length: 4 };
+  }
+  return { index: lfBoundary, length: 2 };
+}
+
 export async function getHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/api/health");
 }
@@ -82,6 +143,87 @@ export async function chat(payload: { question: string; history: HistoryItem[]; 
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export async function chatStream(
+  payload: { question: string; history: HistoryItem[]; top_k?: number },
+  handlers: ChatStreamHandlers = {},
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/chat/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let message = response.statusText;
+    if (text) {
+      try {
+        const payloadObj = JSON.parse(text);
+        message = payloadObj?.detail ?? payloadObj?.message ?? message;
+      } catch {
+        message = text;
+      }
+    }
+    throw new Error(message || "Stream request failed");
+  }
+
+  if (!response.body) {
+    throw new Error("Streaming is not supported by the current browser.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let receivedDone = false;
+
+  async function handleEvents(events: ChatStreamEvent[]) {
+    for (const event of events) {
+      if (event.type === "delta") {
+        await handlers.onDelta?.(event.delta);
+        continue;
+      }
+      if (event.type === "done") {
+        receivedDone = true;
+        await handlers.onDone?.(event);
+        continue;
+      }
+      await handlers.onError?.(event.error);
+      throw new Error(event.error);
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary = findSseBoundary(buffer);
+    while (boundary) {
+      const rawEvent = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary.length);
+
+      const events = parseSseChunks(rawEvent);
+      await handleEvents(events);
+      boundary = findSseBoundary(buffer);
+    }
+  }
+
+  // Parse any trailing complete payload without separator (defensive).
+  const trailingEvents = parseSseChunks(buffer);
+  if (trailingEvents.length) {
+    await handleEvents(trailingEvents);
+  }
+
+  if (!receivedDone) {
+    throw new Error("Stream ended unexpectedly without done event.");
+  }
 }
 
 export async function search(payload: { query: string; top_k?: number }): Promise<SearchResponse> {
@@ -110,4 +252,3 @@ export async function uploadDocuments(files: FileList | File[]): Promise<IngestR
 
   return payload as IngestResponse;
 }
-
