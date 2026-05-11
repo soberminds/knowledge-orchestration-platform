@@ -17,8 +17,143 @@ const loading = ref(false);
 const errorMessage = ref("");
 const containerRef = ref<HTMLElement | null>(null);
 const runToken = ref(0);
+const zoomPercent = ref(100);
+const pageCount = ref(1);
+const currentPage = ref(1);
+const pageElements = ref<HTMLElement[]>([]);
+let scrollTicking = false;
 
 const fileUrl = computed(() => buildFileUrl(props.sourcePath));
+const canPrevPage = computed(() => currentPage.value > 1);
+const canNextPage = computed(() => currentPage.value < pageCount.value);
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getDocxWrapper(): HTMLElement | null {
+  return containerRef.value?.querySelector(".docx-wrapper") as HTMLElement | null;
+}
+
+function collectPages() {
+  const container = containerRef.value;
+  if (!container) {
+    pageElements.value = [];
+    pageCount.value = 1;
+    currentPage.value = 1;
+    return;
+  }
+
+  const pages = Array.from(container.querySelectorAll("section.docx")) as HTMLElement[];
+  pageElements.value = pages;
+  pageCount.value = Math.max(1, pages.length);
+  currentPage.value = clamp(currentPage.value, 1, pageCount.value);
+}
+
+function applyZoom() {
+  const wrapper = getDocxWrapper();
+  if (!wrapper) {
+    return;
+  }
+  wrapper.style.setProperty("--docx-zoom", String(zoomPercent.value / 100));
+}
+
+function applyTableColumnFixes(root: HTMLElement) {
+  const tables = Array.from(root.querySelectorAll("section.docx table")) as HTMLElement[];
+  for (const table of tables) {
+    table.classList.remove("docx-table-first-col-tight");
+    const firstCell = table.querySelector("tr > th:first-child, tr > td:first-child") as HTMLElement | null;
+    if (!firstCell) {
+      continue;
+    }
+    const tableWidth = table.getBoundingClientRect().width;
+    const firstWidth = firstCell.getBoundingClientRect().width;
+    if (!tableWidth || !firstWidth) {
+      continue;
+    }
+    const ratio = firstWidth / tableWidth;
+    if (ratio < 0.1) {
+      table.classList.add("docx-table-first-col-tight");
+    }
+  }
+}
+
+function updateCurrentPageFromScroll() {
+  const container = containerRef.value;
+  if (!container || !pageElements.value.length) {
+    currentPage.value = 1;
+    return;
+  }
+
+  const probe = container.scrollTop + container.clientHeight * 0.35;
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < pageElements.value.length; index += 1) {
+    const pageTop = pageElements.value[index].offsetTop;
+    const distance = Math.abs(pageTop - probe);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  }
+  currentPage.value = bestIndex + 1;
+}
+
+function scrollToPage(targetPage: number) {
+  const container = containerRef.value;
+  const target = pageElements.value[targetPage - 1];
+  if (!container || !target) {
+    return;
+  }
+  container.scrollTo({
+    top: Math.max(0, target.offsetTop - 14),
+    behavior: "smooth",
+  });
+}
+
+function goPrevPage() {
+  if (!canPrevPage.value) {
+    return;
+  }
+  const targetPage = currentPage.value - 1;
+  currentPage.value = targetPage;
+  scrollToPage(targetPage);
+}
+
+function goNextPage() {
+  if (!canNextPage.value) {
+    return;
+  }
+  const targetPage = currentPage.value + 1;
+  currentPage.value = targetPage;
+  scrollToPage(targetPage);
+}
+
+function zoomIn() {
+  zoomPercent.value = clamp(zoomPercent.value + 10, 50, 220);
+  applyZoom();
+}
+
+function zoomOut() {
+  zoomPercent.value = clamp(zoomPercent.value - 10, 50, 220);
+  applyZoom();
+}
+
+function resetZoom() {
+  zoomPercent.value = 100;
+  applyZoom();
+}
+
+function handleCanvasScroll() {
+  if (scrollTicking) {
+    return;
+  }
+  scrollTicking = true;
+  window.requestAnimationFrame(() => {
+    scrollTicking = false;
+    updateCurrentPageFromScroll();
+  });
+}
 
 function normalizeForMatch(raw: string): string {
   return raw.replace(/[\s\u3000]/g, "").replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, "").toLowerCase();
@@ -191,6 +326,7 @@ async function renderDocxDocument() {
       inWrapper: true,
       breakPages: true,
       ignoreLastRenderedPageBreak: false,
+      experimental: true,
       ignoreWidth: false,
       ignoreHeight: false,
       ignoreFonts: false,
@@ -206,6 +342,10 @@ async function renderDocxDocument() {
     }
 
     await nextTick();
+    collectPages();
+    applyZoom();
+    applyTableColumnFixes(container);
+    updateCurrentPageFromScroll();
     highlightSnippetInDocx(container, props.snippet ?? "");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to render DOCX preview";
@@ -261,6 +401,13 @@ watch(
   },
 );
 
+watch(
+  () => zoomPercent.value,
+  () => {
+    applyZoom();
+  },
+);
+
 onMounted(() => {
   void renderDocxDocument();
 });
@@ -272,8 +419,27 @@ defineExpose({
 
 <template>
   <section class="docx-viewer">
+    <header class="docx-toolbar">
+      <div class="toolbar-left">
+        <button type="button" class="tool-btn" :disabled="!canPrevPage" @click="goPrevPage">-</button>
+        <span class="tool-meta">{{ currentPage }} / {{ pageCount }}</span>
+        <button type="button" class="tool-btn" :disabled="!canNextPage" @click="goNextPage">+</button>
+      </div>
+
+      <div class="toolbar-middle">
+        <button type="button" class="tool-btn" @click="zoomOut">-</button>
+        <span class="tool-meta">{{ zoomPercent }}%</span>
+        <button type="button" class="tool-btn" @click="zoomIn">+</button>
+        <button type="button" class="tool-btn reset-btn" @click="resetZoom">100%</button>
+      </div>
+
+      <div class="toolbar-right">
+        <a :href="fileUrl" target="_blank" rel="noreferrer" class="download-link">下载</a>
+      </div>
+    </header>
+
     <p v-if="errorMessage" class="viewer-error">{{ errorMessage }}</p>
-    <div ref="containerRef" class="docx-canvas"></div>
+    <div ref="containerRef" class="docx-canvas" @scroll="handleCanvasScroll"></div>
     <div v-if="loading" class="docx-loading-mask">
       <el-skeleton :rows="10" animated />
     </div>
@@ -283,7 +449,71 @@ defineExpose({
 <style scoped>
 .docx-viewer {
   position: relative;
-  min-height: 360px;
+  min-height: 420px;
+}
+
+.docx-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #d9e2ef;
+  border-radius: 12px;
+  background: #f8fafc;
+  margin-bottom: 10px;
+}
+
+.toolbar-left,
+.toolbar-middle,
+.toolbar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tool-btn {
+  min-width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid #cfd8e3;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+}
+
+.tool-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.reset-btn {
+  min-width: 48px;
+  font-size: 0.75rem;
+}
+
+.tool-meta {
+  color: #334155;
+  font-size: 0.82rem;
+  min-width: 62px;
+  text-align: center;
+}
+
+.download-link {
+  color: #0f766e;
+  font-size: 0.82rem;
+  text-decoration: none;
+  border: 1px solid #9fd9d1;
+  background: #ecfdf8;
+  border-radius: 8px;
+  min-height: 28px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.download-link:hover {
+  text-decoration: underline;
 }
 
 .viewer-error {
@@ -295,7 +525,7 @@ defineExpose({
   min-height: 360px;
   border: 1px solid #d9e2ef;
   border-radius: 14px;
-  background: #e7eaef;
+  background: linear-gradient(180deg, #f1f3f5, #eceff3);
   overflow: auto;
 }
 
@@ -312,14 +542,50 @@ defineExpose({
 }
 
 .docx-canvas :deep(.docx-wrapper) {
-  padding: 24px 0;
+  padding: 24px 0 52px;
+  zoom: var(--docx-zoom, 1);
+  min-height: 100%;
 }
 
 .docx-canvas :deep(.docx-wrapper > section.docx) {
-  margin: 0 auto 24px;
+  margin: 0 auto 26px;
   box-shadow: 0 14px 28px rgba(15, 23, 42, 0.16);
   border: 1px solid #dbe3ef;
   background: #fff;
+}
+
+.docx-canvas :deep(section.docx p),
+.docx-canvas :deep(section.docx span),
+.docx-canvas :deep(section.docx a),
+.docx-canvas :deep(section.docx td),
+.docx-canvas :deep(section.docx th) {
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+  white-space: normal;
+  writing-mode: horizontal-tb !important;
+  text-orientation: mixed !important;
+}
+
+.docx-canvas :deep(section.docx a) {
+  display: inline !important;
+  white-space: nowrap;
+}
+
+.docx-canvas :deep(section.docx table) {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.docx-canvas :deep(section.docx table.docx-table-first-col-tight tr > th:first-child),
+.docx-canvas :deep(section.docx table.docx-table-first-col-tight tr > td:first-child) {
+  width: 92px !important;
+  min-width: 92px !important;
+  max-width: 92px !important;
+}
+
+.docx-canvas :deep(section.docx table.docx-table-first-col-tight tr > td:first-child p),
+.docx-canvas :deep(section.docx table.docx-table-first-col-tight tr > th:first-child p) {
+  white-space: normal !important;
 }
 
 .docx-canvas :deep(mark.docx-hit) {
@@ -327,5 +593,16 @@ defineExpose({
   box-shadow: 0 0 0 1px rgba(16, 163, 127, 0.2);
   border-radius: 3px;
   padding: 0 1px;
+}
+
+@media (max-width: 860px) {
+  .docx-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .toolbar-right {
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
 </style>

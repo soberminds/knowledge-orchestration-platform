@@ -67,6 +67,7 @@ class Settings:
     docs_dir: Path = ROOT_DIR / "data" / "docs"
     uploads_dir: Path = ROOT_DIR / "data" / "uploads"
     chroma_dir: Path = ROOT_DIR / "data" / "chroma_db"
+    preview_pdf_dir: Path = ROOT_DIR / "data" / "preview_pdf"
     collection_name: str = os.getenv("CHROMA_COLLECTION", "rga_knowledge_base")
 
     # 这里不要写死真实 key，统一从环境变量读取。
@@ -85,6 +86,8 @@ class Settings:
     temperature: float = _env_float("TEMPERATURE", 0.2)
     max_tokens: int = _env_int("MAX_TOKENS", 1024)
     max_upload_mb: int = _env_int("MAX_UPLOAD_MB", 20)
+    preview_convert_timeout_sec: int = _env_int("PREVIEW_CONVERT_TIMEOUT_SEC", 120)
+    soffice_bin: str = os.getenv("SOFFICE_BIN", "").strip()
 
     cors_origins: tuple[str, ...] = tuple(
         origin.strip()

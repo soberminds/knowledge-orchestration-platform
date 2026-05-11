@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import MarkdownIt from "markdown-it";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { buildFileUrl, getFilePageText } from "../../api";
+import { buildFileUrl, buildPreviewPdfUrl, getFilePageText } from "../../api";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.js?url";
 import DocxPageViewer from "./DocxPageViewer.vue";
@@ -31,7 +31,7 @@ const textHtml = ref("");
 const pageCount = ref(1);
 const currentPage = ref(1);
 const pageLabel = ref("Preview");
-const zoomPercent = ref(60);
+const zoomPercent = ref(90);
 const contentFormat = ref<"plain" | "markdown" | "table">("plain");
 const tableHeaders = ref<string[]>([]);
 const tableRows = ref<string[][]>([]);
@@ -39,8 +39,11 @@ const tableDataStartRow = ref(1);
 const tableTruncated = ref(false);
 const tableTotalRows = ref(0);
 const tableTotalColumns = ref(0);
+const officePdfMode = ref(false);
+const officePdfError = ref("");
 
 const fileUrl = computed(() => buildFileUrl(props.sourcePath));
+const previewPdfUrl = computed(() => buildPreviewPdfUrl(props.sourcePath));
 const extension = computed(() => {
   const part = props.sourcePath.split("?")[0];
   const dot = part.lastIndexOf(".");
@@ -52,9 +55,11 @@ const extension = computed(() => {
 const isPdf = computed(() => extension.value === "pdf");
 const isDocx = computed(() => extension.value === "docx");
 const isLegacyDoc = computed(() => extension.value === "doc");
+const isOfficeDoc = computed(() => isDocx.value || isLegacyDoc.value);
 const isMarkdownByExtension = computed(() => extension.value === "md" || extension.value === "markdown");
 const shouldRenderMarkdown = computed(() => contentFormat.value === "markdown" || isMarkdownByExtension.value);
 const isTableFormat = computed(() => contentFormat.value === "table");
+const isPdfLike = computed(() => isPdf.value || officePdfMode.value);
 const hasSnippet = computed(() => (props.snippet ?? "").trim().length > 0);
 const hasPagination = computed(() => pageCount.value > 1);
 
@@ -399,8 +404,34 @@ async function renderPdfPage(localToken: number) {
   firstHit?.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
+async function loadPdfDocument(localToken: number, url: string) {
+  const task = pdfjsLib.getDocument({
+    url,
+    useWorkerFetch: true,
+  });
+  pdfDoc = await task.promise;
+  if (localToken !== runToken) {
+    return;
+  }
+
+  pageCount.value = Math.max(1, pdfDoc.numPages || 1);
+  currentPage.value = Math.min(Math.max(1, currentPage.value), pageCount.value);
+  await nextTick();
+  await renderPdfPage(localToken);
+
+  if (afterOpenTimer !== null) {
+    window.clearTimeout(afterOpenTimer);
+  }
+  // First render can happen before dialog layout settles; rerender once.
+  afterOpenTimer = window.setTimeout(() => {
+    if (localToken === runToken) {
+      requestSettledPdfRender();
+    }
+  }, 90);
+}
+
 function requestSettledPdfRender() {
-  if (!isPdf.value) {
+  if (!isPdfLike.value) {
     return;
   }
   const token = runToken;
@@ -414,7 +445,7 @@ function requestSettledPdfRender() {
 }
 
 function schedulePdfRerender() {
-  if (!isPdf.value || !pdfDoc) {
+  if (!isPdfLike.value || !pdfDoc) {
     return;
   }
   if (resizeTimer !== null) {
@@ -435,6 +466,8 @@ async function loadDocument() {
   pageLabel.value = "Preview";
   contentFormat.value = "plain";
   resetTablePayload();
+  officePdfMode.value = false;
+  officePdfError.value = "";
   await cancelPdfRenderTask();
   pdfDoc = null;
 
@@ -443,9 +476,22 @@ async function loadDocument() {
   }
 
   try {
-    if (isDocx.value) {
-      // DOCX uses dedicated page-like renderer component.
-      return;
+    if (isOfficeDoc.value) {
+      try {
+        await loadPdfDocument(localToken, previewPdfUrl.value);
+        officePdfMode.value = true;
+        return;
+      } catch (previewError) {
+        officePdfMode.value = false;
+        officePdfError.value = previewError instanceof Error ? previewError.message : "Office PDF preview unavailable";
+        if (isDocx.value) {
+          // Fallback to docx HTML viewer.
+          return;
+        }
+        // Legacy .doc fallback to extracted text preview.
+        await renderTextDocument(localToken);
+        return;
+      }
     }
 
     if (!isPdf.value) {
@@ -453,29 +499,7 @@ async function loadDocument() {
       return;
     }
 
-    const task = pdfjsLib.getDocument({
-      url: fileUrl.value,
-      useWorkerFetch: true,
-    });
-    pdfDoc = await task.promise;
-    if (localToken !== runToken) {
-      return;
-    }
-
-    pageCount.value = Math.max(1, pdfDoc.numPages || 1);
-    currentPage.value = Math.min(Math.max(1, currentPage.value), pageCount.value);
-    await nextTick();
-    await renderPdfPage(localToken);
-
-    if (afterOpenTimer !== null) {
-      window.clearTimeout(afterOpenTimer);
-    }
-    // First render can happen before dialog layout settles; rerender once.
-    afterOpenTimer = window.setTimeout(() => {
-      if (localToken === runToken) {
-        requestSettledPdfRender();
-      }
-    }, 90);
+    await loadPdfDocument(localToken, fileUrl.value);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load file preview";
     errorMessage.value = message;
@@ -492,7 +516,7 @@ function goPrevPage() {
     return;
   }
   currentPage.value -= 1;
-  if (isPdf.value) {
+  if (isPdfLike.value) {
     void renderPdfPage(runToken);
     return;
   }
@@ -504,7 +528,7 @@ function goNextPage() {
     return;
   }
   currentPage.value += 1;
-  if (isPdf.value) {
+  if (isPdfLike.value) {
     void renderPdfPage(runToken);
     return;
   }
@@ -513,14 +537,14 @@ function goNextPage() {
 
 function zoomIn() {
   zoomPercent.value = Math.min(240, zoomPercent.value + 10);
-  if (isPdf.value) {
+  if (isPdfLike.value) {
     void renderPdfPage(runToken);
   }
 }
 
 function zoomOut() {
   zoomPercent.value = Math.max(50, zoomPercent.value - 10);
-  if (isPdf.value) {
+  if (isPdfLike.value) {
     void renderPdfPage(runToken);
   }
 }
@@ -542,11 +566,11 @@ watch(
     if (!active) {
       return;
     }
-    if (isDocx.value) {
+    if (isDocx.value && !officePdfMode.value) {
       docxViewerRef.value?.refreshViewer?.();
       return;
     }
-    if (isPdf.value) {
+    if (isPdfLike.value) {
       requestSettledPdfRender();
     }
   },
@@ -579,7 +603,7 @@ onBeforeUnmount(() => {
 
 defineExpose({
   refreshViewer: () => {
-    if (isDocx.value) {
+    if (isDocx.value && !officePdfMode.value) {
       docxViewerRef.value?.refreshViewer?.();
       return;
     }
@@ -612,7 +636,7 @@ defineExpose({
       <el-skeleton v-if="loading" :rows="8" animated />
       <p v-else-if="errorMessage" class="viewer-error">{{ errorMessage }}</p>
 
-      <template v-else-if="isPdf">
+      <template v-else-if="isPdfLike">
         <div class="pdf-page">
           <canvas ref="canvasRef" class="pdf-canvas"></canvas>
           <div ref="textLayerRef" class="pdf-text-layer"></div>
@@ -624,22 +648,41 @@ defineExpose({
           <small>Citation Snippet</small>
           <p>{{ snippet }}</p>
         </section>
-        <DocxPageViewer
-          v-if="isDocx"
-          ref="docxViewerRef"
-          :source-path="sourcePath"
-          :snippet="snippet"
-          :active="active"
-          @error="emit('error', $event)"
-        />
-        <el-alert
-          v-else-if="isLegacyDoc"
-          class="legacy-doc-note"
-          type="warning"
-          show-icon
-          :closable="false"
-          title="Legacy .doc has limited in-browser fidelity. Convert to .docx for Word-like preview."
-        />
+        <template v-if="isDocx && !officePdfMode">
+          <el-alert
+            v-if="officePdfError"
+            class="legacy-doc-note"
+            type="warning"
+            show-icon
+            :closable="false"
+            :title="`High-fidelity PDF preview unavailable, fallback to DOCX HTML mode: ${officePdfError}`"
+          />
+          <DocxPageViewer
+            ref="docxViewerRef"
+            :source-path="sourcePath"
+            :snippet="snippet"
+            :active="active"
+            @error="emit('error', $event)"
+          />
+        </template>
+        <template v-else-if="isLegacyDoc && !officePdfMode">
+          <el-alert
+            class="legacy-doc-note"
+            type="warning"
+            show-icon
+            :closable="false"
+            title="Legacy .doc preview fell back to text mode. Install LibreOffice or Word for high-fidelity PDF preview."
+          />
+          <el-alert
+            v-if="officePdfError"
+            class="legacy-doc-note"
+            type="error"
+            show-icon
+            :closable="false"
+            :title="officePdfError"
+          />
+          <article class="text-page markdown-body" v-html="textHtml"></article>
+        </template>
         <SpreadsheetGridViewer
           v-else-if="isTableFormat"
           :headers="tableHeaders"

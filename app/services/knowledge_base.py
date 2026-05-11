@@ -147,6 +147,7 @@ class KnowledgeBaseService:
         self.settings.docs_dir.mkdir(parents=True, exist_ok=True)
         self.settings.uploads_dir.mkdir(parents=True, exist_ok=True)
         self.settings.chroma_dir.mkdir(parents=True, exist_ok=True)
+        self.settings.preview_pdf_dir.mkdir(parents=True, exist_ok=True)
 
     def reset_collection(self) -> None:
         try:

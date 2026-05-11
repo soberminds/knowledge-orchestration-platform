@@ -284,6 +284,10 @@ export function buildFileUrl(path: string): string {
   return `${API_BASE}/api/file?path=${encodeURIComponent(path)}`;
 }
 
+export function buildPreviewPdfUrl(path: string): string {
+  return `${API_BASE}/api/file/preview-pdf?path=${encodeURIComponent(path)}`;
+}
+
 export async function getFilePageText(path: string, page?: number): Promise<FilePageTextResponse> {
   const params = new URLSearchParams();
   params.set("path", path);

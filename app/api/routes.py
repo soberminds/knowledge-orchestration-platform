@@ -27,6 +27,7 @@ from app.schemas import (
 )
 from app.services.files import read_file_page_text
 from app.services.knowledge_base import KnowledgeBaseService, SearchHit
+from app.services.preview_pdf import get_preview_pdf_path
 
 
 router = APIRouter(prefix="/api", tags=["rag"])
@@ -114,6 +115,25 @@ async def open_file(path: str) -> FileResponse:
     return FileResponse(
         path=str(file_path),
         media_type=media_type,
+    )
+
+
+@router.get("/file/preview-pdf")
+async def open_file_preview_pdf(path: str) -> FileResponse:
+    source_path = _resolve_file_path(path)
+    try:
+        preview_path = await run_in_threadpool(get_preview_pdf_path, source_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Preview conversion failed: {exc}") from exc
+
+    return FileResponse(
+        path=str(preview_path),
+        media_type="application/pdf",
+        filename=f"{source_path.stem}.pdf",
     )
 
 
