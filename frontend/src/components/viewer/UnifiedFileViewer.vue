@@ -4,6 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { buildFileUrl, getFilePageText } from "../../api";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.js?url";
+import DocxPageViewer from "./DocxPageViewer.vue";
 import SpreadsheetGridViewer from "./SpreadsheetGridViewer.vue";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -22,6 +23,7 @@ const emit = defineEmits<{
 const containerRef = ref<HTMLElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const textLayerRef = ref<HTMLElement | null>(null);
+const docxViewerRef = ref<InstanceType<typeof DocxPageViewer> | null>(null);
 
 const loading = ref(false);
 const errorMessage = ref("");
@@ -29,7 +31,7 @@ const textHtml = ref("");
 const pageCount = ref(1);
 const currentPage = ref(1);
 const pageLabel = ref("Preview");
-const zoomPercent = ref(90);
+const zoomPercent = ref(60);
 const contentFormat = ref<"plain" | "markdown" | "table">("plain");
 const tableHeaders = ref<string[]>([]);
 const tableRows = ref<string[][]>([]);
@@ -48,6 +50,8 @@ const extension = computed(() => {
   return part.slice(dot + 1).toLowerCase();
 });
 const isPdf = computed(() => extension.value === "pdf");
+const isDocx = computed(() => extension.value === "docx");
+const isLegacyDoc = computed(() => extension.value === "doc");
 const isMarkdownByExtension = computed(() => extension.value === "md" || extension.value === "markdown");
 const shouldRenderMarkdown = computed(() => contentFormat.value === "markdown" || isMarkdownByExtension.value);
 const isTableFormat = computed(() => contentFormat.value === "table");
@@ -66,6 +70,30 @@ let resizeTimer: number | null = null;
 let runToken = 0;
 let pdfDoc: any = null;
 let afterOpenTimer: number | null = null;
+let pdfRenderTask: any = null;
+
+async function cancelPdfRenderTask() {
+  const task = pdfRenderTask;
+  if (!task) {
+    return;
+  }
+
+  try {
+    task.cancel();
+  } catch {
+    // Ignore cancel errors and continue cleanup.
+  }
+
+  try {
+    await task.promise;
+  } catch {
+    // Expected when task is cancelled.
+  }
+
+  if (pdfRenderTask === task) {
+    pdfRenderTask = null;
+  }
+}
 
 function escapeHtml(raw: string): string {
   return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -273,6 +301,11 @@ async function renderPdfPage(localToken: number) {
     return;
   }
 
+  await cancelPdfRenderTask();
+  if (localToken !== runToken) {
+    return;
+  }
+
   const pageNumber = Math.min(Math.max(1, currentPage.value), pageCount.value);
   currentPage.value = pageNumber;
   pageLabel.value = `Page ${pageNumber}`;
@@ -301,10 +334,23 @@ async function renderPdfPage(localToken: number) {
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, viewport.width, viewport.height);
 
-  await page.render({
+  const renderTask = page.render({
     canvasContext: context,
     viewport,
-  }).promise;
+  });
+  pdfRenderTask = renderTask;
+  try {
+    await renderTask.promise;
+  } catch (error: any) {
+    if (error?.name === "RenderingCancelledException") {
+      return;
+    }
+    throw error;
+  } finally {
+    if (pdfRenderTask === renderTask) {
+      pdfRenderTask = null;
+    }
+  }
   if (localToken !== runToken) {
     return;
   }
@@ -389,6 +435,7 @@ async function loadDocument() {
   pageLabel.value = "Preview";
   contentFormat.value = "plain";
   resetTablePayload();
+  await cancelPdfRenderTask();
   pdfDoc = null;
 
   if (currentPage.value <= 0) {
@@ -396,6 +443,11 @@ async function loadDocument() {
   }
 
   try {
+    if (isDocx.value) {
+      // DOCX uses dedicated page-like renderer component.
+      return;
+    }
+
     if (!isPdf.value) {
       await renderTextDocument(localToken);
       return;
@@ -490,6 +542,10 @@ watch(
     if (!active) {
       return;
     }
+    if (isDocx.value) {
+      docxViewerRef.value?.refreshViewer?.();
+      return;
+    }
     if (isPdf.value) {
       requestSettledPdfRender();
     }
@@ -506,6 +562,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  void cancelPdfRenderTask();
   if (resizeObserver) {
     resizeObserver.disconnect();
     resizeObserver = null;
@@ -521,7 +578,13 @@ onBeforeUnmount(() => {
 });
 
 defineExpose({
-  refreshViewer: requestSettledPdfRender,
+  refreshViewer: () => {
+    if (isDocx.value) {
+      docxViewerRef.value?.refreshViewer?.();
+      return;
+    }
+    requestSettledPdfRender();
+  },
 });
 </script>
 
@@ -561,8 +624,24 @@ defineExpose({
           <small>Citation Snippet</small>
           <p>{{ snippet }}</p>
         </section>
+        <DocxPageViewer
+          v-if="isDocx"
+          ref="docxViewerRef"
+          :source-path="sourcePath"
+          :snippet="snippet"
+          :active="active"
+          @error="emit('error', $event)"
+        />
+        <el-alert
+          v-else-if="isLegacyDoc"
+          class="legacy-doc-note"
+          type="warning"
+          show-icon
+          :closable="false"
+          title="Legacy .doc has limited in-browser fidelity. Convert to .docx for Word-like preview."
+        />
         <SpreadsheetGridViewer
-          v-if="isTableFormat"
+          v-else-if="isTableFormat"
           :headers="tableHeaders"
           :rows="tableRows"
           :data-start-row="tableDataStartRow"
@@ -680,6 +759,11 @@ defineExpose({
   margin: 0;
   color: #134e4a;
   line-height: 1.65;
+}
+
+.legacy-doc-note {
+  margin: 0 auto 10px;
+  max-width: 960px;
 }
 
 .pdf-page {

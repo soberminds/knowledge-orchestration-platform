@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "docx-preview": "^0.3.7",
     "element-plus": "^2.8.8",
     "markdown-it": "^14.1.0",
     "pdfjs-dist": "^3.11.174",
