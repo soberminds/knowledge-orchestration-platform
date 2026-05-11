@@ -108,6 +108,26 @@ async def list_documents(service: KnowledgeBaseService = Depends(get_knowledge_b
         return []
 
 
+@router.delete("/documents", response_model=IngestResponse)
+async def delete_document(
+    path: str,
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+) -> IngestResponse:
+    file_path = _resolve_file_path(path)
+    try:
+        stats = await run_in_threadpool(service.delete_source_file_and_rebuild, file_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return IngestResponse(
+        documents_loaded=stats.documents_loaded,
+        chunks_indexed=stats.chunks_indexed,
+        source_files=stats.source_files,
+    )
+
+
 @router.get("/file")
 async def open_file(path: str) -> FileResponse:
     file_path = _resolve_file_path(path)

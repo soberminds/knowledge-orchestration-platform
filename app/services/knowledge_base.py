@@ -22,6 +22,7 @@ from openai import OpenAI
 from app.schemas import ChatHistoryItem
 from app.services.embeddings import get_embedding_model
 from app.services.files import file_info, iter_source_files, load_documents_from_file
+from app.services.preview_pdf import get_preview_pdf_cache_path
 
 QuestionMode = Literal["overview", "technical", "comparison", "list", "general"]
 
@@ -226,6 +227,25 @@ class KnowledgeBaseService:
                 chunks_indexed=len(chunks),
                 source_files=loaded_files,
             )
+
+    def delete_source_file_and_rebuild(self, path: Path) -> IngestStats:
+        with self._lock:
+            self.ensure_directories()
+            if not path.exists() or not path.is_file():
+                raise FileNotFoundError(f"File not found: {path}")
+
+            preview_cache_path: Path | None = None
+            if path.suffix.lower() in {".doc", ".docx"}:
+                try:
+                    preview_cache_path = get_preview_pdf_cache_path(path)
+                except Exception:
+                    preview_cache_path = None
+
+            path.unlink()
+            if preview_cache_path and preview_cache_path.exists():
+                preview_cache_path.unlink(missing_ok=True)
+
+            return self.rebuild_index()
 
     async def save_uploaded_files(self, uploads) -> list[str]:
         self.ensure_directories()

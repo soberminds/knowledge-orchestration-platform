@@ -6,12 +6,14 @@ const props = defineProps<{
   documents: DocumentInfo[];
   selectedFiles: File[];
   uploading: boolean;
+  deletingPath?: string;
 }>();
 
 const emit = defineEmits<{
   (event: "files-change", files: File[]): void;
   (event: "upload"): void;
   (event: "open-document", path: string): void;
+  (event: "delete-document", path: string): void;
 }>();
 
 const fileInputRef = ref<HTMLInputElement | null>(null);
@@ -53,6 +55,10 @@ function formatBytes(bytes: number) {
 
 function openDocument(path: string) {
   emit("open-document", path);
+}
+
+function deleteDocument(path: string) {
+  emit("delete-document", path);
 }
 </script>
 
@@ -102,13 +108,36 @@ function openDocument(path: string) {
     <section class="list-card">
       <article v-for="doc in documents" :key="doc.path" class="list-item">
         <div class="item-main">
-          <button class="doc-link" type="button" @click="openDocument(doc.path)">{{ doc.path }}</button>
-          <span>{{ formatDateTime(doc.modified_at) }}</span>
-        </div>
-        <div class="item-meta">
-          <el-tag size="small" type="info">{{ doc.extension }}</el-tag>
-          <small>{{ formatBytes(doc.size_bytes) }}</small>
-          <el-button size="small" text type="primary" @click="openDocument(doc.path)">View</el-button>
+          <div class="doc-meta-block">
+            <button class="doc-link" type="button" @click="openDocument(doc.path)">{{ doc.path }}</button>
+            <div class="doc-submeta">
+              <el-tag size="small" type="info">{{ doc.extension }}</el-tag>
+              <small>{{ formatBytes(doc.size_bytes) }}</small>
+              <small>{{ formatDateTime(doc.modified_at) }}</small>
+            </div>
+          </div>
+
+          <div class="item-actions">
+            <el-button size="small" text type="primary" @click="openDocument(doc.path)">Open</el-button>
+            <el-popconfirm
+              title="Delete this file?"
+              confirm-button-text="Delete"
+              cancel-button-text="Cancel"
+              width="220"
+              @confirm="deleteDocument(doc.path)"
+            >
+              <template #reference>
+                <el-button
+                  size="small"
+                  text
+                  type="danger"
+                  :loading="deletingPath === doc.path"
+                >
+                  Delete
+                </el-button>
+              </template>
+            </el-popconfirm>
+          </div>
         </div>
       </article>
 
@@ -195,12 +224,31 @@ function openDocument(path: string) {
   margin-bottom: 8px;
 }
 
-.item-main,
-.item-meta {
+.item-main {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.doc-meta-block {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.doc-submeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.item-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .doc-link {
@@ -218,8 +266,7 @@ function openDocument(path: string) {
   color: #0f766e;
 }
 
-.item-main span,
-.item-meta small {
+.doc-submeta small {
   color: #6b7280;
   font-size: 0.83rem;
 }
@@ -239,6 +286,16 @@ function openDocument(path: string) {
   .upload-line {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .item-main {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .item-actions {
+    width: 100%;
+    justify-content: flex-end;
   }
 }
 </style>

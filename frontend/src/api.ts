@@ -159,6 +159,12 @@ export async function listDocuments(): Promise<DocumentInfo[]> {
   return requestJson<DocumentInfo[]>("/api/documents");
 }
 
+export async function deleteDocument(path: string): Promise<IngestResponse> {
+  return requestJson<IngestResponse>(`/api/documents?path=${encodeURIComponent(path)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function rebuildIndex(): Promise<IngestResponse> {
   return requestJson<IngestResponse>("/api/ingest", {
     method: "POST",

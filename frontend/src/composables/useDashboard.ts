@@ -1,5 +1,6 @@
 import { computed, ref } from "vue";
 import {
+  deleteDocument as deleteDocumentApi,
   getHealth,
   listDocuments,
   rebuildIndex,
@@ -24,6 +25,7 @@ export function useDashboard() {
   const refreshing = ref(false);
   const uploading = ref(false);
   const ingesting = ref(false);
+  const deletingPath = ref("");
   const errorMessage = ref("");
 
   const statusText = computed(() => health.value?.status ?? "loading");
@@ -95,6 +97,20 @@ export function useDashboard() {
     }
   }
 
+  async function deleteDocument(path: string) {
+    deletingPath.value = path;
+    clearError();
+    try {
+      await deleteDocumentApi(path);
+      await refreshDashboard();
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : "Failed to delete document";
+      throw error;
+    } finally {
+      deletingPath.value = "";
+    }
+  }
+
   async function runIngest() {
     ingesting.value = true;
     clearError();
@@ -116,12 +132,14 @@ export function useDashboard() {
     refreshing,
     uploading,
     ingesting,
+    deletingPath,
     errorMessage,
     statusText,
     indexedChunks,
     setSelectedFiles,
     refreshDashboard,
     uploadAndBuild,
+    deleteDocument,
     runIngest,
     clearError,
   };

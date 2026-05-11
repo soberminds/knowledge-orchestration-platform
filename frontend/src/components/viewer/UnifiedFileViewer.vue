@@ -468,6 +468,7 @@ async function loadDocument() {
   resetTablePayload();
   officePdfMode.value = false;
   officePdfError.value = "";
+  zoomPercent.value = isOfficeDoc.value ? 50 : 90;
   await cancelPdfRenderTask();
   pdfDoc = null;
 
@@ -618,12 +619,12 @@ defineExpose({
       <div class="file-name">{{ sourcePath }}</div>
       <div class="toolbar-actions">
         <template v-if="hasPagination">
-          <button type="button" class="tool-btn" @click="goPrevPage" :disabled="currentPage <= 1">-</button>
+          <button type="button" class="tool-btn" @click="goPrevPage" :disabled="currentPage <= 1">‹</button>
           <span class="tool-meta">{{ pageLabel }} {{ currentPage }} / {{ pageCount }}</span>
-          <button type="button" class="tool-btn" @click="goNextPage" :disabled="currentPage >= pageCount">+</button>
+          <button type="button" class="tool-btn" @click="goNextPage" :disabled="currentPage >= pageCount">›</button>
           <span class="tool-sep"></span>
         </template>
-        <template v-if="isPdf">
+        <template v-if="isPdfLike">
           <button type="button" class="tool-btn" @click="zoomOut">-</button>
           <span class="tool-meta">{{ zoomPercent }}%</span>
           <button type="button" class="tool-btn" @click="zoomIn">+</button>
@@ -660,6 +661,7 @@ defineExpose({
           <DocxPageViewer
             ref="docxViewerRef"
             :source-path="sourcePath"
+            :page="currentPage"
             :snippet="snippet"
             :active="active"
             @error="emit('error', $event)"

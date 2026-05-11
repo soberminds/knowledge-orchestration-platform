@@ -1,5 +1,14 @@
+import { webcrypto } from "node:crypto";
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
+
+const globalScope = globalThis as typeof globalThis & {
+  crypto?: Crypto;
+};
+
+if (!globalScope.crypto) {
+  globalScope.crypto = webcrypto as unknown as Crypto;
+}
 
 export default defineConfig({
   plugins: [vue()],
@@ -14,4 +23,3 @@ export default defineConfig({
     },
   },
 });
-

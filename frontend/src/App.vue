@@ -66,6 +66,19 @@ function openDocumentFromWorkspace(path: string) {
   documentViewerVisible.value = true;
 }
 
+async function deleteDocumentFromWorkspace(path: string) {
+  try {
+    await dashboard.deleteDocument(path);
+    if (documentViewerVisible.value && documentViewerPath.value === path) {
+      documentViewerVisible.value = false;
+      documentViewerPath.value = "";
+      documentViewerError.value = "";
+    }
+  } catch {
+    // The composable already stores the error message for display.
+  }
+}
+
 function onDocumentViewerOpened() {
   documentViewerRef.value?.refreshViewer?.();
 }
@@ -120,9 +133,11 @@ onMounted(async () => {
         :documents="dashboard.documents.value"
         :selected-files="dashboard.selectedFiles.value"
         :uploading="dashboard.uploading.value"
+        :deleting-path="dashboard.deletingPath.value"
         @files-change="dashboard.setSelectedFiles"
         @upload="dashboard.uploadAndBuild"
         @open-document="openDocumentFromWorkspace"
+        @delete-document="deleteDocumentFromWorkspace"
       />
 
       <IndexWorkspace

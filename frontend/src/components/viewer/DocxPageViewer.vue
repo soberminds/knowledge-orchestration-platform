@@ -5,6 +5,7 @@ import { buildFileUrl } from "../../api";
 
 const props = defineProps<{
   sourcePath: string;
+  page?: number | null;
   snippet?: string;
   active?: boolean;
 }>();
@@ -17,7 +18,7 @@ const loading = ref(false);
 const errorMessage = ref("");
 const containerRef = ref<HTMLElement | null>(null);
 const runToken = ref(0);
-const zoomPercent = ref(100);
+const zoomPercent = ref(50);
 const pageCount = ref(1);
 const currentPage = ref(1);
 const pageElements = ref<HTMLElement[]>([]);
@@ -99,7 +100,7 @@ function updateCurrentPageFromScroll() {
   currentPage.value = bestIndex + 1;
 }
 
-function scrollToPage(targetPage: number) {
+function scrollToPage(targetPage: number, behavior: ScrollBehavior = "smooth") {
   const container = containerRef.value;
   const target = pageElements.value[targetPage - 1];
   if (!container || !target) {
@@ -107,7 +108,7 @@ function scrollToPage(targetPage: number) {
   }
   container.scrollTo({
     top: Math.max(0, target.offsetTop - 14),
-    behavior: "smooth",
+    behavior,
   });
 }
 
@@ -140,7 +141,7 @@ function zoomOut() {
 }
 
 function resetZoom() {
-  zoomPercent.value = 100;
+  zoomPercent.value = 50;
   applyZoom();
 }
 
@@ -293,7 +294,8 @@ function highlightSnippetInDocx(root: HTMLElement, snippet: string): void {
     return;
   }
   const first = root.querySelector("mark.docx-hit");
-  first?.scrollIntoView({ block: "center", behavior: "smooth" });
+  first?.scrollIntoView({ block: "center", behavior: "auto" });
+  updateCurrentPageFromScroll();
 }
 
 async function renderDocxDocument() {
@@ -345,6 +347,11 @@ async function renderDocxDocument() {
     collectPages();
     applyZoom();
     applyTableColumnFixes(container);
+    const requestedPage = clamp(Math.floor(props.page ?? 1), 1, pageCount.value);
+    currentPage.value = requestedPage;
+    if (!String(props.snippet ?? "").trim() && requestedPage > 1) {
+      scrollToPage(requestedPage, "auto");
+    }
     updateCurrentPageFromScroll();
     highlightSnippetInDocx(container, props.snippet ?? "");
   } catch (error) {
@@ -376,6 +383,18 @@ function refreshViewer() {
   }
   refreshHighlightOnly();
 }
+
+watch(
+  () => props.page,
+  (page) => {
+    if (!Number.isFinite(page ?? NaN) || !pageElements.value.length) {
+      return;
+    }
+    const targetPage = clamp(Math.floor(page ?? 1), 1, pageCount.value);
+    currentPage.value = targetPage;
+    scrollToPage(targetPage);
+  },
+);
 
 watch(
   () => props.sourcePath,
@@ -421,16 +440,16 @@ defineExpose({
   <section class="docx-viewer">
     <header class="docx-toolbar">
       <div class="toolbar-left">
-        <button type="button" class="tool-btn" :disabled="!canPrevPage" @click="goPrevPage">-</button>
+        <button type="button" class="tool-btn" :disabled="!canPrevPage" @click="goPrevPage">‹</button>
         <span class="tool-meta">{{ currentPage }} / {{ pageCount }}</span>
-        <button type="button" class="tool-btn" :disabled="!canNextPage" @click="goNextPage">+</button>
+        <button type="button" class="tool-btn" :disabled="!canNextPage" @click="goNextPage">›</button>
       </div>
 
       <div class="toolbar-middle">
         <button type="button" class="tool-btn" @click="zoomOut">-</button>
         <span class="tool-meta">{{ zoomPercent }}%</span>
         <button type="button" class="tool-btn" @click="zoomIn">+</button>
-        <button type="button" class="tool-btn reset-btn" @click="resetZoom">100%</button>
+        <button type="button" class="tool-btn reset-btn" @click="resetZoom">50%</button>
       </div>
 
       <div class="toolbar-right">

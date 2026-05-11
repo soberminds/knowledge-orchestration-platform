@@ -14,6 +14,11 @@ from app.core.settings import settings
 OFFICE_EXTENSIONS: tuple[str, ...] = (".doc", ".docx")
 
 
+def get_preview_pdf_cache_path(source_path: Path) -> Path:
+    """Return the cached PDF path for a source office document."""
+    return _cached_preview_target(source_path)
+
+
 def get_preview_pdf_path(source_path: Path) -> Path:
     """Return a PDF path for previewing source_path.
 
