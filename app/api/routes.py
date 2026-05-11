@@ -25,6 +25,7 @@ from app.schemas import (
     SearchResponse,
     SourceHit,
 )
+from app.services.files import TEXT_FILE_EXTENSIONS
 from app.services.knowledge_base import KnowledgeBaseService, SearchHit
 
 
@@ -135,7 +136,7 @@ async def file_page_text(path: str, page: int | None = None) -> dict:
         text = (reader.pages[page - 1].extract_text() or "").strip()
         return {"path": path, "page": page, "text": text}
 
-    if suffix in {".txt", ".md", ".markdown"}:
+    if suffix in TEXT_FILE_EXTENSIONS:
         text = file_path.read_text(encoding="utf-8", errors="ignore")
         return {"path": path, "page": 1, "text": text}
 

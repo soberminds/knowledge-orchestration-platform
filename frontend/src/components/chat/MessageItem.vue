@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import { buildFileUrl, getFilePageText, type CitationRef } from "../../api";
+import type { CitationRef } from "../../api";
 import type { UiMessage } from "../../types/chat";
+import UnifiedFileViewer from "../viewer/UnifiedFileViewer.vue";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 
 const props = defineProps<{
@@ -9,63 +10,14 @@ const props = defineProps<{
 }>();
 
 const sourceDetailsRef = ref<HTMLDetailsElement | null>(null);
-const activeCitationLabel = ref<string>("");
+const activeCitationLabel = ref("");
 
 const viewerVisible = ref(false);
-const viewerLoading = ref(false);
-const viewerError = ref("");
-const viewerTextHtml = ref("");
-const viewerRawText = ref("");
 const viewerSourcePath = ref("");
-const viewerPage = ref<number | null>(null);
-const viewerFileUrl = ref("");
+const viewerPage = ref(1);
 const viewerSnippet = ref("");
-
-function escapeHtml(raw: string): string {
-  return raw
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function normalizeSnippet(text: string): string {
-  return text
-    .replace(/\s+/g, " ")
-    .replace(/^\.{3,}/, "")
-    .replace(/\.{3,}$/, "")
-    .replace(/^…+/, "")
-    .replace(/…+$/, "")
-    .trim();
-}
-
-function highlightText(content: string, snippet: string): string {
-  const safeContent = escapeHtml(content);
-  const keyword = normalizeSnippet(snippet);
-  if (!keyword) {
-    return safeContent.replace(/\n/g, "<br/>");
-  }
-
-  const candidateKeywords = [keyword];
-  if (keyword.length > 60) {
-    candidateKeywords.push(keyword.slice(0, 48));
-  }
-  if (keyword.length > 30) {
-    candidateKeywords.push(keyword.slice(0, 24));
-  }
-
-  let highlighted = safeContent;
-  for (const candidate of candidateKeywords) {
-    const escapedKeyword = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(escapedKeyword, "g");
-    const replaced = safeContent.replace(regex, (match) => `<mark class="citation-highlight">${match}</mark>`);
-    if (replaced !== safeContent) {
-      highlighted = replaced;
-      break;
-    }
-  }
-
-  return highlighted.replace(/\n/g, "<br/>");
-}
+const viewerError = ref("");
+const viewerRef = ref<InstanceType<typeof UnifiedFileViewer> | null>(null);
 
 const citationItems = computed<CitationRef[]>(() => {
   if (props.message.citations.length) {
@@ -94,27 +46,17 @@ function citationElementId(label: string) {
   return `${props.message.id}-cite-${label}`;
 }
 
-async function openCitationViewer(citation: CitationRef) {
+function openCitationViewer(citation: CitationRef) {
   activeCitationLabel.value = citation.label;
-  viewerSourcePath.value = citation.source;
-  viewerPage.value = citation.page ?? 1;
-  viewerSnippet.value = citation.preview || "";
-  viewerFileUrl.value = buildFileUrl(citation.source) + (citation.page ? `#page=${citation.page}` : "");
-  viewerVisible.value = true;
-  viewerLoading.value = true;
   viewerError.value = "";
-  viewerRawText.value = "";
-  viewerTextHtml.value = "";
+  viewerSourcePath.value = citation.source;
+  viewerPage.value = Math.max(1, citation.page ?? 1);
+  viewerSnippet.value = citation.preview || "";
+  viewerVisible.value = true;
+}
 
-  try {
-    const payload = await getFilePageText(citation.source, citation.page ?? 1);
-    viewerRawText.value = payload.text || "";
-    viewerTextHtml.value = highlightText(payload.text || "", citation.preview || "");
-  } catch (error) {
-    viewerError.value = error instanceof Error ? error.message : "Failed to load citation text.";
-  } finally {
-    viewerLoading.value = false;
-  }
+function onViewerDialogOpened() {
+  viewerRef.value?.refreshViewer?.();
 }
 
 async function focusCitation(label: string) {
@@ -124,15 +66,12 @@ async function focusCitation(label: string) {
     details.open = true;
     await nextTick();
     const target = document.getElementById(citationElementId(label));
-    target?.scrollIntoView({
-      block: "nearest",
-      behavior: "smooth",
-    });
+    target?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
   const citation = citationMap.value.get(label);
   if (citation) {
-    await openCitationViewer(citation);
+    openCitationViewer(citation);
   }
 }
 </script>
@@ -146,11 +85,7 @@ async function focusCitation(label: string) {
     <div class="message-body">
       <div class="message-content">
         <template v-if="message.role === 'assistant'">
-          <MarkdownRenderer
-            :content="message.content"
-            :citations="citationItems"
-            @citation-click="focusCitation"
-          />
+          <MarkdownRenderer :content="message.content" :citations="citationItems" @citation-click="focusCitation" />
         </template>
         <template v-else>
           <p class="user-text">{{ message.content }}</p>
@@ -200,36 +135,30 @@ async function focusCitation(label: string) {
 
   <el-dialog
     v-model="viewerVisible"
-    width="88%"
-    top="4vh"
+    width="92%"
+    top="3vh"
     append-to-body
-    :title="viewerSourcePath || 'Citation Viewer'"
     class="citation-dialog"
+    :title="viewerSourcePath || 'Citation Viewer'"
+    @opened="onViewerDialogOpened"
   >
-    <section class="viewer-shell">
-      <aside class="viewer-pane text-pane">
-        <header>
-          <strong>引用定位</strong>
-          <small v-if="viewerPage !== null">page {{ viewerPage }}</small>
-        </header>
-        <p v-if="viewerSnippet" class="snippet-pill">{{ viewerSnippet }}</p>
-        <el-skeleton v-if="viewerLoading" :rows="8" animated />
-        <p v-else-if="viewerError" class="viewer-error">{{ viewerError }}</p>
-        <div v-else class="citation-text" v-html="viewerTextHtml"></div>
-      </aside>
-
-      <aside class="viewer-pane file-pane">
-        <header>
-          <strong>原文件</strong>
-          <a :href="viewerFileUrl" target="_blank" rel="noreferrer">新窗口打开</a>
-        </header>
-        <iframe
-          v-if="viewerFileUrl"
-          class="file-frame"
-          :src="viewerFileUrl"
-          title="source file viewer"
-        ></iframe>
-      </aside>
+    <section class="viewer-host">
+      <el-alert
+        v-if="viewerError"
+        :title="viewerError"
+        type="error"
+        show-icon
+        :closable="false"
+        class="viewer-error-banner"
+      />
+      <UnifiedFileViewer
+        ref="viewerRef"
+        :source-path="viewerSourcePath"
+        :page="viewerPage"
+        :snippet="viewerSnippet"
+        :active="viewerVisible"
+        @error="viewerError = $event"
+      />
     </section>
   </el-dialog>
 </template>
@@ -346,11 +275,11 @@ async function focusCitation(label: string) {
   font-size: 0.82rem;
   color: #334155;
   border-radius: 8px;
-  padding: 4px 6px;
+  padding: 5px 6px;
 }
 
 .citation-row.is-active {
-  background: #d8f3ea;
+  background: linear-gradient(90deg, rgba(16, 163, 127, 0.16), rgba(16, 163, 127, 0.05));
 }
 
 .citation-link {
@@ -403,74 +332,13 @@ async function focusCitation(label: string) {
   line-height: 1.65;
 }
 
-.viewer-shell {
+.viewer-host {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  height: 74vh;
+  gap: 10px;
 }
 
-.viewer-pane {
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  background: #fff;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.viewer-pane > header {
-  padding: 10px 12px;
-  border-bottom: 1px solid #eef0f3;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
-.viewer-pane > header small {
-  color: #64748b;
-}
-
-.text-pane {
-  padding-bottom: 10px;
-}
-
-.snippet-pill {
-  margin: 10px 12px 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: #e4f7ef;
-  border: 1px solid #9fd9d1;
-  color: #115e59;
-  font-size: 0.86rem;
-}
-
-.viewer-error {
-  margin: 12px;
-  color: #b42318;
-}
-
-.citation-text {
-  margin: 10px 12px;
-  overflow: auto;
-  line-height: 1.76;
-  color: #1f2937;
-  white-space: normal;
-}
-
-.citation-text :deep(mark.citation-highlight) {
-  background: #bff3dd;
-  color: #114b5f;
-  border-radius: 3px;
-  padding: 0 2px;
-}
-
-.file-frame {
-  width: 100%;
-  height: 100%;
-  border: 0;
-  border-radius: 0 0 12px 12px;
+.viewer-error-banner {
+  margin-bottom: 2px;
 }
 
 @keyframes blink {
@@ -481,18 +349,6 @@ async function focusCitation(label: string) {
   50%,
   100% {
     opacity: 0;
-  }
-}
-
-@media (max-width: 980px) {
-  .viewer-shell {
-    grid-template-columns: 1fr;
-    height: auto;
-    min-height: 72vh;
-  }
-
-  .file-pane {
-    min-height: 340px;
   }
 }
 </style>

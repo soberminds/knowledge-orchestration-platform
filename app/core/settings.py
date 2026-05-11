@@ -95,7 +95,43 @@ class Settings:
         if origin.strip()
     )
 
-    supported_extensions: tuple[str, ...] = (".md", ".markdown", ".txt", ".pdf", ".docx")
+    supported_extensions: tuple[str, ...] = (
+        ".txt",
+        ".md",
+        ".markdown",
+        ".csv",
+        ".tsv",
+        ".json",
+        ".jsonl",
+        ".yaml",
+        ".yml",
+        ".xml",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".toml",
+        ".log",
+        ".rst",
+        ".rtf",
+        ".sql",
+        ".py",
+        ".js",
+        ".ts",
+        ".jsx",
+        ".tsx",
+        ".java",
+        ".c",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".go",
+        ".rs",
+        ".sh",
+        ".bat",
+        ".ps1",
+        ".pdf",
+        ".docx",
+    )
 
 
 settings = Settings()
