@@ -11,6 +11,7 @@ from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.dependencies import get_knowledge_base_service
 from app.schemas import (
+    CitationRef,
     ChatRequest,
     ChatResponse,
     DocumentInfo,
@@ -38,6 +39,16 @@ def _to_source_hit(hit: SearchHit) -> SourceHit:
 
 def _sse_payload(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _to_citation_ref(payload: dict) -> CitationRef:
+    return CitationRef(
+        label=str(payload.get("label", "")),
+        source=str(payload.get("source", "unknown")),
+        page=int(payload["page"]) if payload.get("page") is not None else None,
+        chunk_indices=[int(value) for value in payload.get("chunk_indices", [])],
+        score=float(payload["score"]) if payload.get("score") is not None else None,
+    )
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -128,6 +139,7 @@ async def chat(
         answer=result["answer"],
         rewritten_question=result["rewritten_question"],
         sources=[_to_source_hit(hit) for hit in result["hits"]],
+        citations=[_to_citation_ref(item) for item in result.get("citations", [])],
     )
 
 
@@ -145,6 +157,7 @@ async def chat_stream(
                         "answer": event.get("answer", ""),
                         "rewritten_question": event.get("rewritten_question", ""),
                         "sources": [_to_source_hit(hit).model_dump() for hit in event.get("hits", [])],
+                        "citations": [_to_citation_ref(item).model_dump() for item in event.get("citations", [])],
                     }
                     yield _sse_payload(payload)
                     continue

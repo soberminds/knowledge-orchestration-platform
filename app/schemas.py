@@ -35,12 +35,23 @@ class SourceHit(BaseModel):
     preview: str
 
 
+class CitationRef(BaseModel):
+    """回答正文中 [Sx] 标签对应的证据引用。"""
+
+    label: str
+    source: str
+    page: int | None = None
+    chunk_indices: list[int] = Field(default_factory=list)
+    score: float | None = None
+
+
 class ChatResponse(BaseModel):
     """/api/chat 的返回值。"""
 
     answer: str
     rewritten_question: str
     sources: list[SourceHit]
+    citations: list[CitationRef] = Field(default_factory=list)
 
 
 class SearchRequest(BaseModel):
@@ -80,4 +91,3 @@ class HealthResponse(BaseModel):
     status: str
     collection_name: str
     indexed_chunks: int
-

@@ -1,10 +1,46 @@
 <script setup lang="ts">
+import { computed, nextTick, ref } from "vue";
+import type { CitationRef } from "../../api";
 import type { UiMessage } from "../../types/chat";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 
-defineProps<{
+const props = defineProps<{
   message: UiMessage;
 }>();
+
+const sourceDetailsRef = ref<HTMLDetailsElement | null>(null);
+
+const citationItems = computed<CitationRef[]>(() => {
+  if (props.message.citations.length) {
+    return props.message.citations;
+  }
+  // Backward-compatible fallback for old messages without citation metadata.
+  return props.message.sources.map((source, index) => ({
+    label: `S${index + 1}`,
+    source: source.source,
+    page: source.page ?? null,
+    chunk_indices: [source.chunk_index],
+    score: source.score ?? null,
+  }));
+});
+
+function citationElementId(label: string) {
+  return `${props.message.id}-cite-${label}`;
+}
+
+async function focusCitation(label: string) {
+  const details = sourceDetailsRef.value;
+  if (!details) {
+    return;
+  }
+  details.open = true;
+  await nextTick();
+  const target = document.getElementById(citationElementId(label));
+  target?.scrollIntoView({
+    block: "nearest",
+    behavior: "smooth",
+  });
+}
 </script>
 
 <template>
@@ -16,7 +52,11 @@ defineProps<{
     <div class="message-body">
       <div class="message-content">
         <template v-if="message.role === 'assistant'">
-          <MarkdownRenderer :content="message.content" />
+          <MarkdownRenderer
+            :content="message.content"
+            :citations="citationItems"
+            @citation-click="focusCitation"
+          />
         </template>
         <template v-else>
           <p class="user-text">{{ message.content }}</p>
@@ -26,8 +66,26 @@ defineProps<{
 
       <p v-if="message.failed" class="failed-note">Request failed. Please retry.</p>
 
-      <details v-if="message.sources.length" class="source-details">
+      <details v-if="message.sources.length" ref="sourceDetailsRef" class="source-details">
         <summary>Sources ({{ message.sources.length }})</summary>
+
+        <div v-if="citationItems.length" class="citation-index">
+          <h4>Evidence Tags</h4>
+          <ul>
+            <li
+              v-for="citation in citationItems"
+              :id="citationElementId(citation.label)"
+              :key="`${message.id}-citation-${citation.label}`"
+            >
+              <span class="citation-label">[{{ citation.label }}]</span>
+              <span class="citation-source">{{ citation.source }}</span>
+              <span v-if="citation.page !== null && citation.page !== undefined">p{{ citation.page }}</span>
+              <span v-if="citation.score !== null && citation.score !== undefined">score {{ citation.score }}</span>
+              <span v-if="citation.chunk_indices.length">chunks {{ citation.chunk_indices.join(", ") }}</span>
+            </li>
+          </ul>
+        </div>
+
         <ul>
           <li v-for="(source, index) in message.sources" :key="`${message.id}-${index}`">
             <div class="source-head">
@@ -122,6 +180,45 @@ defineProps<{
   cursor: pointer;
   color: #6b7280;
   font-size: 0.88rem;
+}
+
+.citation-index {
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid #d7ebea;
+  border-radius: 8px;
+  background: #f0fbf9;
+}
+
+.citation-index h4 {
+  margin: 0 0 6px;
+  font-size: 0.82rem;
+  color: #0f766e;
+}
+
+.citation-index ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 5px;
+}
+
+.citation-index li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: #334155;
+}
+
+.citation-label {
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.citation-source {
+  color: #0f172a;
 }
 
 .source-details ul {

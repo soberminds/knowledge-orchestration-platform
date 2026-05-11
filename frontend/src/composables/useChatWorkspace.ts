@@ -1,6 +1,6 @@
 import type { Ref } from "vue";
 import { computed, nextTick, reactive, ref } from "vue";
-import { chatStream, type HistoryItem, type SourceHit } from "../api";
+import { chatStream, type CitationRef, type HistoryItem, type SourceHit } from "../api";
 import type { ChatSession, UiMessage } from "../types/chat";
 
 const STARTER_PROMPTS = [
@@ -28,6 +28,7 @@ function createWelcomeMessage(): UiMessage {
     createdAt: Date.now(),
     content: "Hi, ask any question from your knowledge base and I will answer with citations.",
     sources: [],
+    citations: [],
   };
 }
 
@@ -128,11 +129,11 @@ export function useChatWorkspace(topK: Ref<number>) {
     }
   }
 
-  function applyDonePayload(target: UiMessage, payload: { answer: string; sources: SourceHit[] }) {
-    if (!target.content.trim() && payload.answer) {
-      target.content = payload.answer;
-    }
+  function applyDonePayload(target: UiMessage, payload: { answer: string; sources: SourceHit[]; citations: CitationRef[] }) {
+    // Always use the final done payload. It may contain a polished/expanded answer.
+    target.content = payload.answer ?? target.content;
     target.sources = payload.sources ?? [];
+    target.citations = payload.citations ?? [];
     target.streaming = false;
   }
 
@@ -164,6 +165,7 @@ export function useChatWorkspace(topK: Ref<number>) {
       content: question,
       createdAt: Date.now(),
       sources: [],
+      citations: [],
     });
     session.messages.push(userMessage);
     session.updatedAt = Date.now();
@@ -178,6 +180,7 @@ export function useChatWorkspace(topK: Ref<number>) {
       content: "",
       createdAt: Date.now(),
       sources: [],
+      citations: [],
       streaming: true,
     });
     session.messages.push(assistantMessage);

@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import MarkdownIt from "markdown-it";
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import type { CitationRef } from "../../api";
 
 const props = defineProps<{
   content: string;
+  citations?: CitationRef[];
 }>();
+
+const emit = defineEmits<{
+  (event: "citation-click", label: string): void;
+}>();
+
+const containerRef = ref<HTMLElement | null>(null);
 
 const markdown = new MarkdownIt({
   html: false,
@@ -13,7 +21,25 @@ const markdown = new MarkdownIt({
   typographer: true,
 });
 
-const renderedHtml = computed(() => markdown.render(props.content || ""));
+const knownLabels = computed(() => {
+  const set = new Set<string>();
+  for (const item of props.citations ?? []) {
+    set.add(item.label);
+  }
+  return set;
+});
+
+const preparedContent = computed(() => {
+  const text = props.content || "";
+  return text.replace(/\[(S\d+)\]/g, (match, label: string) => {
+    if (!knownLabels.value.has(label)) {
+      return match;
+    }
+    return `[${label}](#cite-${label})`;
+  });
+});
+
+const renderedHtml = computed(() => markdown.render(preparedContent.value));
 const useRawFallback = computed(() => {
   if (!props.content) {
     return false;
@@ -24,11 +50,38 @@ const useRawFallback = computed(() => {
     .trim();
   return plainText.length === 0;
 });
+
+function onContainerClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target) {
+    return;
+  }
+  const anchor = target.closest("a");
+  if (!anchor) {
+    return;
+  }
+  const href = anchor.getAttribute("href") ?? "";
+  if (!href.startsWith("#cite-")) {
+    return;
+  }
+  event.preventDefault();
+  const label = href.slice("#cite-".length);
+  if (!label) {
+    return;
+  }
+  emit("citation-click", label);
+}
 </script>
 
 <template>
   <pre v-if="useRawFallback" class="raw-fallback">{{ content }}</pre>
-  <div v-else class="markdown-body" v-html="renderedHtml"></div>
+  <div
+    v-else
+    ref="containerRef"
+    class="markdown-body"
+    v-html="renderedHtml"
+    @click="onContainerClick"
+  ></div>
 </template>
 
 <style scoped>
@@ -86,5 +139,21 @@ const useRawFallback = computed(() => {
 
 .markdown-body :deep(a) {
   color: #0f766e;
+}
+
+.markdown-body :deep(a[href^="#cite-"]) {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 0.04rem 0.4rem;
+  border: 1px solid #9fd9d1;
+  border-radius: 999px;
+  background: #ecfdf8;
+  color: #0f766e;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.markdown-body :deep(a[href^="#cite-"]:hover) {
+  background: #dff7f2;
 }
 </style>

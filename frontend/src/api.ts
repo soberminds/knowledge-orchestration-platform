@@ -11,10 +11,19 @@ export interface SourceHit {
   preview: string;
 }
 
+export interface CitationRef {
+  label: string;
+  source: string;
+  page?: number | null;
+  chunk_indices: number[];
+  score?: number | null;
+}
+
 export interface ChatResponse {
   answer: string;
   rewritten_question: string;
   sources: SourceHit[];
+  citations: CitationRef[];
 }
 
 export interface SearchResponse {
@@ -51,6 +60,7 @@ interface ChatStreamDoneEvent {
   answer: string;
   rewritten_question: string;
   sources: SourceHit[];
+  citations: CitationRef[];
 }
 
 interface ChatStreamErrorEvent {
