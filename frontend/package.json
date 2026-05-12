@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --require ./scripts/vite-crypto-polyfill.cjs ./node_modules/vite/bin/vite.js",
-    "build": "vue-tsc -b && node --require ./scripts/vite-crypto-polyfill.cjs ./node_modules/vite/bin/vite.js build",
+    "typecheck": "vue-tsc --noEmit",
+    "build": "npm run typecheck && node --require ./scripts/vite-crypto-polyfill.cjs ./node_modules/vite/bin/vite.js build",
     "preview": "node --require ./scripts/vite-crypto-polyfill.cjs ./node_modules/vite/bin/vite.js preview"
   },
   "dependencies": {

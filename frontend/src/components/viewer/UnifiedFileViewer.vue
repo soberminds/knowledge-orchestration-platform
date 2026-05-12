@@ -20,6 +20,7 @@ const emit = defineEmits<{
   (event: "error", message: string): void;
 }>();
 
+const viewerRootRef = ref<HTMLElement | null>(null);
 const containerRef = ref<HTMLElement | null>(null);
 const pdfStackRef = ref<HTMLElement | null>(null);
 const docxViewerRef = ref<InstanceType<typeof DocxPageViewer> | null>(null);
@@ -43,6 +44,8 @@ const officePdfError = ref("");
 
 const renderedPdfPages = ref<number[]>([]);
 const autoPagingBusy = ref(false);
+const autoPagingText = ref("Loading next page...");
+const isFullscreen = ref(false);
 
 const fileUrl = computed(() => buildFileUrl(props.sourcePath));
 const previewPdfUrl = computed(() => buildPreviewPdfUrl(props.sourcePath));
@@ -65,6 +68,17 @@ const isPdfLike = computed(() => isPdf.value || officePdfMode.value);
 const showSidePager = computed(() => isPdfLike.value || (isDocx.value && !officePdfMode.value));
 const hasSnippet = computed(() => (props.snippet ?? "").trim().length > 0);
 const hasPagination = computed(() => pageCount.value > 1);
+const canFullscreen = computed(() => {
+  if (typeof document === "undefined") {
+    return false;
+  }
+  const doc = document as Document & {
+    webkitFullscreenEnabled?: boolean;
+    msFullscreenEnabled?: boolean;
+    mozFullScreenEnabled?: boolean;
+  };
+  return Boolean(doc.fullscreenEnabled || doc.webkitFullscreenEnabled || doc.msFullscreenEnabled || doc.mozFullScreenEnabled);
+});
 
 const markdown = new MarkdownIt({
   html: false,
@@ -140,6 +154,82 @@ function setPdfFrameRef(pageNumber: number, node: unknown) {
   if (rawNode instanceof HTMLElement) {
     pdfFrameMap.set(pageNumber, rawNode);
   }
+}
+
+function getFullscreenElement(): Element | null {
+  const doc = document as Document & {
+    webkitFullscreenElement?: Element | null;
+    msFullscreenElement?: Element | null;
+    mozFullScreenElement?: Element | null;
+  };
+  return doc.fullscreenElement || doc.webkitFullscreenElement || doc.msFullscreenElement || doc.mozFullScreenElement || null;
+}
+
+function syncFullscreenState() {
+  const host = viewerRootRef.value;
+  if (!host) {
+    isFullscreen.value = false;
+    return;
+  }
+  isFullscreen.value = getFullscreenElement() === host;
+}
+
+async function enterFullscreen() {
+  const host = viewerRootRef.value as (HTMLElement & {
+    webkitRequestFullscreen?: () => Promise<void> | void;
+    msRequestFullscreen?: () => Promise<void> | void;
+    mozRequestFullScreen?: () => Promise<void> | void;
+  }) | null;
+  if (!host) {
+    return;
+  }
+
+  if (host.requestFullscreen) {
+    await host.requestFullscreen();
+    return;
+  }
+  if (host.webkitRequestFullscreen) {
+    await host.webkitRequestFullscreen();
+    return;
+  }
+  if (host.msRequestFullscreen) {
+    await host.msRequestFullscreen();
+    return;
+  }
+  if (host.mozRequestFullScreen) {
+    await host.mozRequestFullScreen();
+  }
+}
+
+async function exitFullscreen() {
+  const doc = document as Document & {
+    webkitExitFullscreen?: () => Promise<void> | void;
+    msExitFullscreen?: () => Promise<void> | void;
+    mozCancelFullScreen?: () => Promise<void> | void;
+  };
+  if (doc.exitFullscreen) {
+    await doc.exitFullscreen();
+    return;
+  }
+  if (doc.webkitExitFullscreen) {
+    await doc.webkitExitFullscreen();
+    return;
+  }
+  if (doc.msExitFullscreen) {
+    await doc.msExitFullscreen();
+    return;
+  }
+  if (doc.mozCancelFullScreen) {
+    await doc.mozCancelFullScreen();
+  }
+}
+
+async function toggleFullscreen() {
+  if (isFullscreen.value) {
+    await exitFullscreen();
+    return;
+  }
+  await enterFullscreen();
 }
 
 async function cancelOneRenderTask(task: any) {
@@ -532,6 +622,32 @@ async function appendNextPdfPage(localToken: number): Promise<boolean> {
   return true;
 }
 
+async function prependPrevPdfPage(localToken: number): Promise<boolean> {
+  if (!pdfDoc || localToken !== runToken) {
+    return false;
+  }
+  const first = getLoadedFirstPage();
+  if (first <= 1) {
+    return false;
+  }
+
+  const host = containerRef.value;
+  const beforeTop = host?.scrollTop ?? 0;
+  const beforeHeight = host?.scrollHeight ?? 0;
+
+  await ensurePdfPageRange(localToken, first - 1);
+  if (localToken !== runToken || !host) {
+    return true;
+  }
+  await nextTick();
+
+  const heightDelta = host.scrollHeight - beforeHeight;
+  if (heightDelta > 0) {
+    host.scrollTop = beforeTop + heightDelta;
+  }
+  return true;
+}
+
 function scrollToPdfPage(pageNumber: number, behavior: ScrollBehavior = "smooth") {
   const host = containerRef.value;
   const target = pdfFrameMap.get(pageNumber);
@@ -611,7 +727,7 @@ function schedulePdfRerender() {
   }, 120);
 }
 
-async function maybeAutoAppendByScroll() {
+async function maybeAutoPageByScroll() {
   const host = containerRef.value;
   if (!host || !isPdfLike.value || loading.value || errorMessage.value || autoPagingBusy.value) {
     return;
@@ -620,23 +736,34 @@ async function maybeAutoAppendByScroll() {
     return;
   }
 
+  const loadedFirstPage = getLoadedFirstPage();
   const loadedLastPage = getLoadedLastPage();
-  if (loadedLastPage >= pageCount.value) {
+
+  const nearTop = host.scrollTop <= 120;
+  if (nearTop && loadedFirstPage > 1) {
+    autoPagingBusy.value = true;
+    autoPagingText.value = "Loading previous page...";
+    try {
+      await prependPrevPdfPage(runToken);
+    } finally {
+      window.setTimeout(() => {
+        autoPagingBusy.value = false;
+      }, 80);
+    }
     return;
   }
 
   const nearBottom = host.scrollTop + host.clientHeight >= host.scrollHeight - 160;
-  if (!nearBottom) {
-    return;
-  }
-
-  autoPagingBusy.value = true;
-  try {
-    await appendNextPdfPage(runToken);
-  } finally {
-    window.setTimeout(() => {
-      autoPagingBusy.value = false;
-    }, 80);
+  if (nearBottom && loadedLastPage < pageCount.value) {
+    autoPagingBusy.value = true;
+    autoPagingText.value = "Loading next page...";
+    try {
+      await appendNextPdfPage(runToken);
+    } finally {
+      window.setTimeout(() => {
+        autoPagingBusy.value = false;
+      }, 80);
+    }
   }
 }
 
@@ -652,7 +779,7 @@ function handleViewerStageScroll() {
   window.requestAnimationFrame(() => {
     scrollTicking = false;
     updateCurrentPageByScroll();
-    void maybeAutoAppendByScroll();
+    void maybeAutoPageByScroll();
   });
 }
 
@@ -838,6 +965,12 @@ watch(
 );
 
 onMounted(() => {
+  document.addEventListener("fullscreenchange", syncFullscreenState);
+  document.addEventListener("webkitfullscreenchange", syncFullscreenState as EventListener);
+  document.addEventListener("msfullscreenchange", syncFullscreenState as EventListener);
+  document.addEventListener("MSFullscreenChange", syncFullscreenState as EventListener);
+  document.addEventListener("mozfullscreenchange", syncFullscreenState as EventListener);
+  syncFullscreenState();
   if (containerRef.value) {
     resizeObserver = new ResizeObserver(() => {
       schedulePdfRerender();
@@ -848,6 +981,11 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   void cancelAllPdfRenderTasks();
+  document.removeEventListener("fullscreenchange", syncFullscreenState);
+  document.removeEventListener("webkitfullscreenchange", syncFullscreenState as EventListener);
+  document.removeEventListener("msfullscreenchange", syncFullscreenState as EventListener);
+  document.removeEventListener("MSFullscreenChange", syncFullscreenState as EventListener);
+  document.removeEventListener("mozfullscreenchange", syncFullscreenState as EventListener);
   if (resizeObserver) {
     resizeObserver.disconnect();
     resizeObserver = null;
@@ -876,7 +1014,7 @@ defineExpose({
 </script>
 
 <template>
-  <section class="unified-viewer">
+  <section ref="viewerRootRef" class="unified-viewer" :class="{ 'is-fullscreen': isFullscreen }">
     <header class="viewer-toolbar">
       <div class="file-name">{{ sourcePath }}</div>
       <div class="toolbar-actions">
@@ -891,6 +1029,15 @@ defineExpose({
           <span class="tool-meta">{{ zoomPercent }}%</span>
           <button type="button" class="tool-btn" @click="zoomIn">+</button>
         </template>
+        <button
+          v-if="canFullscreen"
+          type="button"
+          class="tool-btn tool-icon-btn"
+          :title="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'"
+          @click="toggleFullscreen"
+        >
+          <span aria-hidden="true">⛶</span>
+        </button>
         <a :href="fileUrl" target="_blank" rel="noreferrer" class="open-link">Open Source File</a>
       </div>
     </header>
@@ -912,7 +1059,7 @@ defineExpose({
               <div class="pdf-text-layer" :ref="(node) => setPdfTextLayerRef(pageNumber, node)"></div>
             </article>
           </div>
-          <p v-if="autoPagingBusy" class="pdf-load-more">Loading next page...</p>
+          <p v-if="autoPagingBusy" class="pdf-load-more">{{ autoPagingText }}</p>
         </template>
 
         <template v-else>
@@ -987,6 +1134,14 @@ defineExpose({
   background: linear-gradient(180deg, #ffffff, #f8fafc);
 }
 
+.unified-viewer.is-fullscreen {
+  border-radius: 0;
+  border: none;
+  width: 100vw;
+  height: 100vh;
+  background: #eef2f7;
+}
+
 .viewer-toolbar {
   display: flex;
   align-items: center;
@@ -1035,6 +1190,12 @@ defineExpose({
   cursor: not-allowed;
 }
 
+.tool-icon-btn {
+  min-width: 34px;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
 .tool-meta {
   font-size: 0.82rem;
   color: #475569;
@@ -1064,6 +1225,10 @@ defineExpose({
   height: 74vh;
   overflow: auto;
   padding: 14px;
+}
+
+.unified-viewer.is-fullscreen .viewer-stage {
+  height: calc(100vh - 56px);
 }
 
 .stage-pager-layer {
