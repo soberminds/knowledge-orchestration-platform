@@ -21,8 +21,7 @@ const emit = defineEmits<{
 }>();
 
 const containerRef = ref<HTMLElement | null>(null);
-const canvasRef = ref<HTMLCanvasElement | null>(null);
-const textLayerRef = ref<HTMLElement | null>(null);
+const pdfStackRef = ref<HTMLElement | null>(null);
 const docxViewerRef = ref<InstanceType<typeof DocxPageViewer> | null>(null);
 
 const loading = ref(false);
@@ -42,6 +41,9 @@ const tableTotalColumns = ref(0);
 const officePdfMode = ref(false);
 const officePdfError = ref("");
 
+const renderedPdfPages = ref<number[]>([]);
+const autoPagingBusy = ref(false);
+
 const fileUrl = computed(() => buildFileUrl(props.sourcePath));
 const previewPdfUrl = computed(() => buildPreviewPdfUrl(props.sourcePath));
 const extension = computed(() => {
@@ -60,6 +62,7 @@ const isMarkdownByExtension = computed(() => extension.value === "md" || extensi
 const shouldRenderMarkdown = computed(() => contentFormat.value === "markdown" || isMarkdownByExtension.value);
 const isTableFormat = computed(() => contentFormat.value === "table");
 const isPdfLike = computed(() => isPdf.value || officePdfMode.value);
+const showSidePager = computed(() => isPdfLike.value || (isDocx.value && !officePdfMode.value));
 const hasSnippet = computed(() => (props.snippet ?? "").trim().length > 0);
 const hasPagination = computed(() => pageCount.value > 1);
 
@@ -75,29 +78,90 @@ let resizeTimer: number | null = null;
 let runToken = 0;
 let pdfDoc: any = null;
 let afterOpenTimer: number | null = null;
-let pdfRenderTask: any = null;
+let scrollTicking = false;
 
-async function cancelPdfRenderTask() {
-  const task = pdfRenderTask;
+const pdfCanvasMap = new Map<number, HTMLCanvasElement>();
+const pdfTextLayerMap = new Map<number, HTMLElement>();
+const pdfFrameMap = new Map<number, HTMLElement>();
+const pdfRenderTasks = new Map<number, any>();
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getLoadedFirstPage(): number {
+  return renderedPdfPages.value.length ? renderedPdfPages.value[0] : 0;
+}
+
+function getLoadedLastPage(): number {
+  return renderedPdfPages.value.length ? renderedPdfPages.value[renderedPdfPages.value.length - 1] : 0;
+}
+
+function clearPdfElementMaps() {
+  pdfCanvasMap.clear();
+  pdfTextLayerMap.clear();
+  pdfFrameMap.clear();
+}
+
+function resetPdfStack() {
+  renderedPdfPages.value = [];
+  clearPdfElementMaps();
+  autoPagingBusy.value = false;
+}
+
+function setPdfCanvasRef(pageNumber: number, node: unknown) {
+  const rawNode = (node as { $el?: unknown } | null)?.$el ?? node;
+  if (!rawNode) {
+    pdfCanvasMap.delete(pageNumber);
+    return;
+  }
+  if (rawNode instanceof HTMLCanvasElement) {
+    pdfCanvasMap.set(pageNumber, rawNode);
+  }
+}
+
+function setPdfTextLayerRef(pageNumber: number, node: unknown) {
+  const rawNode = (node as { $el?: unknown } | null)?.$el ?? node;
+  if (!rawNode) {
+    pdfTextLayerMap.delete(pageNumber);
+    return;
+  }
+  if (rawNode instanceof HTMLElement) {
+    pdfTextLayerMap.set(pageNumber, rawNode);
+  }
+}
+
+function setPdfFrameRef(pageNumber: number, node: unknown) {
+  const rawNode = (node as { $el?: unknown } | null)?.$el ?? node;
+  if (!rawNode) {
+    pdfFrameMap.delete(pageNumber);
+    return;
+  }
+  if (rawNode instanceof HTMLElement) {
+    pdfFrameMap.set(pageNumber, rawNode);
+  }
+}
+
+async function cancelOneRenderTask(task: any) {
   if (!task) {
     return;
   }
-
   try {
     task.cancel();
   } catch {
-    // Ignore cancel errors and continue cleanup.
+    // Ignore cancel errors.
   }
-
   try {
     await task.promise;
   } catch {
-    // Expected when task is cancelled.
+    // Expected when render is cancelled.
   }
+}
 
-  if (pdfRenderTask === task) {
-    pdfRenderTask = null;
-  }
+async function cancelAllPdfRenderTasks() {
+  const tasks = Array.from(pdfRenderTasks.values());
+  pdfRenderTasks.clear();
+  await Promise.all(tasks.map((task) => cancelOneRenderTask(task)));
 }
 
 function escapeHtml(raw: string): string {
@@ -301,31 +365,37 @@ async function renderTextDocument(localToken: number) {
   textHtml.value = markSnippetInText(rawText, props.snippet ?? "");
 }
 
-async function renderPdfPage(localToken: number) {
-  if (!pdfDoc || !canvasRef.value || !containerRef.value) {
+async function renderPdfPageIntoFrame(localToken: number, pageNumber: number, focusHit = false) {
+  if (!pdfDoc || localToken !== runToken) {
     return;
   }
 
-  await cancelPdfRenderTask();
-  if (localToken !== runToken) {
+  const canvas = pdfCanvasMap.get(pageNumber);
+  const textLayer = pdfTextLayerMap.get(pageNumber);
+  const host = containerRef.value;
+  if (!canvas || !textLayer || !host) {
     return;
   }
 
-  const pageNumber = Math.min(Math.max(1, currentPage.value), pageCount.value);
-  currentPage.value = pageNumber;
-  pageLabel.value = `Page ${pageNumber}`;
+  const existingTask = pdfRenderTasks.get(pageNumber);
+  if (existingTask) {
+    await cancelOneRenderTask(existingTask);
+    if (pdfRenderTasks.get(pageNumber) === existingTask) {
+      pdfRenderTasks.delete(pageNumber);
+    }
+  }
+
   const page = await pdfDoc.getPage(pageNumber);
   if (localToken !== runToken) {
     return;
   }
 
-  const hostWidth = Math.max(320, containerRef.value.clientWidth - 36);
+  const hostWidth = Math.max(320, host.clientWidth - 56);
   const baseViewport = page.getViewport({ scale: 1 });
   const fitScale = hostWidth / baseViewport.width;
   const scale = fitScale * (zoomPercent.value / 100);
   const viewport = page.getViewport({ scale });
 
-  const canvas = canvasRef.value;
   const context = canvas.getContext("2d");
   if (!context) {
     return;
@@ -339,11 +409,15 @@ async function renderPdfPage(localToken: number) {
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, viewport.width, viewport.height);
 
+  textLayer.innerHTML = "";
+  textLayer.style.width = `${Math.floor(viewport.width)}px`;
+  textLayer.style.height = `${Math.floor(viewport.height)}px`;
+
   const renderTask = page.render({
     canvasContext: context,
     viewport,
   });
-  pdfRenderTask = renderTask;
+  pdfRenderTasks.set(pageNumber, renderTask);
   try {
     await renderTask.promise;
   } catch (error: any) {
@@ -352,22 +426,13 @@ async function renderPdfPage(localToken: number) {
     }
     throw error;
   } finally {
-    if (pdfRenderTask === renderTask) {
-      pdfRenderTask = null;
+    if (pdfRenderTasks.get(pageNumber) === renderTask) {
+      pdfRenderTasks.delete(pageNumber);
     }
   }
   if (localToken !== runToken) {
     return;
   }
-
-  const textLayer = textLayerRef.value;
-  if (!textLayer) {
-    return;
-  }
-
-  textLayer.innerHTML = "";
-  textLayer.style.width = `${Math.floor(viewport.width)}px`;
-  textLayer.style.height = `${Math.floor(viewport.height)}px`;
 
   const textContent = await page.getTextContent();
   if (localToken !== runToken) {
@@ -375,6 +440,8 @@ async function renderPdfPage(localToken: number) {
   }
 
   const snippet = props.snippet ?? "";
+  let hasHit = false;
+
   for (const item of textContent.items as any[]) {
     if (!item?.str) {
       continue;
@@ -383,6 +450,7 @@ async function renderPdfPage(localToken: number) {
     span.className = "pdf-text-item";
     if (textMatchesSnippet(item.str, snippet)) {
       span.classList.add("is-hit");
+      hasHit = true;
     }
 
     const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
@@ -399,46 +467,132 @@ async function renderPdfPage(localToken: number) {
     textLayer.appendChild(span);
   }
 
-  await nextTick();
-  const firstHit = textLayer.querySelector(".pdf-text-item.is-hit");
-  firstHit?.scrollIntoView({ block: "center", behavior: "smooth" });
-}
-
-async function loadPdfDocument(localToken: number, url: string) {
-  const task = pdfjsLib.getDocument({
-    url,
-    useWorkerFetch: true,
-  });
-  pdfDoc = await task.promise;
-  if (localToken !== runToken) {
+  if (!focusHit || !hasHit) {
     return;
   }
 
-  pageCount.value = Math.max(1, pdfDoc.numPages || 1);
-  currentPage.value = Math.min(Math.max(1, currentPage.value), pageCount.value);
   await nextTick();
-  await renderPdfPage(localToken);
+  const firstHit = textLayer.querySelector(".pdf-text-item.is-hit") as HTMLElement | null;
+  firstHit?.scrollIntoView({ block: "center", behavior: "smooth" });
+}
 
-  if (afterOpenTimer !== null) {
-    window.clearTimeout(afterOpenTimer);
+async function ensurePdfPageRange(localToken: number, targetPage: number) {
+  if (!pdfDoc || localToken !== runToken) {
+    return;
   }
-  // First render can happen before dialog layout settles; rerender once.
-  afterOpenTimer = window.setTimeout(() => {
-    if (localToken === runToken) {
-      requestSettledPdfRender();
+
+  const safePage = clamp(targetPage, 1, pageCount.value);
+
+  if (!renderedPdfPages.value.length) {
+    renderedPdfPages.value = [safePage];
+    await nextTick();
+    await renderPdfPageIntoFrame(localToken, safePage, hasSnippet.value);
+    return;
+  }
+
+  const first = getLoadedFirstPage();
+  const last = getLoadedLastPage();
+
+  if (safePage < first) {
+    const prependPages: number[] = [];
+    for (let page = safePage; page < first; page += 1) {
+      prependPages.push(page);
     }
-  }, 90);
+    renderedPdfPages.value = [...prependPages, ...renderedPdfPages.value];
+    await nextTick();
+    for (const page of prependPages) {
+      await renderPdfPageIntoFrame(localToken, page, false);
+    }
+    return;
+  }
+
+  if (safePage > last) {
+    const appendPages: number[] = [];
+    for (let page = last + 1; page <= safePage; page += 1) {
+      appendPages.push(page);
+    }
+    renderedPdfPages.value = [...renderedPdfPages.value, ...appendPages];
+    await nextTick();
+    for (const page of appendPages) {
+      await renderPdfPageIntoFrame(localToken, page, false);
+    }
+  }
+}
+
+async function appendNextPdfPage(localToken: number): Promise<boolean> {
+  if (!pdfDoc || localToken !== runToken) {
+    return false;
+  }
+  const last = getLoadedLastPage();
+  if (last <= 0 || last >= pageCount.value) {
+    return false;
+  }
+  const nextPage = last + 1;
+  await ensurePdfPageRange(localToken, nextPage);
+  return true;
+}
+
+function scrollToPdfPage(pageNumber: number, behavior: ScrollBehavior = "smooth") {
+  const host = containerRef.value;
+  const target = pdfFrameMap.get(pageNumber);
+  if (!host || !target) {
+    return;
+  }
+  host.scrollTo({
+    top: Math.max(0, target.offsetTop - 14),
+    behavior,
+  });
+}
+
+function updateCurrentPageByScroll() {
+  const host = containerRef.value;
+  if (!host || !renderedPdfPages.value.length) {
+    return;
+  }
+
+  const probe = host.scrollTop + host.clientHeight * 0.35;
+  let bestPage = renderedPdfPages.value[0];
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const page of renderedPdfPages.value) {
+    const frame = pdfFrameMap.get(page);
+    if (!frame) {
+      continue;
+    }
+    const distance = Math.abs(frame.offsetTop - probe);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestPage = page;
+    }
+  }
+
+  currentPage.value = clamp(bestPage, 1, pageCount.value);
+}
+
+async function rerenderLoadedPdfPages(localToken: number) {
+  if (!pdfDoc || localToken !== runToken || !renderedPdfPages.value.length) {
+    return;
+  }
+
+  await cancelAllPdfRenderTasks();
+  for (const page of renderedPdfPages.value) {
+    if (localToken !== runToken) {
+      return;
+    }
+    await renderPdfPageIntoFrame(localToken, page, false);
+  }
+  updateCurrentPageByScroll();
 }
 
 function requestSettledPdfRender() {
-  if (!isPdfLike.value) {
+  if (!isPdfLike.value || !pdfDoc) {
     return;
   }
   const token = runToken;
   void nextTick().then(() => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
-        void renderPdfPage(token);
+        void rerenderLoadedPdfPages(token);
       });
     });
   });
@@ -453,8 +607,83 @@ function schedulePdfRerender() {
   }
   resizeTimer = window.setTimeout(() => {
     const localToken = runToken;
-    void renderPdfPage(localToken);
+    void rerenderLoadedPdfPages(localToken);
   }, 120);
+}
+
+async function maybeAutoAppendByScroll() {
+  const host = containerRef.value;
+  if (!host || !isPdfLike.value || loading.value || errorMessage.value || autoPagingBusy.value) {
+    return;
+  }
+  if (!pdfDoc || !renderedPdfPages.value.length) {
+    return;
+  }
+
+  const loadedLastPage = getLoadedLastPage();
+  if (loadedLastPage >= pageCount.value) {
+    return;
+  }
+
+  const nearBottom = host.scrollTop + host.clientHeight >= host.scrollHeight - 160;
+  if (!nearBottom) {
+    return;
+  }
+
+  autoPagingBusy.value = true;
+  try {
+    await appendNextPdfPage(runToken);
+  } finally {
+    window.setTimeout(() => {
+      autoPagingBusy.value = false;
+    }, 80);
+  }
+}
+
+function handleViewerStageScroll() {
+  if (!isPdfLike.value) {
+    return;
+  }
+  if (scrollTicking) {
+    return;
+  }
+
+  scrollTicking = true;
+  window.requestAnimationFrame(() => {
+    scrollTicking = false;
+    updateCurrentPageByScroll();
+    void maybeAutoAppendByScroll();
+  });
+}
+
+async function loadPdfDocument(localToken: number, url: string) {
+  const task = pdfjsLib.getDocument({
+    url,
+    useWorkerFetch: true,
+  });
+  pdfDoc = await task.promise;
+  if (localToken !== runToken) {
+    return;
+  }
+
+  pageCount.value = Math.max(1, pdfDoc.numPages || 1);
+  currentPage.value = clamp(currentPage.value, 1, pageCount.value);
+  pageLabel.value = "Page";
+  resetPdfStack();
+
+  await ensurePdfPageRange(localToken, currentPage.value);
+  await nextTick();
+  scrollToPdfPage(currentPage.value, "auto");
+
+  if (afterOpenTimer !== null) {
+    window.clearTimeout(afterOpenTimer);
+  }
+  // First render can happen before dialog layout settles; rerender once.
+  afterOpenTimer = window.setTimeout(() => {
+    if (localToken === runToken) {
+      requestSettledPdfRender();
+    }
+  }, 100);
 }
 
 async function loadDocument() {
@@ -468,8 +697,9 @@ async function loadDocument() {
   resetTablePayload();
   officePdfMode.value = false;
   officePdfError.value = "";
-  zoomPercent.value = isOfficeDoc.value ? 50 : 90;
-  await cancelPdfRenderTask();
+  zoomPercent.value = isPdf.value || isOfficeDoc.value ? 50 : 90;
+  resetPdfStack();
+  await cancelAllPdfRenderTasks();
   pdfDoc = null;
 
   if (currentPage.value <= 0) {
@@ -512,41 +742,71 @@ async function loadDocument() {
   }
 }
 
+function onDocxPageState(payload: { currentPage: number; pageCount: number }) {
+  if (!isDocx.value || officePdfMode.value) {
+    return;
+  }
+  pageCount.value = Math.max(1, payload.pageCount);
+  currentPage.value = clamp(payload.currentPage, 1, pageCount.value);
+  pageLabel.value = "Page";
+}
+
+async function jumpToPdfPage(targetPage: number) {
+  const localToken = runToken;
+  const safePage = clamp(targetPage, 1, pageCount.value);
+  await ensurePdfPageRange(localToken, safePage);
+  if (localToken !== runToken) {
+    return;
+  }
+  currentPage.value = safePage;
+  scrollToPdfPage(safePage);
+}
+
 function goPrevPage() {
+  if (isDocx.value && !officePdfMode.value) {
+    docxViewerRef.value?.goPrevPage?.();
+    return;
+  }
   if (currentPage.value <= 1) {
     return;
   }
-  currentPage.value -= 1;
+  const targetPage = currentPage.value - 1;
   if (isPdfLike.value) {
-    void renderPdfPage(runToken);
+    void jumpToPdfPage(targetPage);
     return;
   }
+  currentPage.value = targetPage;
   void loadDocument();
 }
 
 function goNextPage() {
+  if (isDocx.value && !officePdfMode.value) {
+    docxViewerRef.value?.goNextPage?.();
+    return;
+  }
   if (currentPage.value >= pageCount.value) {
     return;
   }
-  currentPage.value += 1;
+  const targetPage = currentPage.value + 1;
   if (isPdfLike.value) {
-    void renderPdfPage(runToken);
+    void jumpToPdfPage(targetPage);
     return;
   }
+  currentPage.value = targetPage;
   void loadDocument();
 }
 
 function zoomIn() {
   zoomPercent.value = Math.min(240, zoomPercent.value + 10);
   if (isPdfLike.value) {
-    void renderPdfPage(runToken);
+    void rerenderLoadedPdfPages(runToken);
   }
 }
 
 function zoomOut() {
   zoomPercent.value = Math.max(50, zoomPercent.value - 10);
   if (isPdfLike.value) {
-    void renderPdfPage(runToken);
+    void rerenderLoadedPdfPages(runToken);
   }
 }
 
@@ -587,7 +847,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  void cancelPdfRenderTask();
+  void cancelAllPdfRenderTasks();
   if (resizeObserver) {
     resizeObserver.disconnect();
     resizeObserver = null;
@@ -600,6 +860,8 @@ onBeforeUnmount(() => {
     window.clearTimeout(afterOpenTimer);
     afterOpenTimer = null;
   }
+  autoPagingBusy.value = false;
+  scrollTicking = false;
 });
 
 defineExpose({
@@ -619,9 +881,9 @@ defineExpose({
       <div class="file-name">{{ sourcePath }}</div>
       <div class="toolbar-actions">
         <template v-if="hasPagination">
-          <button type="button" class="tool-btn" @click="goPrevPage" :disabled="currentPage <= 1">‹</button>
+          <button type="button" class="tool-btn" @click="goPrevPage" :disabled="currentPage <= 1">-1</button>
           <span class="tool-meta">{{ pageLabel }} {{ currentPage }} / {{ pageCount }}</span>
-          <button type="button" class="tool-btn" @click="goNextPage" :disabled="currentPage >= pageCount">›</button>
+          <button type="button" class="tool-btn" @click="goNextPage" :disabled="currentPage >= pageCount">+1</button>
           <span class="tool-sep"></span>
         </template>
         <template v-if="isPdfLike">
@@ -633,76 +895,92 @@ defineExpose({
       </div>
     </header>
 
-    <div ref="containerRef" class="viewer-stage">
+    <div ref="containerRef" class="viewer-stage" @scroll="handleViewerStageScroll">
       <el-skeleton v-if="loading" :rows="8" animated />
       <p v-else-if="errorMessage" class="viewer-error">{{ errorMessage }}</p>
-
-      <template v-else-if="isPdfLike">
-        <div class="pdf-page">
-          <canvas ref="canvasRef" class="pdf-canvas"></canvas>
-          <div ref="textLayerRef" class="pdf-text-layer"></div>
-        </div>
-      </template>
-
       <template v-else>
-        <section v-if="hasSnippet" class="text-hit-callout">
-          <small>Citation Snippet</small>
-          <p>{{ snippet }}</p>
-        </section>
-        <template v-if="isDocx && !officePdfMode">
-          <el-alert
-            v-if="officePdfError"
-            class="legacy-doc-note"
-            type="warning"
-            show-icon
-            :closable="false"
-            :title="`High-fidelity PDF preview unavailable, fallback to DOCX HTML mode: ${officePdfError}`"
-          />
-          <DocxPageViewer
-            ref="docxViewerRef"
-            :source-path="sourcePath"
-            :page="currentPage"
+        <template v-if="isPdfLike">
+          <div ref="pdfStackRef" class="pdf-stack">
+            <article
+              v-for="pageNumber in renderedPdfPages"
+              :key="`pdf-page-${pageNumber}`"
+              class="pdf-page"
+              :class="{ 'is-current': pageNumber === currentPage }"
+              :ref="(node) => setPdfFrameRef(pageNumber, node)"
+            >
+              <canvas class="pdf-canvas" :ref="(node) => setPdfCanvasRef(pageNumber, node)"></canvas>
+              <div class="pdf-text-layer" :ref="(node) => setPdfTextLayerRef(pageNumber, node)"></div>
+            </article>
+          </div>
+          <p v-if="autoPagingBusy" class="pdf-load-more">Loading next page...</p>
+        </template>
+
+        <template v-else>
+          <section v-if="hasSnippet" class="text-hit-callout">
+            <small>Citation Snippet</small>
+            <p>{{ snippet }}</p>
+          </section>
+          <template v-if="isDocx && !officePdfMode">
+            <el-alert
+              v-if="officePdfError"
+              class="legacy-doc-note"
+              type="warning"
+              show-icon
+              :closable="false"
+              :title="`High-fidelity PDF preview unavailable, fallback to DOCX HTML mode: ${officePdfError}`"
+            />
+            <DocxPageViewer
+              ref="docxViewerRef"
+              :source-path="sourcePath"
+              :page="currentPage"
+              :snippet="snippet"
+              :active="active"
+              @page-state="onDocxPageState"
+              @error="emit('error', $event)"
+            />
+          </template>
+          <template v-else-if="isLegacyDoc && !officePdfMode">
+            <el-alert
+              class="legacy-doc-note"
+              type="warning"
+              show-icon
+              :closable="false"
+              title="Legacy .doc preview fell back to text mode. Install LibreOffice or Word for high-fidelity PDF preview."
+            />
+            <el-alert
+              v-if="officePdfError"
+              class="legacy-doc-note"
+              type="error"
+              show-icon
+              :closable="false"
+              :title="officePdfError"
+            />
+            <article class="text-page markdown-body" v-html="textHtml"></article>
+          </template>
+          <SpreadsheetGridViewer
+            v-else-if="isTableFormat"
+            :headers="tableHeaders"
+            :rows="tableRows"
+            :data-start-row="tableDataStartRow"
             :snippet="snippet"
-            :active="active"
-            @error="emit('error', $event)"
+            :truncated="tableTruncated"
+            :total-rows="tableTotalRows"
+            :total-columns="tableTotalColumns"
           />
+          <article v-else class="text-page markdown-body" v-html="textHtml"></article>
         </template>
-        <template v-else-if="isLegacyDoc && !officePdfMode">
-          <el-alert
-            class="legacy-doc-note"
-            type="warning"
-            show-icon
-            :closable="false"
-            title="Legacy .doc preview fell back to text mode. Install LibreOffice or Word for high-fidelity PDF preview."
-          />
-          <el-alert
-            v-if="officePdfError"
-            class="legacy-doc-note"
-            type="error"
-            show-icon
-            :closable="false"
-            :title="officePdfError"
-          />
-          <article class="text-page markdown-body" v-html="textHtml"></article>
-        </template>
-        <SpreadsheetGridViewer
-          v-else-if="isTableFormat"
-          :headers="tableHeaders"
-          :rows="tableRows"
-          :data-start-row="tableDataStartRow"
-          :snippet="snippet"
-          :truncated="tableTruncated"
-          :total-rows="tableTotalRows"
-          :total-columns="tableTotalColumns"
-        />
-        <article v-else class="text-page markdown-body" v-html="textHtml"></article>
       </template>
+    </div>
+    <div v-if="showSidePager && hasPagination && !loading && !errorMessage" class="stage-pager-layer">
+      <button type="button" class="stage-page-btn is-left" @click="goPrevPage" :disabled="currentPage <= 1">-1</button>
+      <button type="button" class="stage-page-btn is-right" @click="goNextPage" :disabled="currentPage >= pageCount">+1</button>
     </div>
   </section>
 </template>
 
 <style scoped>
 .unified-viewer {
+  position: relative;
   border: 1px solid #dde3ea;
   border-radius: 14px;
   overflow: hidden;
@@ -732,16 +1010,24 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: nowrap;
 }
 
 .tool-btn {
-  width: 26px;
-  height: 26px;
+  min-width: 32px;
+  height: 28px;
+  padding: 0 6px;
   border-radius: 7px;
   border: 1px solid #cfd8e3;
   background: #fff;
   color: #334155;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  line-height: 1;
+  font-size: 0.78rem;
 }
 
 .tool-btn:disabled {
@@ -774,9 +1060,53 @@ defineExpose({
 }
 
 .viewer-stage {
+  position: relative;
   height: 74vh;
   overflow: auto;
   padding: 14px;
+}
+
+.stage-pager-layer {
+  position: absolute;
+  inset: 58px 0 0;
+  pointer-events: none;
+  z-index: 12;
+}
+
+.stage-page-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 9;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  border: 1px solid #b6c5d7;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 8px 16px rgba(15, 23, 42, 0.12);
+  color: #0f172a;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+
+.stage-page-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.stage-page-btn.is-left {
+  left: 8px;
+}
+
+.stage-page-btn.is-right {
+  right: 8px;
 }
 
 .viewer-error {
@@ -811,6 +1141,14 @@ defineExpose({
   max-width: 960px;
 }
 
+.pdf-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: center;
+  padding: 2px 34px 8px;
+}
+
 .pdf-page {
   position: relative;
   width: fit-content;
@@ -820,6 +1158,10 @@ defineExpose({
   box-shadow: 0 10px 30px rgba(2, 12, 27, 0.08);
   overflow: hidden;
   background: #fff;
+}
+
+.pdf-page.is-current {
+  box-shadow: 0 0 0 2px rgba(16, 163, 127, 0.32), 0 12px 30px rgba(2, 12, 27, 0.1);
 }
 
 .pdf-canvas {
@@ -847,6 +1189,13 @@ defineExpose({
   background: rgba(52, 211, 153, 0.46);
   box-shadow: 0 0 0 1px rgba(16, 163, 127, 0.34);
   border-radius: 3px;
+}
+
+.pdf-load-more {
+  margin: 6px 0 2px;
+  text-align: center;
+  color: #0f766e;
+  font-size: 0.82rem;
 }
 
 .text-page {
@@ -939,6 +1288,10 @@ defineExpose({
   .viewer-stage {
     height: 66vh;
     padding: 10px;
+  }
+
+  .pdf-stack {
+    padding: 0 20px 6px;
   }
 }
 </style>

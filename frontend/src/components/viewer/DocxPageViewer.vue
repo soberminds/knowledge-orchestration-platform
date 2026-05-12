@@ -12,6 +12,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: "error", message: string): void;
+  (event: "page-state", payload: { currentPage: number; pageCount: number }): void;
 }>();
 
 const loading = ref(false);
@@ -49,6 +50,13 @@ function collectPages() {
   pageElements.value = pages;
   pageCount.value = Math.max(1, pages.length);
   currentPage.value = clamp(currentPage.value, 1, pageCount.value);
+}
+
+function emitPageState() {
+  emit("page-state", {
+    currentPage: currentPage.value,
+    pageCount: pageCount.value,
+  });
 }
 
 function applyZoom() {
@@ -427,12 +435,22 @@ watch(
   },
 );
 
+watch(
+  () => [currentPage.value, pageCount.value],
+  () => {
+    emitPageState();
+  },
+  { immediate: true },
+);
+
 onMounted(() => {
   void renderDocxDocument();
 });
 
 defineExpose({
   refreshViewer,
+  goPrevPage,
+  goNextPage,
 });
 </script>
 
@@ -492,13 +510,20 @@ defineExpose({
 }
 
 .tool-btn {
-  min-width: 28px;
+  min-width: 32px;
   height: 28px;
+  padding: 0 6px;
   border-radius: 8px;
   border: 1px solid #cfd8e3;
   background: #fff;
   color: #334155;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  line-height: 1;
+  font-size: 0.78rem;
 }
 
 .tool-btn:disabled {
