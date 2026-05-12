@@ -1,10 +1,4 @@
-"""项目全局配置。
-
-这个文件只做三件事：
-1. 从 `.env` 读取配置
-2. 统一管理目录、模型和切片参数
-3. 避免把敏感信息写死在代码里
-"""
+"""Project runtime settings loaded from .env and environment variables."""
 
 from __future__ import annotations
 
@@ -14,10 +8,7 @@ from pathlib import Path
 
 
 def _load_env_file(path: Path) -> None:
-    """手写一个很轻量的 `.env` 读取器。
-
-    这样项目即使没有安装 python-dotenv 也能运行。
-    """
+    """Tiny .env loader, so the app works without python-dotenv."""
     if not path.exists():
         return
 
@@ -39,28 +30,24 @@ def _load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
-# 项目根目录，后面所有路径都以它为基准。
 ROOT_DIR = Path(__file__).resolve().parents[2]
 _load_env_file(ROOT_DIR / ".env")
 
-# Silence Chroma telemetry by default to avoid noisy runtime errors.
-# Users can still override these in `.env` when needed.
+# Silence Chroma telemetry by default to avoid noisy runtime logs.
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "FALSE")
 
 
 def _env_int(name: str, default: int) -> int:
-    """把环境变量转成整数。"""
     return int(os.getenv(name, str(default)))
 
 
 def _env_float(name: str, default: float) -> float:
-    """把环境变量转成浮点数。"""
     return float(os.getenv(name, str(default)))
 
 
 @dataclass(frozen=True)
 class Settings:
-    """把所有配置集中成一个对象，调用起来更清晰。"""
+    """Centralized immutable settings object."""
 
     root_dir: Path = ROOT_DIR
     data_dir: Path = ROOT_DIR / "data"
@@ -70,16 +57,44 @@ class Settings:
     preview_pdf_dir: Path = ROOT_DIR / "data" / "preview_pdf"
     collection_name: str = os.getenv("CHROMA_COLLECTION", "rga_knowledge_base")
 
-    # 这里不要写死真实 key，统一从环境变量读取。
+    # LLM provider settings.
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    qwen_api_key: str = os.getenv("QWEN_API_KEY", "")
+    qwen_base_url: str = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    zai_api_key: str = os.getenv("ZAI_API_KEY", "")
+    zai_base_url: str = os.getenv("ZAI_BASE_URL", "https://api.z.ai/api/paas/v4")
+    kimi_api_key: str = os.getenv("KIMI_API_KEY", "")
+    kimi_base_url: str = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
+    hunyuan_api_key: str = os.getenv("HUNYUAN_API_KEY", "")
+    hunyuan_base_url: str = os.getenv("HUNYUAN_BASE_URL", "https://api.hunyuan.cloud.tencent.com/v1")
+    siliconflow_api_key: str = os.getenv("SILICONFLOW_API_KEY", "")
+    siliconflow_base_url: str = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+    qianfan_api_key: str = os.getenv("QIANFAN_API_KEY", "")
+    qianfan_base_url: str = os.getenv("QIANFAN_BASE_URL", "https://qianfan.baidubce.com/v2")
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    model_provider_overrides_json: str = os.getenv("MODEL_PROVIDER_OVERRIDES_JSON", "").strip()
+    extra_provider_configs_json: str = os.getenv("EXTRA_PROVIDER_CONFIGS_JSON", "").strip()
+    available_models: tuple[str, ...] = tuple(
+        model.strip()
+        for model in os.getenv("AVAILABLE_MODELS", "").split(",")
+        if model.strip()
+    )
 
-    # 本地向量模型，用于检索，不走大模型接口。
+    # Optional external web search provider.
+    web_search_provider: str = os.getenv("WEB_SEARCH_PROVIDER", "none").strip().lower()
+    web_search_api_key: str = os.getenv("WEB_SEARCH_API_KEY", "").strip()
+    web_search_top_k: int = _env_int("WEB_SEARCH_TOP_K", 5)
+    cost_currency: str = os.getenv("COST_CURRENCY", "CNY").strip().upper()
+    model_pricing_json: str = os.getenv("MODEL_PRICING_JSON", "").strip()
+
+    # Local embedding model for retrieval.
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
     embedding_device: str = os.getenv("EMBEDDING_DEVICE", "cpu")
 
-    # RAG 相关调参。
+    # RAG tuning.
     top_k: int = _env_int("TOP_K", 4)
     chunk_size: int = _env_int("CHUNK_SIZE", 800)
     chunk_overlap: int = _env_int("CHUNK_OVERLAP", 120)

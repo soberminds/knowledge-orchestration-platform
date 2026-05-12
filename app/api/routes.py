@@ -16,7 +16,9 @@ from app.core.settings import settings
 from app.dependencies import get_knowledge_base_service
 from app.schemas import (
     CitationRef,
+    CostEstimate,
     ChatRequest,
+    ChatOptionsResponse,
     ChatResponse,
     DocumentInfo,
     HealthResponse,
@@ -24,9 +26,10 @@ from app.schemas import (
     SearchRequest,
     SearchResponse,
     SourceHit,
+    TokenUsage,
 )
 from app.services.files import read_file_page_text
-from app.services.knowledge_base import KnowledgeBaseService, SearchHit
+from app.services.knowledge_base import KnowledgeBaseService, ModelUnavailableError, SearchHit
 from app.services.preview_pdf import get_preview_pdf_path
 
 
@@ -57,6 +60,36 @@ def _to_citation_ref(payload: dict) -> CitationRef:
         score=float(payload["score"]) if payload.get("score") is not None else None,
         preview=str(payload.get("preview", "")),
     )
+
+
+def _to_token_usage(payload: dict | None) -> TokenUsage | None:
+    if not payload:
+        return None
+    try:
+        return TokenUsage(
+            prompt_tokens=int(payload.get("prompt_tokens", 0)),
+            completion_tokens=int(payload.get("completion_tokens", 0)),
+            total_tokens=int(payload.get("total_tokens", 0)),
+        )
+    except Exception:
+        return None
+
+
+def _to_cost_estimate(payload: dict | None) -> CostEstimate | None:
+    if not payload:
+        return None
+    try:
+        return CostEstimate(
+            currency=str(payload.get("currency", "CNY")),
+            input_per_1m_tokens=float(payload["input_per_1m_tokens"]) if payload.get("input_per_1m_tokens") is not None else None,
+            output_per_1m_tokens=float(payload["output_per_1m_tokens"]) if payload.get("output_per_1m_tokens") is not None else None,
+            input_cost=float(payload["input_cost"]) if payload.get("input_cost") is not None else None,
+            output_cost=float(payload["output_cost"]) if payload.get("output_cost") is not None else None,
+            total_cost=float(payload["total_cost"]) if payload.get("total_cost") is not None else None,
+            estimated=bool(payload.get("estimated", True)),
+        )
+    except Exception:
+        return None
 
 
 def _resolve_file_path(path_value: str) -> Path:
@@ -228,7 +261,19 @@ async def chat(
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
 ) -> ChatResponse:
     try:
-        result = await run_in_threadpool(service.answer, request.question, request.history, request.top_k)
+        result = await run_in_threadpool(
+            service.answer,
+            request.question,
+            request.history,
+            request.top_k,
+            request.model,
+            request.thinking_mode,
+            request.web_search,
+            request.native_web_search,
+            request.external_web_search,
+        )
+    except ModelUnavailableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return ChatResponse(
@@ -236,6 +281,9 @@ async def chat(
         rewritten_question=result["rewritten_question"],
         sources=[_to_source_hit(hit) for hit in result["hits"]],
         citations=[_to_citation_ref(item) for item in result.get("citations", [])],
+        model=str(result.get("model") or request.model or service.settings.deepseek_model),
+        usage=_to_token_usage(result.get("usage")),
+        cost_estimate=_to_cost_estimate(result.get("cost_estimate")),
     )
 
 
@@ -246,18 +294,34 @@ async def chat_stream(
 ) -> StreamingResponse:
     def event_stream() -> Iterator[str]:
         try:
-            for event in service.stream_answer(request.question, request.history, request.top_k):
+            for event in service.stream_answer(
+                request.question,
+                request.history,
+                request.top_k,
+                request.model,
+                request.thinking_mode,
+                request.web_search,
+                request.native_web_search,
+                request.external_web_search,
+            ):
                 if event.get("type") == "done":
+                    usage = _to_token_usage(event.get("usage"))
+                    cost_estimate = _to_cost_estimate(event.get("cost_estimate"))
                     payload = {
                         "type": "done",
                         "answer": event.get("answer", ""),
                         "rewritten_question": event.get("rewritten_question", ""),
                         "sources": [_to_source_hit(hit).model_dump() for hit in event.get("hits", [])],
                         "citations": [_to_citation_ref(item).model_dump() for item in event.get("citations", [])],
+                        "model": event.get("model", request.model or service.settings.deepseek_model),
+                        "usage": usage.model_dump() if usage else None,
+                        "cost_estimate": cost_estimate.model_dump() if cost_estimate else None,
                     }
                     yield _sse_payload(payload)
                     continue
                 yield _sse_payload(event)
+        except ModelUnavailableError as exc:
+            yield _sse_payload({"type": "error", "error": str(exc)})
         except Exception as exc:
             yield _sse_payload({"type": "error", "error": str(exc)})
 
@@ -269,4 +333,17 @@ async def chat_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get("/chat/options", response_model=ChatOptionsResponse)
+async def chat_options(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> ChatOptionsResponse:
+    model_options = service.resolve_model_options()
+    return ChatOptionsResponse(
+        default_model=service.settings.deepseek_model,
+        models=service.resolve_available_models(),
+        model_options=model_options,
+        web_search_available=service.is_web_search_available(),
+        external_web_search_available=service.is_web_search_available(),
+        thinking_modes=["quick", "deep"],
     )

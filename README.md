@@ -139,3 +139,33 @@ uvicorn app.main:app --reload
 说明：
 - 这样做可以固定使用 Python 3.11，避免 Python 3.12 在 Windows 上安装 `chroma-hnswlib` 时触发本地 C++ 编译报错。
 - 虚拟环境只用于本机开发隔离依赖，不应提交到仓库。
+
+## Chat Production Config (New)
+
+- See `docs/production-chat-config.md` for:
+  - DeepSeek + web search `.env` recommendations
+  - provider-grouped model dropdown behavior
+  - per-answer token/cost estimate behavior
+- Use `.env.example` as the template before local or docker startup.
+
+## Multi-Provider Auto Routing (New)
+
+- Backend now routes model calls by model name prefix to provider-specific `API_KEY` + `BASE_URL`.
+- Frontend model dropdown now shows availability; models without key are shown as `暂未配置` and cannot be selected.
+- Configure providers in `.env` (see `.env.example` and `docs/production-chat-config.md`).
+
+### Supported provider env keys
+
+- `DEEPSEEK_API_KEY` + `DEEPSEEK_BASE_URL`
+- `QWEN_API_KEY` + `QWEN_BASE_URL`
+- `ZAI_API_KEY` + `ZAI_BASE_URL`
+- `KIMI_API_KEY` + `KIMI_BASE_URL`
+- `HUNYUAN_API_KEY` + `HUNYUAN_BASE_URL`
+- `SILICONFLOW_API_KEY` + `SILICONFLOW_BASE_URL`
+- `QIANFAN_API_KEY` + `QIANFAN_BASE_URL`
+- `OPENAI_API_KEY` + `OPENAI_BASE_URL`
+
+### Optional advanced routing
+
+- `MODEL_PROVIDER_OVERRIDES_JSON` for explicit model->provider mapping
+- `EXTRA_PROVIDER_CONFIGS_JSON` for custom OpenAI-compatible gateways

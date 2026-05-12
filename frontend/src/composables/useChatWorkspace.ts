@@ -1,6 +1,15 @@
 import type { Ref } from "vue";
 import { computed, nextTick, reactive, ref } from "vue";
-import { chatStream, type CitationRef, type HistoryItem, type SourceHit } from "../api";
+import {
+  chatStream,
+  getChatOptions,
+  type ChatModelOption,
+  type ChatStreamDoneEvent,
+  type CitationRef,
+  type HistoryItem,
+  type SourceHit,
+  type ThinkingMode,
+} from "../api";
 import type { ChatSession, UiMessage } from "../types/chat";
 
 const STARTER_PROMPTS = [
@@ -64,12 +73,23 @@ export function useChatWorkspace(topK: Ref<number>) {
   const composer = ref("");
   const errorMessage = ref("");
   const messageViewport = ref<HTMLElement | null>(null);
+  const availableModels = ref<string[]>([]);
+  const modelOptions = ref<ChatModelOption[]>([]);
+  const selectedModel = ref("");
+  const thinkingMode = ref<ThinkingMode>("quick");
+  const nativeWebSearchEnabled = ref(false);
+  const externalWebSearchEnabled = ref(false);
+  const externalWebSearchAvailable = ref(false);
 
   const activeSession = computed(
     () => sessions.value.find((session) => session.id === activeSessionId.value) ?? null,
   );
   const messages = computed(() => activeSession.value?.messages ?? []);
   const recentSessions = computed(() => [...sessions.value].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 12));
+  const selectedModelOption = computed(
+    () => modelOptions.value.find((item) => item.model === selectedModel.value) ?? null,
+  );
+  const selectedModelSupportsNativeSearch = computed(() => Boolean(selectedModelOption.value?.supports_native_web_search));
   const starterPrompts = STARTER_PROMPTS;
 
   async function scrollToBottom(smooth = false) {
@@ -111,6 +131,14 @@ export function useChatWorkspace(topK: Ref<number>) {
     void scrollToBottom();
   }
 
+  function setSelectedModel(model: string) {
+    selectedModel.value = model;
+    const nextOption = modelOptions.value.find((item) => item.model === model);
+    if (!nextOption?.supports_native_web_search) {
+      nativeWebSearchEnabled.value = false;
+    }
+  }
+
   async function appendDeltaSmoothly(target: UiMessage, delta: string) {
     let index = 0;
     for (const char of delta) {
@@ -129,11 +157,14 @@ export function useChatWorkspace(topK: Ref<number>) {
     }
   }
 
-  function applyDonePayload(target: UiMessage, payload: { answer: string; sources: SourceHit[]; citations: CitationRef[] }) {
+  function applyDonePayload(target: UiMessage, payload: ChatStreamDoneEvent) {
     // Always use the final done payload. It may contain a polished/expanded answer.
     target.content = payload.answer ?? target.content;
     target.sources = payload.sources ?? [];
     target.citations = payload.citations ?? [];
+    target.model = payload.model ?? undefined;
+    target.usage = payload.usage ?? undefined;
+    target.costEstimate = payload.cost_estimate ?? undefined;
     target.streaming = false;
   }
 
@@ -153,6 +184,15 @@ export function useChatWorkspace(topK: Ref<number>) {
 
     const question = composer.value.trim();
     if (!question) {
+      return;
+    }
+
+    const selected = selectedModel.value.trim();
+    const selectedOption = modelOptions.value.find((item) => item.model === selected);
+    if (selectedOption && !selectedOption.available) {
+      errorMessage.value =
+        selectedOption.unavailable_reason ||
+        `Model "${selected}" is temporarily unavailable. Please configure its API key in .env.`;
       return;
     }
 
@@ -195,6 +235,11 @@ export function useChatWorkspace(topK: Ref<number>) {
           question,
           history,
           top_k: topK.value,
+          model: selectedModel.value || undefined,
+          web_search: false,
+          native_web_search: selectedModelSupportsNativeSearch.value ? nativeWebSearchEnabled.value : false,
+          external_web_search: externalWebSearchAvailable.value ? externalWebSearchEnabled.value : false,
+          thinking_mode: thinkingMode.value,
         },
         {
           onDelta: async (delta) => {
@@ -212,8 +257,9 @@ export function useChatWorkspace(topK: Ref<number>) {
     } catch (error) {
       assistantMessage.streaming = false;
       assistantMessage.failed = true;
-      assistantMessage.content = error instanceof Error ? error.message : "Chat request failed";
-      errorMessage.value = "Chat failed. Please check backend logs.";
+      const message = error instanceof Error ? error.message : "Chat request failed";
+      assistantMessage.content = message;
+      errorMessage.value = message;
     } finally {
       loading.value = false;
       session.updatedAt = Date.now();
@@ -223,6 +269,46 @@ export function useChatWorkspace(topK: Ref<number>) {
   function initialize() {
     if (!sessions.value.length) {
       newChat();
+    }
+    void loadChatOptions();
+  }
+
+  async function loadChatOptions() {
+    try {
+      const options = await getChatOptions();
+      availableModels.value = options.models?.length ? options.models : [options.default_model];
+      modelOptions.value = options.model_options ?? [];
+      const firstAvailableModel =
+        modelOptions.value.find((item) => item.available)?.model || options.default_model || availableModels.value[0];
+      selectedModel.value = availableModels.value.includes(firstAvailableModel)
+        ? firstAvailableModel
+        : availableModels.value[0];
+      externalWebSearchAvailable.value = Boolean(
+        options.external_web_search_available ?? options.web_search_available,
+      );
+      if (!externalWebSearchAvailable.value) {
+        externalWebSearchEnabled.value = false;
+      }
+
+      const currentOption = modelOptions.value.find((item) => item.model === selectedModel.value);
+      if (!currentOption?.supports_native_web_search) {
+        nativeWebSearchEnabled.value = false;
+      }
+    } catch {
+      // Keep safe defaults without interrupting chat usage.
+      availableModels.value = availableModels.value.length ? availableModels.value : ["deepseek-v4-flash"];
+      modelOptions.value = availableModels.value.map((model) => ({
+        model,
+        provider: "deepseek",
+        supports_native_web_search: false,
+        available: true,
+      }));
+      if (!selectedModel.value) {
+        selectedModel.value = availableModels.value[0];
+      }
+      externalWebSearchAvailable.value = false;
+      externalWebSearchEnabled.value = false;
+      nativeWebSearchEnabled.value = false;
     }
   }
 
@@ -238,11 +324,21 @@ export function useChatWorkspace(topK: Ref<number>) {
     starterPrompts,
     newChat,
     switchSession,
+    setSelectedModel,
     useStarterPrompt,
     sendChat,
     initialize,
     clearError,
     setViewport,
     scrollToBottom,
+    availableModels,
+    modelOptions,
+    selectedModel,
+    thinkingMode,
+    nativeWebSearchEnabled,
+    selectedModelSupportsNativeSearch,
+    externalWebSearchEnabled,
+    externalWebSearchAvailable,
+    loadChatOptions,
   };
 }

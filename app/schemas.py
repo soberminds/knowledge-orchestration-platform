@@ -1,7 +1,4 @@
-"""接口数据结构定义。
-
-这里统一放请求体和响应体模型，前后端对接时会更清晰。
-"""
+"""API schema models."""
 
 from __future__ import annotations
 
@@ -11,22 +8,30 @@ from pydantic import BaseModel, Field
 
 
 class ChatHistoryItem(BaseModel):
-    """聊天历史中的一条消息。"""
+    """A single history message."""
 
     role: Literal["system", "user", "assistant"] = "user"
     content: str = Field(min_length=1)
 
 
 class ChatRequest(BaseModel):
-    """前端调用 /api/chat 时发送的请求体。"""
+    """Request payload for /api/chat and /api/chat/stream."""
 
     question: str = Field(min_length=1, max_length=4000)
     history: list[ChatHistoryItem] = Field(default_factory=list)
     top_k: int | None = Field(default=None, ge=1, le=20)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    # Legacy flag kept for backward compatibility.
+    web_search: bool = False
+    # Prefer provider-native web search when model/provider supports it.
+    native_web_search: bool = False
+    # External web search via WEB_SEARCH_PROVIDER (tavily/serper).
+    external_web_search: bool = False
+    thinking_mode: Literal["quick", "deep"] = "quick"
 
 
 class SourceHit(BaseModel):
-    """检索命中的一段来源信息。"""
+    """A retrieval hit snippet."""
 
     source: str
     chunk_index: int
@@ -36,7 +41,7 @@ class SourceHit(BaseModel):
 
 
 class CitationRef(BaseModel):
-    """回答正文中 [Sx] 标签对应的证据引用。"""
+    """Citation reference used by [Sx] markers in answer text."""
 
     label: str
     source: str
@@ -47,30 +52,74 @@ class CitationRef(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    """/api/chat 的返回值。"""
+    """Response payload for /api/chat."""
 
     answer: str
     rewritten_question: str
     sources: list[SourceHit]
     citations: list[CitationRef] = Field(default_factory=list)
+    model: str | None = None
+    usage: "TokenUsage" | None = None
+    cost_estimate: "CostEstimate" | None = None
+
+
+class ChatModelOption(BaseModel):
+    """One chat model entry with availability metadata."""
+
+    model: str
+    provider: str
+    supports_native_web_search: bool = False
+    available: bool = True
+    unavailable_reason: str | None = None
+
+
+class ChatOptionsResponse(BaseModel):
+    """Dynamic options used by chat controls in frontend."""
+
+    default_model: str
+    models: list[str]
+    model_options: list[ChatModelOption] = Field(default_factory=list)
+    web_search_available: bool
+    external_web_search_available: bool = False
+    thinking_modes: list[Literal["quick", "deep"]] = Field(default_factory=lambda: ["quick", "deep"])
+
+
+class TokenUsage(BaseModel):
+    """Token usage for one model response."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class CostEstimate(BaseModel):
+    """Estimated inference cost based on configured unit prices."""
+
+    currency: str
+    input_per_1m_tokens: float | None = None
+    output_per_1m_tokens: float | None = None
+    input_cost: float | None = None
+    output_cost: float | None = None
+    total_cost: float | None = None
+    estimated: bool = True
 
 
 class SearchRequest(BaseModel):
-    """前端调用 /api/search 时发送的请求体。"""
+    """Request payload for /api/search."""
 
     query: str = Field(min_length=1, max_length=4000)
     top_k: int | None = Field(default=None, ge=1, le=20)
 
 
 class SearchResponse(BaseModel):
-    """/api/search 的返回值。"""
+    """Response payload for /api/search."""
 
     query: str
     hits: list[SourceHit]
 
 
 class IngestResponse(BaseModel):
-    """重建索引或上传文件后的返回值。"""
+    """Response payload for ingest/upload/delete operations."""
 
     documents_loaded: int
     chunks_indexed: int
@@ -78,7 +127,7 @@ class IngestResponse(BaseModel):
 
 
 class DocumentInfo(BaseModel):
-    """前端展示文件列表时使用。"""
+    """Document metadata for UI list."""
 
     path: str
     size_bytes: int
@@ -87,7 +136,7 @@ class DocumentInfo(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """健康检查接口返回值。"""
+    """Response payload for /api/health."""
 
     status: str
     collection_name: str

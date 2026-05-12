@@ -42,11 +42,39 @@ const citationMap = computed(() => {
   return map;
 });
 
+const usageSummary = computed(() => {
+  if (props.message.role !== "assistant" || !props.message.usage) {
+    return "";
+  }
+  const usage = props.message.usage;
+  return `tokens in/out/total: ${usage.prompt_tokens}/${usage.completion_tokens}/${usage.total_tokens}`;
+});
+
+const costSummary = computed(() => {
+  if (
+    props.message.role !== "assistant" ||
+    props.message.costEstimate == null ||
+    props.message.costEstimate.total_cost == null
+  ) {
+    return "";
+  }
+  const cost = props.message.costEstimate;
+  const currency = cost.currency || "CNY";
+  const total = Number(cost.total_cost || 0).toFixed(6);
+  const model = props.message.model ? `model: ${props.message.model} ` : "";
+  return `${model}estimated cost: ${currency} ${total}`;
+});
+
 function citationElementId(label: string) {
   return `${props.message.id}-cite-${label}`;
 }
 
 function openCitationViewer(citation: CitationRef) {
+  if (/^https?:\/\//i.test(citation.source)) {
+    window.open(citation.source, "_blank", "noopener,noreferrer");
+    return;
+  }
+
   activeCitationLabel.value = citation.label;
   viewerError.value = "";
   viewerSourcePath.value = citation.source;
@@ -94,6 +122,11 @@ async function focusCitation(label: string) {
       </div>
 
       <p v-if="message.failed" class="failed-note">Request failed. Please retry.</p>
+      <p v-if="usageSummary || costSummary" class="usage-note">
+        <span v-if="usageSummary">{{ usageSummary }}</span>
+        <span v-if="usageSummary && costSummary"> · </span>
+        <span v-if="costSummary">{{ costSummary }}</span>
+      </p>
 
       <details v-if="message.sources.length" ref="sourceDetailsRef" class="source-details">
         <summary>Sources ({{ message.sources.length }})</summary>
@@ -229,6 +262,12 @@ async function focusCitation(label: string) {
   margin: 0.35rem 0 0;
   color: #b42318;
   font-size: 0.84rem;
+}
+
+.usage-note {
+  margin: 0.38rem 0 0;
+  color: #64748b;
+  font-size: 0.8rem;
 }
 
 .source-details {

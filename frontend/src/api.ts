@@ -25,6 +25,55 @@ export interface ChatResponse {
   rewritten_question: string;
   sources: SourceHit[];
   citations: CitationRef[];
+  model?: string | null;
+  usage?: TokenUsage | null;
+  cost_estimate?: CostEstimate | null;
+}
+
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface CostEstimate {
+  currency: string;
+  input_per_1m_tokens?: number | null;
+  output_per_1m_tokens?: number | null;
+  input_cost?: number | null;
+  output_cost?: number | null;
+  total_cost?: number | null;
+  estimated?: boolean;
+}
+
+export type ThinkingMode = "quick" | "deep";
+
+export interface ChatModelOption {
+  model: string;
+  provider: string;
+  supports_native_web_search?: boolean;
+  available: boolean;
+  unavailable_reason?: string | null;
+}
+
+export interface ChatOptionsResponse {
+  default_model: string;
+  models: string[];
+  model_options: ChatModelOption[];
+  web_search_available: boolean;
+  external_web_search_available: boolean;
+  thinking_modes: ThinkingMode[];
+}
+
+export interface ChatRequestPayload {
+  question: string;
+  history: HistoryItem[];
+  top_k?: number;
+  model?: string;
+  web_search?: boolean;
+  native_web_search?: boolean;
+  external_web_search?: boolean;
+  thinking_mode?: ThinkingMode;
 }
 
 export interface SearchResponse {
@@ -72,12 +121,15 @@ interface ChatStreamDeltaEvent {
   delta: string;
 }
 
-interface ChatStreamDoneEvent {
+export interface ChatStreamDoneEvent {
   type: "done";
   answer: string;
   rewritten_question: string;
   sources: SourceHit[];
   citations: CitationRef[];
+  model?: string | null;
+  usage?: TokenUsage | null;
+  cost_estimate?: CostEstimate | null;
 }
 
 interface ChatStreamErrorEvent {
@@ -171,7 +223,7 @@ export async function rebuildIndex(): Promise<IngestResponse> {
   });
 }
 
-export async function chat(payload: { question: string; history: HistoryItem[]; top_k?: number }): Promise<ChatResponse> {
+export async function chat(payload: ChatRequestPayload): Promise<ChatResponse> {
   return requestJson<ChatResponse>("/api/chat", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -179,7 +231,7 @@ export async function chat(payload: { question: string; history: HistoryItem[]; 
 }
 
 export async function chatStream(
-  payload: { question: string; history: HistoryItem[]; top_k?: number },
+  payload: ChatRequestPayload,
   handlers: ChatStreamHandlers = {},
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/api/chat/stream`, {
@@ -257,6 +309,10 @@ export async function chatStream(
   if (!receivedDone) {
     throw new Error("Stream ended unexpectedly without done event.");
   }
+}
+
+export async function getChatOptions(): Promise<ChatOptionsResponse> {
+  return requestJson<ChatOptionsResponse>("/api/chat/options");
 }
 
 export async function search(payload: { query: string; top_k?: number }): Promise<SearchResponse> {
