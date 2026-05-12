@@ -59,8 +59,8 @@ class ChatResponse(BaseModel):
     sources: list[SourceHit]
     citations: list[CitationRef] = Field(default_factory=list)
     model: str | None = None
-    usage: "TokenUsage" | None = None
-    cost_estimate: "CostEstimate" | None = None
+    usage: TokenUsage | None = None
+    cost_estimate: CostEstimate | None = None
 
 
 class ChatModelOption(BaseModel):
@@ -141,3 +141,6 @@ class HealthResponse(BaseModel):
     status: str
     collection_name: str
     indexed_chunks: int
+
+
+ChatResponse.model_rebuild()
