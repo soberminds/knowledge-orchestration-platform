@@ -1,10 +1,19 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { getFileEditableText, saveFileEditableText, type DocumentInfo } from "../../api";
+import {
+  getFileEditableText,
+  saveFileEditableText,
+  type DocumentInfo,
+  type OfficeHealthResponse,
+} from "../../api";
+import OnlyOfficeHealthPanel from "./OnlyOfficeHealthPanel.vue";
 import { useI18n } from "../../composables/useI18n";
 
 const props = defineProps<{
   documents: DocumentInfo[];
+  officeHealth: OfficeHealthResponse | null;
+  officeHealthLoading: boolean;
+  officeHealthError?: string;
   selectedFiles: File[];
   uploading: boolean;
   deletingPath?: string;
@@ -14,8 +23,10 @@ const emit = defineEmits<{
   (event: "files-change", files: File[]): void;
   (event: "upload"): void;
   (event: "open-document", path: string): void;
+  (event: "open-office-editor", path: string): void;
   (event: "delete-document", path: string): void;
   (event: "document-saved", path: string): void;
+  (event: "refresh-office-health"): void;
 }>();
 
 const fileInputRef = ref<HTMLInputElement | null>(null);
@@ -63,6 +74,13 @@ const EDITABLE_TEXT_EXTENSIONS = new Set([
   ".sh",
   ".bat",
   ".ps1",
+]);
+const OFFICE_PRO_EDITOR_EXTENSIONS = new Set([
+  ".doc",
+  ".docx",
+  ".xls",
+  ".xlsx",
+  ".xlsm",
 ]);
 
 const selectedFileNames = computed(() => props.selectedFiles.map((file) => file.name));
@@ -112,6 +130,14 @@ function deleteDocument(path: string) {
 
 function isEditableDocument(doc: DocumentInfo): boolean {
   return EDITABLE_TEXT_EXTENSIONS.has((doc.extension || "").toLowerCase());
+}
+
+function isOfficeProEditableDocument(doc: DocumentInfo): boolean {
+  return OFFICE_PRO_EDITOR_EXTENSIONS.has((doc.extension || "").toLowerCase());
+}
+
+function openOfficeEditor(path: string) {
+  emit("open-office-editor", path);
 }
 
 async function openEditDialog(doc: DocumentInfo) {
@@ -179,6 +205,13 @@ async function saveEditedDocument() {
       </div>
     </header>
 
+    <OnlyOfficeHealthPanel
+      :health="officeHealth"
+      :loading="officeHealthLoading"
+      :error="officeHealthError"
+      @refresh="$emit('refresh-office-health')"
+    />
+
     <section class="tool-card">
       <div class="upload-line">
         <label class="file-picker">
@@ -228,10 +261,19 @@ async function saveEditedDocument() {
           <div class="item-actions">
             <el-button size="small" text type="primary" @click="openDocument(doc.path)">{{ t("documents.open") }}</el-button>
             <el-button
+              v-if="isOfficeProEditableDocument(doc)"
+              size="small"
+              text
+              type="warning"
+              @click="openOfficeEditor(doc.path)"
+            >
+              {{ t("documents.office_edit") }}
+            </el-button>
+            <el-button
+              v-if="isEditableDocument(doc)"
               size="small"
               text
               type="success"
-              :disabled="!isEditableDocument(doc)"
               @click="openEditDialog(doc)"
             >
               {{ t("documents.edit") }}

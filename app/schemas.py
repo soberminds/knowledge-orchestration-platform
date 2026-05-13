@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -169,6 +169,41 @@ class FileEditTextSaveResponse(BaseModel):
     encoding: str
     size_bytes: int
     modified_at: str
+
+
+class OfficeEditorConfigResponse(BaseModel):
+    """ONLYOFFICE editor bootstrapping payload."""
+
+    path: str
+    mode: Literal["edit", "view"] = "edit"
+    document_server_url: str
+    config: dict[str, Any]
+    callback_token_ttl_sec: int
+    auto_rebuild_index_on_save: bool = True
+
+
+class OfficeHealthResponse(BaseModel):
+    """ONLYOFFICE connectivity and runtime health snapshot."""
+
+    checked_at: str
+    configured: bool
+    document_server_url: str | None = None
+    document_server_internal_url: str | None = None
+    public_backend_url: str
+    index_update_mode: str
+    auto_rebuild_index_on_save: bool
+    jwt_enabled: bool
+    jwt_secret_configured: bool
+    callback_token_signing_ready: bool
+    document_server_reachable: bool
+    document_server_http_status: int | None = None
+    command_service_ok: bool
+    command_service_http_status: int | None = None
+    document_server_version: str | None = None
+    jwt_match: bool | None = None
+    callback_reachable: bool
+    callback_http_status: int | None = None
+    notes: list[str] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

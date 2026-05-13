@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import ChatWorkspace from "./components/chat/ChatWorkspace.vue";
 import LeftSidebar from "./components/sidebar/LeftSidebar.vue";
+import OnlyOfficeEditor from "./components/viewer/OnlyOfficeEditor.vue";
 import UnifiedFileViewer from "./components/viewer/UnifiedFileViewer.vue";
 import DocumentsWorkspace from "./components/workspaces/DocumentsWorkspace.vue";
 import IndexWorkspace from "./components/workspaces/IndexWorkspace.vue";
@@ -26,6 +27,9 @@ const documentViewerVisible = ref(false);
 const documentViewerPath = ref("");
 const documentViewerError = ref("");
 const documentViewerRef = ref<InstanceType<typeof UnifiedFileViewer> | null>(null);
+const officeEditorVisible = ref(false);
+const officeEditorPath = ref("");
+const officeEditorError = ref("");
 
 const dashboard = useDashboard();
 const chatWorkspace = useChatWorkspace(topK);
@@ -68,6 +72,12 @@ function openDocumentFromWorkspace(path: string) {
   documentViewerVisible.value = true;
 }
 
+function openOfficeEditorFromWorkspace(path: string) {
+  officeEditorPath.value = path;
+  officeEditorError.value = "";
+  officeEditorVisible.value = true;
+}
+
 async function deleteDocumentFromWorkspace(path: string) {
   try {
     await dashboard.deleteDocument(path);
@@ -75,6 +85,11 @@ async function deleteDocumentFromWorkspace(path: string) {
       documentViewerVisible.value = false;
       documentViewerPath.value = "";
       documentViewerError.value = "";
+    }
+    if (officeEditorVisible.value && officeEditorPath.value === path) {
+      officeEditorVisible.value = false;
+      officeEditorPath.value = "";
+      officeEditorError.value = "";
     }
   } catch {
     // The composable already stores the error message for display.
@@ -91,6 +106,16 @@ async function onDocumentSaved() {
 
 function onDocumentViewerOpened() {
   documentViewerRef.value?.refreshViewer?.();
+}
+
+async function onOfficeEditorClosed() {
+  officeEditorPath.value = "";
+  officeEditorError.value = "";
+  try {
+    await dashboard.refreshDashboard();
+  } catch {
+    // Error is already tracked by useDashboard state.
+  }
 }
 
 onMounted(async () => {
@@ -156,12 +181,17 @@ onMounted(async () => {
       <DocumentsWorkspace
         v-else-if="activeTab === 'documents'"
         :documents="dashboard.documents.value"
+        :office-health="dashboard.officeHealth.value"
+        :office-health-loading="dashboard.officeHealthLoading.value"
+        :office-health-error="dashboard.officeHealthError.value"
         :selected-files="dashboard.selectedFiles.value"
         :uploading="dashboard.uploading.value"
         :deleting-path="dashboard.deletingPath.value"
         @files-change="dashboard.setSelectedFiles"
         @upload="dashboard.uploadAndBuild"
+        @refresh-office-health="dashboard.refreshOfficeHealth"
         @open-document="openDocumentFromWorkspace"
+        @open-office-editor="openOfficeEditorFromWorkspace"
         @delete-document="deleteDocumentFromWorkspace"
         @document-saved="onDocumentSaved"
       />
@@ -212,6 +242,33 @@ onMounted(async () => {
             :snippet="''"
             :active="documentViewerVisible"
             @error="documentViewerError = $event"
+          />
+        </section>
+      </el-dialog>
+
+      <el-dialog
+        v-model="officeEditorVisible"
+        width="96%"
+        top="2vh"
+        append-to-body
+        destroy-on-close
+        :title="officeEditorPath || t('documents.office_edit')"
+        @closed="onOfficeEditorClosed"
+      >
+        <section class="viewer-host">
+          <el-alert
+            v-if="officeEditorError"
+            :title="officeEditorError"
+            type="error"
+            show-icon
+            :closable="false"
+            class="viewer-error-banner"
+          />
+          <OnlyOfficeEditor
+            :visible="officeEditorVisible"
+            :source-path="officeEditorPath"
+            mode="edit"
+            @error="officeEditorError = $event"
           />
         </section>
       </el-dialog>

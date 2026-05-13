@@ -169,3 +169,95 @@ uvicorn app.main:app --reload
 
 - `MODEL_PROVIDER_OVERRIDES_JSON` for explicit model->provider mapping
 - `EXTRA_PROVIDER_CONFIGS_JSON` for custom OpenAI-compatible gateways
+
+## ONLYOFFICE Professional Editing (doc/docx/xls/xlsx)
+
+This project now supports professional browser editing for Office files via ONLYOFFICE Docs.
+
+### 1) Environment variables
+
+Set the following in `.env`:
+
+- `ONLYOFFICE_DOCUMENT_SERVER_URL`: browser-accessible URL of ONLYOFFICE Document Server  
+  example: `http://127.0.0.1:8088`
+- `PUBLIC_BACKEND_URL`: backend URL reachable by ONLYOFFICE server for file download and callback  
+  local docker example: `http://host.docker.internal:8000`
+- `ONLYOFFICE_JWT_ENABLED`: `true` or `false`
+- `ONLYOFFICE_JWT_SECRET`: required when `ONLYOFFICE_JWT_ENABLED=true`
+- `ONLYOFFICE_VERIFY_CALLBACK_TOKEN`: optional callback token verification toggle
+- `ONLYOFFICE_AUTO_REBUILD_INDEX_ON_SAVE`: auto rebuild RAG index when editor saves
+
+### 2) Docker quick start (example)
+
+```bash
+docker run -d --name onlyoffice-docs -p 8088:80 \
+  -e JWT_ENABLED=true \
+  -e JWT_SECRET=your_secret_here \
+  onlyoffice/documentserver
+```
+
+### 3) Frontend usage
+
+- Open `Document Management`
+- For `doc/docx/xls/xlsx/xlsm`, click `专业编辑` / `Pro Edit`
+- Save in ONLYOFFICE editor; backend callback writes file to disk and can auto rebuild index
+
+## ONLYOFFICE Incremental Index + Health (New)
+
+### Incremental index update after save
+
+- Default mode: `ONLYOFFICE_INDEX_UPDATE_MODE=incremental`
+- On ONLYOFFICE callback save, backend re-indexes only the saved source file
+- Fallback mode: `ONLYOFFICE_INDEX_UPDATE_MODE=full` (rebuild whole index)
+- You can disable callback indexing with `ONLYOFFICE_AUTO_REBUILD_INDEX_ON_SAVE=false`
+
+### ONLYOFFICE health panel
+
+- Document Management now includes an `ONLYOFFICE Health` panel
+- It checks:
+  - Document Server connectivity
+  - Command API (`/command` and legacy `/coauthoring/CommandService.ashx`)
+  - JWT match (best effort)
+  - Callback URL reachability
+
+### How to fill ONLYOFFICE env values
+
+These values are deployment-side settings (not auto-assigned by provider account):
+
+- `ONLYOFFICE_DOCUMENT_SERVER_URL`
+  - URL used by browser to load ONLYOFFICE Docs API
+  - local example: `http://127.0.0.1:8088`
+- `ONLYOFFICE_DOCUMENT_SERVER_INTERNAL_URL`
+  - optional backend-only probe/command URL
+  - useful when backend container cannot access the public DS URL directly
+  - example: `http://onlyoffice` or `http://host.docker.internal:8088`
+- `PUBLIC_BACKEND_URL`
+  - URL used by ONLYOFFICE server to download files and callback
+  - local non-docker: `http://127.0.0.1:8000`
+  - docker-compose internal: `http://backend:8000`
+- `ONLYOFFICE_JWT_ENABLED`
+  - `true` is recommended in production
+- `ONLYOFFICE_JWT_SECRET`
+  - shared secret between backend and ONLYOFFICE
+  - generate one:
+    - `python -c "import secrets; print(secrets.token_hex(32))"`
+- `ONLYOFFICE_VERIFY_CALLBACK_TOKEN`
+  - optional strict callback token verification
+- `ONLYOFFICE_AUTO_REBUILD_INDEX_ON_SAVE`
+  - whether save callback triggers index update
+- `ONLYOFFICE_CALLBACK_TTL_SEC`
+  - callback token expiration seconds
+
+### Pull image and run
+
+- Pull image: `docker pull onlyoffice/documentserver:latest`
+- Start with compose example: `docker compose -f docker-compose.onlyoffice.yml up -d`
+
+### Production architecture note
+
+- Keep backend and ONLYOFFICE as separate services/containers
+- Do not bake ONLYOFFICE into backend `Dockerfile`
+- Recommended deployment:
+  - backend image from this repo `Dockerfile`
+  - ONLYOFFICE from official `onlyoffice/documentserver` image
+  - reverse proxy/domain to expose stable HTTPS URLs

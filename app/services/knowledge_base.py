@@ -657,6 +657,35 @@ class KnowledgeBaseService:
     def _normalize_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in metadata.items() if value not in (None, "")}
 
+    def _relative_source_path(self, path: Path) -> str:
+        return str(path.resolve().relative_to(self.settings.root_dir)).replace("\\", "/")
+
+    def _upsert_chunks(self, chunks: list[Document]) -> None:
+        if not chunks:
+            return
+        batch_size = 64
+        for start in range(0, len(chunks), batch_size):
+            batch = chunks[start : start + batch_size]
+            ids: list[str] = []
+            normalized_docs: list[Document] = []
+            for chunk in batch:
+                metadata = self._normalize_metadata(chunk.metadata)
+                ids.append(self._hash_chunk(chunk.page_content, metadata))
+                normalized_docs.append(Document(page_content=chunk.page_content, metadata=metadata))
+            self.vector_store.add_documents(documents=normalized_docs, ids=ids)
+
+    def _delete_chunks_by_source(self, source_path: str) -> None:
+        client = self._build_chroma_client()
+        try:
+            collection = client.get_collection(name=self.settings.collection_name)
+        except Exception:
+            return
+        try:
+            collection.delete(where={"source": source_path})
+        except Exception:
+            # Keep callback robust across collection schema/runtime differences.
+            return
+
     def rebuild_index(self) -> IngestStats:
         with self._lock:
             self.ensure_directories()
@@ -667,23 +696,32 @@ class KnowledgeBaseService:
             if not chunks:
                 return IngestStats(documents_loaded=len(documents), chunks_indexed=0, source_files=loaded_files)
 
-            batch_size = 64
-            for start in range(0, len(chunks), batch_size):
-                batch = chunks[start : start + batch_size]
-                ids: list[str] = []
-                normalized_docs: list[Document] = []
-
-                for chunk in batch:
-                    metadata = self._normalize_metadata(chunk.metadata)
-                    ids.append(self._hash_chunk(chunk.page_content, metadata))
-                    normalized_docs.append(Document(page_content=chunk.page_content, metadata=metadata))
-
-                self.vector_store.add_documents(documents=normalized_docs, ids=ids)
+            self._upsert_chunks(chunks)
 
             return IngestStats(
                 documents_loaded=len(documents),
                 chunks_indexed=len(chunks),
                 source_files=loaded_files,
+            )
+
+    def reindex_source_file(self, path: Path) -> IngestStats:
+        with self._lock:
+            self.ensure_directories()
+            target = path.resolve()
+            if not target.exists() or not target.is_file():
+                raise FileNotFoundError(f"File not found: {target}")
+
+            relative_source = self._relative_source_path(target)
+            self._delete_chunks_by_source(relative_source)
+
+            documents = load_documents_from_file(target)
+            chunks = self.split_documents(documents)
+            self._upsert_chunks(chunks)
+
+            return IngestStats(
+                documents_loaded=len(documents),
+                chunks_indexed=len(chunks),
+                source_files=[relative_source],
             )
 
     def delete_source_file_and_rebuild(self, path: Path) -> IngestStats:

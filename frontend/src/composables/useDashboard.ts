@@ -3,11 +3,13 @@ import { useI18n } from "./useI18n";
 import {
   deleteDocument as deleteDocumentApi,
   getHealth,
+  getOfficeHealth,
   listDocuments,
   rebuildIndex,
   uploadDocuments,
   type DocumentInfo,
   type HealthResponse,
+  type OfficeHealthResponse,
 } from "../api";
 
 const RETRY_DELAYS_MS = [0, 600, 1200];
@@ -21,14 +23,17 @@ function wait(ms: number) {
 export function useDashboard() {
   const { t } = useI18n();
   const health = ref<HealthResponse | null>(null);
+  const officeHealth = ref<OfficeHealthResponse | null>(null);
   const documents = ref<DocumentInfo[]>([]);
   const selectedFiles = ref<File[]>([]);
 
   const refreshing = ref(false);
+  const officeHealthLoading = ref(false);
   const uploading = ref(false);
   const ingesting = ref(false);
   const deletingPath = ref("");
   const errorMessage = ref("");
+  const officeHealthError = ref("");
 
   const statusText = computed(() => health.value?.status ?? t("status.loading"));
   const indexedChunks = computed(() => health.value?.indexed_chunks ?? 0);
@@ -55,9 +60,17 @@ export function useDashboard() {
         }
 
         try {
-          const [healthData, docs] = await Promise.all([getHealth(), listDocuments()]);
+          const [healthData, docs, officeData] = await Promise.all([
+            getHealth(),
+            listDocuments(),
+            getOfficeHealth().catch(() => null),
+          ]);
           health.value = healthData;
           documents.value = docs;
+          if (officeData) {
+            officeHealth.value = officeData;
+            officeHealthError.value = "";
+          }
           clearError();
           return;
         } catch (error) {
@@ -127,19 +140,36 @@ export function useDashboard() {
     }
   }
 
+  async function refreshOfficeHealth() {
+    officeHealthLoading.value = true;
+    officeHealthError.value = "";
+    try {
+      officeHealth.value = await getOfficeHealth();
+    } catch (error) {
+      officeHealthError.value = error instanceof Error ? error.message : "Failed to fetch ONLYOFFICE health.";
+      throw error;
+    } finally {
+      officeHealthLoading.value = false;
+    }
+  }
+
   return {
     health,
+    officeHealth,
     documents,
     selectedFiles,
     refreshing,
+    officeHealthLoading,
     uploading,
     ingesting,
     deletingPath,
     errorMessage,
+    officeHealthError,
     statusText,
     indexedChunks,
     setSelectedFiles,
     refreshDashboard,
+    refreshOfficeHealth,
     uploadAndBuild,
     deleteDocument,
     runIngest,

@@ -48,6 +48,13 @@ def _env_float(name: str, default: float) -> float:
     return float(os.getenv(name, str(default)))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     """Centralized immutable settings object."""
@@ -109,6 +116,15 @@ class Settings:
     max_upload_mb: int = _env_int("MAX_UPLOAD_MB", 20)
     preview_convert_timeout_sec: int = _env_int("PREVIEW_CONVERT_TIMEOUT_SEC", 120)
     soffice_bin: str = os.getenv("SOFFICE_BIN", "").strip()
+    public_backend_url: str = os.getenv("PUBLIC_BACKEND_URL", "http://127.0.0.1:8000").strip().rstrip("/")
+    onlyoffice_document_server_url: str = os.getenv("ONLYOFFICE_DOCUMENT_SERVER_URL", "").strip().rstrip("/")
+    onlyoffice_document_server_internal_url: str = os.getenv("ONLYOFFICE_DOCUMENT_SERVER_INTERNAL_URL", "").strip().rstrip("/")
+    onlyoffice_jwt_enabled: bool = _env_bool("ONLYOFFICE_JWT_ENABLED", True)
+    onlyoffice_jwt_secret: str = os.getenv("ONLYOFFICE_JWT_SECRET", "").strip()
+    onlyoffice_verify_callback_token: bool = _env_bool("ONLYOFFICE_VERIFY_CALLBACK_TOKEN", False)
+    onlyoffice_auto_rebuild_index_on_save: bool = _env_bool("ONLYOFFICE_AUTO_REBUILD_INDEX_ON_SAVE", True)
+    onlyoffice_callback_ttl_sec: int = _env_int("ONLYOFFICE_CALLBACK_TTL_SEC", 86400)
+    onlyoffice_index_update_mode: str = os.getenv("ONLYOFFICE_INDEX_UPDATE_MODE", "incremental").strip().lower()
 
     cors_origins: tuple[str, ...] = tuple(
         origin.strip()

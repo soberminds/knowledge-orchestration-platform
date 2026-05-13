@@ -13,9 +13,11 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.core.settings import settings
@@ -32,6 +34,8 @@ from app.schemas import (
     FileEditTextSaveResponse,
     HealthResponse,
     IngestResponse,
+    OfficeEditorConfigResponse,
+    OfficeHealthResponse,
     SearchRequest,
     SearchResponse,
     SourceHit,
@@ -39,6 +43,21 @@ from app.schemas import (
 )
 from app.services.files import TEXT_FILE_EXTENSIONS, read_file_page_text
 from app.services.knowledge_base import KnowledgeBaseService, ModelUnavailableError, SearchHit
+from app.services.onlyoffice import (
+    OFFICE_EDITOR_EXTENSIONS,
+    build_callback_url,
+    build_onlyoffice_document_key,
+    build_path_token,
+    build_public_file_url,
+    callback_signing_secret,
+    decode_hs256_jwt,
+    decode_path_token,
+    download_binary,
+    encode_hs256_jwt,
+    extract_bearer_token,
+    is_onlyoffice_editable_extension,
+    to_onlyoffice_document_type,
+)
 from app.services.preview_pdf import get_preview_pdf_path
 
 
@@ -47,6 +66,7 @@ logger = logging.getLogger(__name__)
 TEXT_EDIT_MAX_BYTES = 2 * 1024 * 1024
 TEXT_EDIT_ENCODINGS: tuple[str, ...] = ("utf-8", "utf-8-sig", "gb18030")
 EDITABLE_TEXT_EXTENSIONS = set(TEXT_FILE_EXTENSIONS)
+OFFICE_CALLBACK_SAVE_STATUSES = {2, 6}
 
 
 def _to_source_hit(hit: SearchHit) -> SourceHit:
@@ -167,6 +187,176 @@ def _atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8") -
     return len(encoded)
 
 
+def _atomic_write_bytes(file_path: Path, content: bytes) -> int:
+    temp_path = file_path.with_name(f"{file_path.name}.tmp")
+    with temp_path.open("wb") as temp_file:
+        temp_file.write(content)
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+    temp_path.replace(file_path)
+    return len(content)
+
+
+def _public_backend_url() -> str:
+    value = (settings.public_backend_url or "").strip().rstrip("/")
+    return value or "http://127.0.0.1:8000"
+
+
+def _onlyoffice_callback_secret() -> str:
+    return callback_signing_secret(settings.root_dir, settings.onlyoffice_jwt_secret)
+
+
+def _effective_onlyoffice_index_update_mode() -> str:
+    mode = (settings.onlyoffice_index_update_mode or "").strip().lower()
+    if mode in {"incremental", "full"}:
+        return mode
+    return "incremental"
+
+
+def _http_probe(url: str, *, method: str = "GET", timeout_sec: int = 6, headers: dict[str, str] | None = None, body: bytes | None = None) -> tuple[bool, int | None, str]:
+    request = urllib_request.Request(url=url, method=method)
+    if headers:
+        for key, value in headers.items():
+            request.add_header(key, value)
+
+    try:
+        with urllib_request.urlopen(request, data=body, timeout=max(2, int(timeout_sec))) as response:
+            status = int(getattr(response, "status", 200))
+            text = response.read(2048).decode("utf-8", errors="ignore")
+            return True, status, text
+    except urllib_error.HTTPError as exc:
+        try:
+            text = exc.read().decode("utf-8", errors="ignore")
+        except Exception:
+            text = str(exc)
+        return True, int(exc.code), text
+    except Exception as exc:  # pragma: no cover - network/runtime variance
+        return False, None, str(exc)
+
+
+def _probe_onlyoffice_health() -> OfficeHealthResponse:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    ds_public_url = (settings.onlyoffice_document_server_url or "").strip().rstrip("/")
+    ds_internal_url = (settings.onlyoffice_document_server_internal_url or "").strip().rstrip("/")
+    ds_probe_url = ds_internal_url or ds_public_url
+    backend_url = _public_backend_url()
+    jwt_enabled = bool(settings.onlyoffice_jwt_enabled)
+    jwt_secret_set = bool((settings.onlyoffice_jwt_secret or "").strip())
+    callback_signing_ready = bool(_onlyoffice_callback_secret())
+    configured = bool(ds_public_url)
+    notes: list[str] = []
+
+    ds_reachable = False
+    ds_status: int | None = None
+    command_ok = False
+    command_status: int | None = None
+    ds_version: str | None = None
+    jwt_match: bool | None = None
+    callback_reachable = False
+    callback_status: int | None = None
+
+    if not configured:
+        notes.append("ONLYOFFICE_DOCUMENT_SERVER_URL is empty.")
+    if jwt_enabled and not jwt_secret_set:
+        notes.append("ONLYOFFICE_JWT_ENABLED=true but ONLYOFFICE_JWT_SECRET is empty.")
+
+    if configured:
+        reachable, status, _ = _http_probe(f"{ds_probe_url}/healthcheck", timeout_sec=6)
+        ds_reachable = reachable
+        ds_status = status
+        if not reachable:
+            notes.append("Document Server is unreachable from backend.")
+        elif status is not None and status >= 400:
+            notes.append(f"Document Server /healthcheck returned HTTP {status}.")
+
+        command_payload = {"c": "version"}
+        command_body = json.dumps(command_payload, ensure_ascii=False).encode("utf-8")
+        command_headers = {"Content-Type": "application/json"}
+        if jwt_enabled and jwt_secret_set:
+            command_token = encode_hs256_jwt(command_payload, settings.onlyoffice_jwt_secret)
+            command_headers["Authorization"] = f"Bearer {command_token}"
+
+        cmd_reachable = False
+        cmd_status: int | None = None
+        cmd_text = ""
+        command_candidates = (
+            f"{ds_probe_url}/command",
+            f"{ds_probe_url}/coauthoring/CommandService.ashx",
+        )
+        for endpoint in command_candidates:
+            probe_reachable, probe_status, probe_text = _http_probe(
+                endpoint,
+                method="POST",
+                timeout_sec=8,
+                headers=command_headers,
+                body=command_body,
+            )
+            if not probe_reachable:
+                continue
+            cmd_reachable = True
+            cmd_status = probe_status
+            cmd_text = probe_text
+            # Use the first endpoint that doesn't return plain 404.
+            if probe_status != 404:
+                break
+
+        command_status = cmd_status
+        if cmd_reachable:
+            try:
+                parsed = json.loads(cmd_text) if cmd_text.strip() else {}
+            except Exception:
+                parsed = {}
+            err_code = parsed.get("error")
+            if err_code in (0, "0"):
+                command_ok = True
+                version_val = parsed.get("version")
+                ds_version = str(version_val) if version_val is not None else None
+                jwt_match = True if jwt_enabled else None
+            elif err_code in (6, "6"):
+                # Official callback/command error style: permission token mismatch.
+                command_ok = False
+                jwt_match = False if jwt_enabled else None
+                notes.append("CommandService token check failed (possible JWT secret mismatch).")
+            else:
+                command_ok = False
+                if jwt_enabled:
+                    jwt_match = False
+                notes.append("CommandService returned non-zero error.")
+        else:
+            notes.append("CommandService endpoint is unreachable from backend.")
+
+    sample_token = build_path_token("data/uploads/healthcheck.docx", _onlyoffice_callback_secret(), settings.onlyoffice_callback_ttl_sec)
+    callback_url = build_callback_url(backend_url, sample_token)
+    cb_reachable, cb_status, _ = _http_probe(callback_url, method="GET", timeout_sec=4)
+    if cb_reachable and cb_status is not None:
+        callback_reachable = cb_status in {200, 400, 401, 403, 404, 405, 422}
+        callback_status = cb_status
+    if not callback_reachable:
+        notes.append("Public callback URL is not reachable from backend self-check.")
+
+    return OfficeHealthResponse(
+        checked_at=now_iso,
+        configured=configured,
+        document_server_url=ds_public_url or None,
+        document_server_internal_url=ds_internal_url or None,
+        public_backend_url=backend_url,
+        index_update_mode=_effective_onlyoffice_index_update_mode(),
+        auto_rebuild_index_on_save=settings.onlyoffice_auto_rebuild_index_on_save,
+        jwt_enabled=jwt_enabled,
+        jwt_secret_configured=jwt_secret_set,
+        callback_token_signing_ready=callback_signing_ready,
+        document_server_reachable=ds_reachable,
+        document_server_http_status=ds_status,
+        command_service_ok=command_ok,
+        command_service_http_status=command_status,
+        document_server_version=ds_version,
+        jwt_match=jwt_match,
+        callback_reachable=callback_reachable,
+        callback_http_status=callback_status,
+        notes=notes,
+    )
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> HealthResponse:
     indexed_chunks = 0
@@ -263,6 +453,147 @@ async def save_file_edit_text(payload: FileEditTextSaveRequest) -> FileEditTextS
         size_bytes=size_bytes,
         modified_at=modified_at,
     )
+
+
+@router.get("/office/editor-config", response_model=OfficeEditorConfigResponse)
+async def office_editor_config(
+    path: str,
+    mode: str = "edit",
+    lang: str = "zh-CN",
+) -> OfficeEditorConfigResponse:
+    file_path = _resolve_file_path(path)
+    extension = file_path.suffix.lower()
+    if not is_onlyoffice_editable_extension(extension):
+        allowed = ", ".join(OFFICE_EDITOR_EXTENSIONS)
+        raise HTTPException(
+            status_code=400,
+            detail=f"ONLYOFFICE editing supports: {allowed}.",
+        )
+
+    document_server_url = (settings.onlyoffice_document_server_url or "").strip().rstrip("/")
+    if not document_server_url:
+        raise HTTPException(
+            status_code=503,
+            detail="ONLYOFFICE_DOCUMENT_SERVER_URL is not configured.",
+        )
+
+    if settings.onlyoffice_jwt_enabled and not settings.onlyoffice_jwt_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="ONLYOFFICE_JWT_ENABLED=true but ONLYOFFICE_JWT_SECRET is empty.",
+        )
+
+    relative_path = _relative_path_from_root(file_path)
+    path_token = build_path_token(relative_path, _onlyoffice_callback_secret(), settings.onlyoffice_callback_ttl_sec)
+    editor_mode = "view" if mode.strip().lower() == "view" else "edit"
+
+    config = {
+        "documentType": to_onlyoffice_document_type(extension),
+        "type": "desktop",
+        "document": {
+            "title": file_path.name,
+            "url": build_public_file_url(relative_path, _public_backend_url()),
+            "fileType": extension[1:],
+            "key": build_onlyoffice_document_key(file_path),
+            "permissions": {
+                "edit": editor_mode == "edit",
+                "download": True,
+                "print": True,
+                "comment": True,
+                "copy": True,
+            },
+        },
+        "editorConfig": {
+            "callbackUrl": build_callback_url(_public_backend_url(), path_token),
+            "mode": editor_mode,
+            "lang": lang or "zh-CN",
+            "user": {
+                "id": "local-user",
+                "name": "Local User",
+            },
+            "customization": {
+                "forcesave": True,
+            },
+        },
+    }
+
+    if settings.onlyoffice_jwt_enabled and settings.onlyoffice_jwt_secret:
+        config["token"] = encode_hs256_jwt(config, settings.onlyoffice_jwt_secret)
+
+    return OfficeEditorConfigResponse(
+        path=relative_path,
+        mode=editor_mode,
+        document_server_url=document_server_url,
+        config=config,
+        callback_token_ttl_sec=settings.onlyoffice_callback_ttl_sec,
+        auto_rebuild_index_on_save=settings.onlyoffice_auto_rebuild_index_on_save,
+    )
+
+
+@router.get("/office/health", response_model=OfficeHealthResponse)
+async def office_health() -> OfficeHealthResponse:
+    return await run_in_threadpool(_probe_onlyoffice_health)
+
+
+@router.post("/office/callback")
+async def office_editor_callback(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+) -> JSONResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": 1, "message": "Invalid callback payload."}, status_code=200)
+
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": 1, "message": "Invalid callback body."}, status_code=200)
+
+    if settings.onlyoffice_verify_callback_token and settings.onlyoffice_jwt_secret:
+        bearer = extract_bearer_token(request.headers.get("Authorization"))
+        claims = decode_hs256_jwt(bearer, settings.onlyoffice_jwt_secret) if bearer else None
+        if not claims:
+            return JSONResponse({"error": 1, "message": "Invalid callback token."}, status_code=200)
+
+    status_raw = payload.get("status")
+    try:
+        status = int(status_raw)
+    except Exception:
+        return JSONResponse({"error": 1, "message": "Missing callback status."}, status_code=200)
+
+    path_token = request.query_params.get("path_token", "").strip()
+    if not path_token:
+        return JSONResponse({"error": 1, "message": "Missing path token."}, status_code=200)
+
+    relative_path = decode_path_token(path_token, _onlyoffice_callback_secret())
+    if not relative_path:
+        return JSONResponse({"error": 1, "message": "Invalid or expired path token."}, status_code=200)
+
+    try:
+        file_path = _resolve_file_path(relative_path)
+    except HTTPException as exc:
+        return JSONResponse({"error": 1, "message": str(exc.detail)}, status_code=200)
+
+    if status in OFFICE_CALLBACK_SAVE_STATUSES:
+        download_url = str(payload.get("url") or "").strip()
+        if not download_url:
+            return JSONResponse({"error": 1, "message": "Callback missing download url."}, status_code=200)
+
+        try:
+            content = await run_in_threadpool(download_binary, download_url, settings.preview_convert_timeout_sec)
+            _atomic_write_bytes(file_path, content)
+            if settings.onlyoffice_auto_rebuild_index_on_save:
+                mode = _effective_onlyoffice_index_update_mode()
+                if mode == "full":
+                    background_tasks.add_task(service.rebuild_index)
+                else:
+                    background_tasks.add_task(service.reindex_source_file, file_path)
+            return JSONResponse({"error": 0}, status_code=200)
+        except Exception as exc:
+            logger.exception("ONLYOFFICE callback save failed for %s: %s", relative_path, exc)
+            return JSONResponse({"error": 1, "message": f"Save failed: {exc}"}, status_code=200)
+
+    return JSONResponse({"error": 0}, status_code=200)
 
 
 @router.get("/file/preview-pdf")

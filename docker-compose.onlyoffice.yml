@@ -1,0 +1,35 @@
+version: "3.9"
+
+services:
+  backend:
+    build: .
+    container_name: rga-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - onlyoffice
+    # Needed on Linux if you use host.docker.internal in .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  onlyoffice:
+    image: onlyoffice/documentserver:latest
+    container_name: rga-onlyoffice
+    restart: unless-stopped
+    ports:
+      - "8088:80"
+    environment:
+      JWT_ENABLED: ${ONLYOFFICE_JWT_ENABLED:-true}
+      JWT_SECRET: ${ONLYOFFICE_JWT_SECRET}
+    volumes:
+      - onlyoffice_data:/var/www/onlyoffice/Data
+      - onlyoffice_log:/var/log/onlyoffice
+
+volumes:
+  onlyoffice_data:
+  onlyoffice_log:

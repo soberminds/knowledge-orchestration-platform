@@ -141,6 +141,37 @@ export interface FileEditableTextSaveResponse {
   modified_at: string;
 }
 
+export interface OfficeEditorConfigResponse {
+  path: string;
+  mode: "edit" | "view";
+  document_server_url: string;
+  config: Record<string, unknown>;
+  callback_token_ttl_sec: number;
+  auto_rebuild_index_on_save: boolean;
+}
+
+export interface OfficeHealthResponse {
+  checked_at: string;
+  configured: boolean;
+  document_server_url?: string | null;
+  document_server_internal_url?: string | null;
+  public_backend_url: string;
+  index_update_mode: string;
+  auto_rebuild_index_on_save: boolean;
+  jwt_enabled: boolean;
+  jwt_secret_configured: boolean;
+  callback_token_signing_ready: boolean;
+  document_server_reachable: boolean;
+  document_server_http_status?: number | null;
+  command_service_ok: boolean;
+  command_service_http_status?: number | null;
+  document_server_version?: string | null;
+  jwt_match?: boolean | null;
+  callback_reachable: boolean;
+  callback_http_status?: number | null;
+  notes: string[];
+}
+
 interface ChatStreamDeltaEvent {
   type: "delta";
   delta: string;
@@ -393,4 +424,23 @@ export async function saveFileEditableText(path: string, content: string): Promi
     method: "PUT",
     body: JSON.stringify({ path, content }),
   });
+}
+
+export async function getOfficeEditorConfig(
+  path: string,
+  options: { mode?: "edit" | "view"; lang?: string } = {},
+): Promise<OfficeEditorConfigResponse> {
+  const params = new URLSearchParams();
+  params.set("path", path);
+  if (options.mode) {
+    params.set("mode", options.mode);
+  }
+  if (options.lang) {
+    params.set("lang", options.lang);
+  }
+  return requestJson<OfficeEditorConfigResponse>(`/api/office/editor-config?${params.toString()}`);
+}
+
+export async function getOfficeHealth(): Promise<OfficeHealthResponse> {
+  return requestJson<OfficeHealthResponse>("/api/office/health");
 }
