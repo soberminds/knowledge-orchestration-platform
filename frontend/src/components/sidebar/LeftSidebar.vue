@@ -65,15 +65,25 @@ const localeValue = computed<LocaleCode>({
     </section>
 
     <section class="nav-section recent-section">
-      <h3>{{ t("sidebar.recent") }}</h3>
-      <button
-        v-for="session in recentSessions"
-        :key="session.id"
-        :class="['recent-item', activeSessionId === session.id ? 'is-active' : '']"
-        @click="$emit('select-session', session.id)"
-      >
-        {{ session.title }}
-      </button>
+      <div class="recent-head">
+        <h3>{{ t("sidebar.recent") }}</h3>
+        <span class="recent-count">{{ recentSessions.length }}</span>
+      </div>
+
+      <div class="recent-list">
+        <button
+          v-for="session in recentSessions"
+          :key="session.id"
+          :class="['recent-item', activeSessionId === session.id ? 'is-active' : '']"
+          @click="$emit('select-session', session.id)"
+        >
+          <span class="recent-title">{{ session.title }}</span>
+        </button>
+
+        <p v-if="!recentSessions.length" class="recent-empty">
+          {{ t("sidebar.recent_empty") }}
+        </p>
+      </div>
     </section>
 
     <section class="sidebar-foot">
@@ -219,28 +229,99 @@ const localeValue = computed<LocaleCode>({
 .recent-section {
   min-height: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+}
+
+.recent-head h3 {
+  margin: 0;
+}
+
+.recent-count {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid #d7deea;
+  background: #fff;
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.recent-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #e3e8f1;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fafd 0%, #f4f6f9 100%);
+}
+
+.recent-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.recent-list::-webkit-scrollbar-thumb {
+  background: #cfd6e2;
+  border-radius: 999px;
 }
 
 .recent-item {
-  border: 1px solid transparent;
-  background: transparent;
+  border: 1px solid #dfe5ef;
+  background: #fff;
   border-radius: 10px;
   text-align: left;
-  padding: 8px 10px;
+  padding: 10px 11px;
   cursor: pointer;
-  font-size: 0.9rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  transition: background 0.2s ease;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.12s ease;
 }
 
 .recent-item:hover {
-  background: #fff;
+  background: #f9fbff;
+  border-color: #c8d4e5;
+  transform: translateY(-1px);
 }
 
 .recent-item.is-active {
-  background: #e5e7eb;
+  background: linear-gradient(135deg, #e8f1ff 0%, #f0f6ff 100%);
+  border-color: #b8c9e6;
+}
+
+.recent-title {
+  display: block;
+  font-size: 0.88rem;
+  color: #1f2937;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-empty {
+  margin: 4px 0;
+  padding: 10px;
+  border: 1px dashed #d8dee8;
+  border-radius: 10px;
+  color: #7b8794;
+  font-size: 0.82rem;
+  text-align: center;
+  background: #fff;
 }
 
 .sidebar-foot {
