@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, ref } from "vue";
 import type { ChatModelOption } from "../../api";
 import type { UiMessage } from "../../types/chat";
@@ -40,18 +40,6 @@ const emit = defineEmits<{
 
 const showStarters = computed(() => props.messages.length <= 1);
 const modelHealthVisible = ref(false);
-const totalModelCount = computed(() => {
-  if (props.modelOptions.length > 0) {
-    return props.modelOptions.length;
-  }
-  return props.availableModels.length;
-});
-const availableModelCount = computed(() => {
-  if (props.modelOptions.length > 0) {
-    return props.modelOptions.filter((item) => item.available).length;
-  }
-  return props.availableModels.length;
-});
 
 interface ModelGroup {
   provider: string;
@@ -113,6 +101,7 @@ const modelGroups = computed<ModelGroup[]>(() => {
     "Google",
     "Other",
   ];
+
   const groups = new Map<string, ChatModelOption[]>();
   for (const modelOption of normalizedOptions) {
     const provider = providerLabel(modelOption.provider || inferProviderByModelName(modelOption.model));
@@ -121,6 +110,7 @@ const modelGroups = computed<ModelGroup[]>(() => {
     }
     groups.get(provider)!.push(modelOption);
   }
+
   return Array.from(groups.entries())
     .map(([provider, models]) => ({ provider, models }))
     .sort((a, b) => {
@@ -137,75 +127,8 @@ const modelGroups = computed<ModelGroup[]>(() => {
 <template>
   <section class="chat-workspace">
     <header class="workspace-head">
-      <div>
-        <h2>{{ title }}</h2>
-        <p>Chat workspace with retrieval-augmented streaming responses.</p>
-      </div>
-      <div class="head-actions">
-        <el-tag effect="plain" type="success">top_k: {{ topK }}</el-tag>
-        <el-input-number
-          :model-value="topK"
-          :min="1"
-          :max="10"
-          size="small"
-          controls-position="right"
-          @update:model-value="emit('update:topK', Number($event))"
-        />
-        <el-select
-          class="model-select"
-          :model-value="selectedModel"
-          size="small"
-          placeholder="Select model"
-          @update:model-value="emit('update:selectedModel', String($event))"
-        >
-          <el-option-group
-            v-for="group in modelGroups"
-            :key="group.provider"
-            :label="group.provider"
-          >
-            <el-option
-              v-for="model in group.models"
-              :key="model.model"
-              :label="model.available ? model.model : `${model.model} (Not Configured)`"
-              :value="model.model"
-              :disabled="!model.available"
-            />
-          </el-option-group>
-        </el-select>
-        <el-segmented
-          :model-value="thinkingMode"
-          size="small"
-          :options="[
-            { label: 'Quick', value: 'quick' },
-            { label: 'Deep', value: 'deep' },
-          ]"
-          @change="emit('update:thinkingMode', String($event) as 'quick' | 'deep')"
-        />
-        <el-switch
-          v-if="nativeWebSearchSupported"
-          :model-value="nativeWebSearchEnabled"
-          inline-prompt
-          active-text="Native"
-          inactive-text="Native"
-          @update:model-value="emit('update:nativeWebSearchEnabled', Boolean($event))"
-        />
-        <el-switch
-          v-if="externalWebSearchAvailable"
-          :model-value="externalWebSearchEnabled"
-          inline-prompt
-          active-text="External"
-          inactive-text="External"
-          @update:model-value="emit('update:externalWebSearchEnabled', Boolean($event))"
-        />
-        <el-button
-          size="small"
-          plain
-          :type="modelHealthVisible ? 'primary' : 'default'"
-          @click="modelHealthVisible = !modelHealthVisible"
-        >
-          Model Health {{ availableModelCount }}/{{ totalModelCount }}
-        </el-button>
-      </div>
+      <h2>{{ title }}</h2>
+      <p>Chat workspace with retrieval-augmented streaming responses.</p>
     </header>
 
     <ModelHealthPanel
@@ -224,7 +147,24 @@ const modelGroups = computed<ModelGroup[]>(() => {
       :loading="loading"
       :starter-prompts="starterPrompts"
       :show-starters="showStarters"
+      :top-k="topK"
+      :selected-model="selectedModel"
+      :thinking-mode="thinkingMode"
+      :native-web-search-enabled="nativeWebSearchEnabled"
+      :native-web-search-supported="nativeWebSearchSupported"
+      :external-web-search-enabled="externalWebSearchEnabled"
+      :external-web-search-available="externalWebSearchAvailable"
+      :model-groups="modelGroups"
+      :options-loading="optionsLoading"
+      :model-health-visible="modelHealthVisible"
       @update:model-value="emit('update:composer', $event)"
+      @update:top-k="emit('update:topK', $event)"
+      @update:selected-model="emit('update:selectedModel', $event)"
+      @update:thinking-mode="emit('update:thinkingMode', $event)"
+      @update:native-web-search-enabled="emit('update:nativeWebSearchEnabled', $event)"
+      @update:external-web-search-enabled="emit('update:externalWebSearchEnabled', $event)"
+      @refresh-model-options="emit('refresh-model-options')"
+      @toggle-model-health="modelHealthVisible = !modelHealthVisible"
       @send="emit('send')"
       @pick-starter="emit('pick-starter', $event)"
     />
@@ -241,10 +181,6 @@ const modelGroups = computed<ModelGroup[]>(() => {
 
 .workspace-head {
   padding: 18px 24px 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
 }
 
 .workspace-head h2 {
@@ -259,23 +195,10 @@ const modelGroups = computed<ModelGroup[]>(() => {
   font-size: 0.9rem;
 }
 
-.head-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.model-select {
-  width: 220px;
-}
-
 @media (max-width: 720px) {
   .workspace-head {
     padding-left: 12px;
     padding-right: 12px;
-    flex-direction: column;
-    align-items: flex-start;
   }
 }
 </style>

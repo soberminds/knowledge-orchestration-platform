@@ -1,6 +1,10 @@
 """HTTP API routes."""
+# FastAPI 后端服务的路由层，负责处理 HTTP 请求，调用底层的知识库服务（KnowledgeBaseService），并返回响应
 
+
+# 允许在类型注解中使用字符串形式的类名（例如 'KnowledgeBaseService'），避免循环导入问题。
 from __future__ import annotations
+
 
 import json
 import logging
