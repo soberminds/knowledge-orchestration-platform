@@ -69,6 +69,9 @@ class ChatModelOption(BaseModel):
     model: str
     provider: str
     supports_native_web_search: bool = False
+    thinking_style: str | None = None
+    deep_reasoning_effort: str | None = None
+    deep_thinking_budget: int | None = None
     provider_configured: bool = True
     api_key_configured: bool = True
     base_url: str | None = None

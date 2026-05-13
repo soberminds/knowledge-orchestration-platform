@@ -40,6 +40,13 @@ function providerLabel(provider: string) {
 function checkLabel(enabled: boolean) {
   return enabled ? "Configured" : "Missing";
 }
+
+function thinkingStyleLabel(style?: string | null) {
+  const token = String(style || "none").trim().toLowerCase();
+  if (token === "deepseek") return "DeepSeek mapping";
+  if (token === "qwen") return "Qwen mapping";
+  return "Generic mapping";
+}
 </script>
 
 <template>
@@ -96,6 +103,9 @@ function checkLabel(enabled: boolean) {
         </div>
 
         <div class="check-row">
+          <span class="check-pill neutral">
+            Thinking Style: {{ thinkingStyleLabel(option.thinking_style) }}
+          </span>
           <span
             class="check-pill"
             :class="{ ok: Boolean(option.api_key_configured), bad: !Boolean(option.api_key_configured) }"
@@ -116,6 +126,12 @@ function checkLabel(enabled: boolean) {
         <p class="base-url">
           <span>Base URL:</span>
           <code>{{ option.base_url || "(not set)" }}</code>
+        </p>
+        <p v-if="option.thinking_style === 'deepseek'" class="mapping-detail">
+          Deep mapping: thinking=enabled, reasoning_effort={{ option.deep_reasoning_effort || "high" }}
+        </p>
+        <p v-if="option.thinking_style === 'qwen'" class="mapping-detail">
+          Deep mapping: enable_thinking=true, thinking_budget={{ option.deep_thinking_budget ?? "(default)" }}
         </p>
         <p v-if="!option.available" class="reason">
           {{ option.unavailable_reason || "Unavailable. Please check provider settings." }}
@@ -288,6 +304,12 @@ function checkLabel(enabled: boolean) {
   margin: 0;
   font-size: 0.78rem;
   color: #b14242;
+}
+
+.mapping-detail {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #546375;
 }
 
 @media (max-width: 720px) {

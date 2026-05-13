@@ -80,6 +80,9 @@ class Settings:
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     model_provider_overrides_json: str = os.getenv("MODEL_PROVIDER_OVERRIDES_JSON", "").strip()
     extra_provider_configs_json: str = os.getenv("EXTRA_PROVIDER_CONFIGS_JSON", "").strip()
+    model_capabilities_json: str = os.getenv("MODEL_CAPABILITIES_JSON", "").strip()
+    deepseek_deep_reasoning_effort: str = os.getenv("DEEPSEEK_DEEP_REASONING_EFFORT", "high").strip().lower()
+    qwen_deep_thinking_budget: int = _env_int("QWEN_DEEP_THINKING_BUDGET", 2048)
     available_models: tuple[str, ...] = tuple(
         model.strip()
         for model in os.getenv("AVAILABLE_MODELS", "").split(",")

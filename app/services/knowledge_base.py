@@ -25,6 +25,12 @@ from openai import OpenAI
 from app.schemas import ChatHistoryItem
 from app.services.embeddings import get_embedding_model
 from app.services.files import file_info, iter_source_files, load_documents_from_file
+from app.services.llm_provider_mapping import (
+    CapabilityRegistry,
+    CanonicalCompletionOptions,
+    ModelCapability,
+    build_provider_options,
+)
 from app.services.preview_pdf import get_preview_pdf_cache_path
 
 QuestionMode = Literal["overview", "technical", "comparison", "list", "general"]
@@ -127,6 +133,11 @@ class KnowledgeBaseService:
         self._model_provider_overrides_cache: dict[str, str] | None = None
         self._extra_provider_configs_cache: dict[str, ProviderRuntimeConfig] | None = None
         self._model_pricing_cache: dict[str, dict[str, float]] | None = None
+        self._capability_registry = CapabilityRegistry(
+            capability_overrides_json=self.settings.model_capabilities_json,
+            qwen_deep_thinking_budget=self.settings.qwen_deep_thinking_budget,
+            deepseek_deep_reasoning_effort=self.settings.deepseek_deep_reasoning_effort,
+        )
 
     @property
     def embedder(self):
@@ -304,6 +315,10 @@ class KnowledgeBaseService:
         provider = self._resolve_provider_name(model_name)
         return self._resolve_provider_config(provider)
 
+    def _resolve_model_capability(self, model_name: str, provider: str | None = None) -> ModelCapability:
+        provider_token = provider or self._resolve_provider_name(model_name)
+        return self._capability_registry.resolve(provider=provider_token, model_name=model_name)
+
     def _resolve_model_client(self, model_name: str) -> tuple[str, OpenAI]:
         config = self._resolve_model_provider_config(model_name)
         if config is None:
@@ -326,11 +341,12 @@ class KnowledgeBaseService:
             self._llm_clients[cache_key] = client
         return config.provider, client
 
-    def resolve_model_options(self) -> list[dict[str, str | bool | None]]:
-        options: list[dict[str, str | bool | None]] = []
+    def resolve_model_options(self) -> list[dict[str, str | bool | int | None]]:
+        options: list[dict[str, str | bool | int | None]] = []
         for model_name in self.resolve_available_models():
             provider = self._resolve_provider_name(model_name)
             config = self._resolve_provider_config(provider)
+            capability = self._resolve_model_capability(model_name=model_name, provider=provider)
             provider_configured = config is not None
             api_key_configured = bool(config and config.api_key)
             base_url = (config.base_url.strip() if config and config.base_url else "") or None
@@ -347,7 +363,12 @@ class KnowledgeBaseService:
                 {
                     "model": model_name,
                     "provider": provider,
-                    "supports_native_web_search": self._provider_supports_native_web_search(provider),
+                    "supports_native_web_search": capability.supports_native_web_search,
+                    "thinking_style": capability.thinking_style,
+                    "deep_reasoning_effort": capability.deep_reasoning_effort if capability.supports_reasoning_effort else None,
+                    "deep_thinking_budget": capability.deep_thinking_budget
+                    if capability.supports_thinking_budget and capability.deep_thinking_budget
+                    else None,
                     "provider_configured": provider_configured,
                     "api_key_configured": api_key_configured,
                     "base_url": base_url,
@@ -358,10 +379,11 @@ class KnowledgeBaseService:
             )
         return options
 
-    def _provider_supports_native_web_search(self, provider: str) -> bool:
-        token = provider.strip().lower()
-        # Keep conservative by default; currently verified and enabled for DashScope/Qwen.
-        return token in {"qwen"}
+    def _provider_supports_native_web_search(self, provider: str, model_name: str) -> bool:
+        return self._capability_registry.supports_native_web_search(
+            provider=provider,
+            model_name=model_name,
+        )
 
     def _resolve_web_search_plan(
         self,
@@ -372,7 +394,7 @@ class KnowledgeBaseService:
         web_search_legacy: bool,
     ) -> tuple[bool, bool]:
         provider = self._resolve_provider_name(model_name)
-        supports_native = self._provider_supports_native_web_search(provider)
+        supports_native = self._provider_supports_native_web_search(provider, model_name)
         use_native = bool(native_web_search and supports_native)
 
         # Legacy single switch keeps old behavior for older frontends.
@@ -1255,31 +1277,26 @@ class KnowledgeBaseService:
 
     def _completion_options(
         self,
-        thinking_mode: ThinkingMode,
         *,
+        model_name: str,
+        provider: str,
+        thinking_mode: ThinkingMode,
         stream: bool,
         native_web_search: bool,
     ) -> dict[str, Any]:
-        if thinking_mode == "deep":
-            options: dict[str, Any] = {
-                "max_tokens": min(self.settings.max_tokens * 2, 4096),
-                "reasoning_effort": "high",
-                "extra_body": {"thinking": {"type": "enabled"}},
-            }
-        else:
-            options = {
-                "temperature": self.settings.temperature,
-                "max_tokens": self.settings.max_tokens,
-                "extra_body": {"thinking": {"type": "disabled"}},
-            }
-
-        if native_web_search:
-            options.setdefault("extra_body", {})
-            options["extra_body"]["enable_search"] = True
-
-        if stream:
-            options["stream_options"] = {"include_usage": True}
-        return options
+        capability = self._resolve_model_capability(model_name=model_name, provider=provider)
+        canonical = CanonicalCompletionOptions(
+            thinking_mode=thinking_mode,
+            stream=stream,
+            native_web_search=native_web_search,
+            temperature=self.settings.temperature,
+            max_tokens=self.settings.max_tokens,
+        )
+        return build_provider_options(
+            provider=provider,
+            capability=capability,
+            canonical=canonical,
+        )
 
     def _chat_completion(
         self,
@@ -1290,9 +1307,11 @@ class KnowledgeBaseService:
         stream: bool,
         native_web_search: bool = False,
     ):
-        _, client = self._resolve_model_client(model_name)
+        provider, client = self._resolve_model_client(model_name)
         options = self._completion_options(
-            thinking_mode,
+            model_name=model_name,
+            provider=provider,
+            thinking_mode=thinking_mode,
             stream=stream,
             native_web_search=native_web_search,
         )
