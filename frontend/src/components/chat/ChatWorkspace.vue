@@ -1,9 +1,10 @@
 ﻿<script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { ChatModelOption } from "../../api";
 import type { UiMessage } from "../../types/chat";
 import ChatComposer from "./ChatComposer.vue";
 import MessageList from "./MessageList.vue";
+import ModelHealthPanel from "./ModelHealthPanel.vue";
 
 const props = defineProps<{
   title: string;
@@ -20,6 +21,8 @@ const props = defineProps<{
   nativeWebSearchSupported: boolean;
   externalWebSearchEnabled: boolean;
   externalWebSearchAvailable: boolean;
+  optionsLoading: boolean;
+  optionsLastCheckedAt: number | null;
 }>();
 
 const emit = defineEmits<{
@@ -29,12 +32,26 @@ const emit = defineEmits<{
   (event: "update:thinkingMode", value: "quick" | "deep"): void;
   (event: "update:nativeWebSearchEnabled", value: boolean): void;
   (event: "update:externalWebSearchEnabled", value: boolean): void;
+  (event: "refresh-model-options"): void;
   (event: "send"): void;
   (event: "pick-starter", prompt: string): void;
   (event: "viewport-ready", element: HTMLElement | null): void;
 }>();
 
 const showStarters = computed(() => props.messages.length <= 1);
+const modelHealthVisible = ref(false);
+const totalModelCount = computed(() => {
+  if (props.modelOptions.length > 0) {
+    return props.modelOptions.length;
+  }
+  return props.availableModels.length;
+});
+const availableModelCount = computed(() => {
+  if (props.modelOptions.length > 0) {
+    return props.modelOptions.filter((item) => item.available).length;
+  }
+  return props.availableModels.length;
+});
 
 interface ModelGroup {
   provider: string;
@@ -180,8 +197,25 @@ const modelGroups = computed<ModelGroup[]>(() => {
           inactive-text="External"
           @update:model-value="emit('update:externalWebSearchEnabled', Boolean($event))"
         />
+        <el-button
+          size="small"
+          plain
+          :type="modelHealthVisible ? 'primary' : 'default'"
+          @click="modelHealthVisible = !modelHealthVisible"
+        >
+          Model Health {{ availableModelCount }}/{{ totalModelCount }}
+        </el-button>
       </div>
     </header>
+
+    <ModelHealthPanel
+      v-if="modelHealthVisible"
+      :model-options="modelOptions"
+      :selected-model="selectedModel"
+      :loading="optionsLoading"
+      :last-checked-at="optionsLastCheckedAt"
+      @refresh="emit('refresh-model-options')"
+    />
 
     <MessageList :messages="messages" @viewport-ready="emit('viewport-ready', $event)" />
 

@@ -13,7 +13,8 @@ def _load_env_file(path: Path) -> None:
         return
 
     for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
+        # Some editors save UTF-8 with BOM; strip BOM to keep key parsing stable.
+        line = raw_line.lstrip("\ufeff").strip()
         if not line or line.startswith("#"):
             continue
 
@@ -24,9 +25,11 @@ def _load_env_file(path: Path) -> None:
             continue
 
         key, value = line.split("=", 1)
-        key = key.strip()
+        key = key.strip().lstrip("\ufeff")
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if key:
+            # Keep .env as the source of truth for local development so edits
+            # take effect after a normal app restart/reload.
             os.environ[key] = value
 
 

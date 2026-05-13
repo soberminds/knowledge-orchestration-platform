@@ -331,17 +331,27 @@ class KnowledgeBaseService:
         for model_name in self.resolve_available_models():
             provider = self._resolve_provider_name(model_name)
             config = self._resolve_provider_config(provider)
-            available = bool(config and config.api_key)
+            provider_configured = config is not None
+            api_key_configured = bool(config and config.api_key)
+            base_url = (config.base_url.strip() if config and config.base_url else "") or None
+            base_url_configured = bool(base_url)
+            available = bool(provider_configured and api_key_configured and base_url_configured)
             reason: str | None = None
-            if not config:
+            if not provider_configured:
                 reason = "Provider is not configured."
-            elif not config.api_key:
+            elif not base_url_configured:
+                reason = f"Missing {provider.upper()}_BASE_URL in .env."
+            elif not api_key_configured:
                 reason = f"Missing {provider.upper()}_API_KEY in .env."
             options.append(
                 {
                     "model": model_name,
                     "provider": provider,
                     "supports_native_web_search": self._provider_supports_native_web_search(provider),
+                    "provider_configured": provider_configured,
+                    "api_key_configured": api_key_configured,
+                    "base_url": base_url,
+                    "base_url_configured": base_url_configured,
                     "available": available,
                     "unavailable_reason": reason,
                 }
@@ -591,7 +601,20 @@ class KnowledgeBaseService:
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.settings.chunk_size,
             chunk_overlap=self.settings.chunk_overlap,
-            separators=["\n\n", "\n", "。", "；", "！", "？", " ", ""],
+            separators=[
+                "\n\n",
+                "\n",
+                ".",
+                "!",
+                "?",
+                ";",
+                "\u3002",
+                "\uFF01",
+                "\uFF1F",
+                "\uFF1B",
+                " ",
+                "",
+            ],
         )
         chunks = splitter.split_documents(documents)
         for index, chunk in enumerate(chunks, start=1):
@@ -607,7 +630,7 @@ class KnowledgeBaseService:
         normalized = " ".join(text.split())
         if len(normalized) <= length:
             return normalized
-        return normalized[: length - 1] + "…"
+        return normalized[: length - 1] + "..."
 
     def _normalize_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in metadata.items() if value not in (None, "")}
@@ -716,28 +739,57 @@ class KnowledgeBaseService:
             return question
         recent_turns = history[-6:]
         history_text = "\n".join(f"{item.role}: {item.content}" for item in recent_turns)
-        return f"对话上下文:\n{history_text}\n\n当前问题:\n{question}"
+        return f"Conversation context:\n{history_text}\n\nCurrent question:\n{question}"
 
     def _classify_question_mode(self, question: str) -> QuestionMode:
         normalized = re.sub(r"\s+", "", question.lower())
 
         overview_keywords = (
-            "讲了什么",
-            "主要讲",
-            "主要内容",
-            "概述",
-            "总结",
-            "介绍一下",
-            "整体",
-            "背景和目标",
-            "总体",
-            "概括",
+            "\u8bb2\u4e86\u4ec0\u4e48",
+            "\u4e3b\u8981\u8bb2",
+            "\u4e3b\u8981\u5185\u5bb9",
+            "\u6982\u8ff0",
+            "\u603b\u7ed3",
+            "\u4ecb\u7ecd\u4e00\u4e0b",
+            "\u6574\u4f53",
+            "\u80cc\u666f\u548c\u76ee\u6807",
+            "\u603b\u4f53",
             "overview",
             "summary",
+            "introduction",
         )
-        comparison_keywords = ("对比", "区别", "差异", "不同", "优缺点", "哪个更", "compare", "vs")
-        list_keywords = ("列出", "清单", "列表", "有哪些", "包含哪些", "分类", "list")
-        technical_keywords = ("技术", "算法", "实现", "架构", "原理", "流程", "接口", "代码", "模型", "technical")
+        comparison_keywords = (
+            "\u5bf9\u6bd4",
+            "\u533a\u522b",
+            "\u5dee\u5f02",
+            "\u4e0d\u540c",
+            "\u4f18\u7f3a\u70b9",
+            "\u54ea\u4e2a\u597d",
+            "compare",
+            "vs",
+        )
+        list_keywords = (
+            "\u5217\u51fa",
+            "\u6e05\u5355",
+            "\u5217\u8868",
+            "\u6709\u54ea\u4e9b",
+            "\u5305\u542b\u54ea\u4e9b",
+            "\u5206\u7c7b",
+            "list",
+        )
+        technical_keywords = (
+            "\u6280\u672f",
+            "\u7b97\u6cd5",
+            "\u5b9e\u73b0",
+            "\u67b6\u6784",
+            "\u539f\u7406",
+            "\u6d41\u7a0b",
+            "\u63a5\u53e3",
+            "\u4ee3\u7801",
+            "\u6a21\u578b",
+            "technical",
+            "architecture",
+        )
 
         if any(keyword in normalized for keyword in comparison_keywords):
             return "comparison"
@@ -755,30 +807,30 @@ class KnowledgeBaseService:
         if question_mode in ("overview", "general"):
             queries.extend(
                 [
-                    f"{question} 项目背景 目标 建设内容 建设范围 核心功能",
-                    f"{question} 系统架构 应用模块 服务对象 部署范围",
-                    f"{question} 关键技术 实施内容 业务流程 业务价值",
+                    f"{question} project background objective scope core capabilities",
+                    f"{question} system architecture modules workflow stakeholders",
+                    f"{question} key technologies value risks assumptions",
                 ]
             )
         elif question_mode == "technical":
             queries.extend(
                 [
-                    f"{question} 技术架构 模块实现 关键算法 数据流程 接口设计",
-                    f"{question} 模型 引擎 平台 服务 编排",
+                    f"{question} architecture modules implementation flow parameters constraints",
+                    f"{question} model algorithm interface code configuration",
                 ]
             )
         elif question_mode == "comparison":
             queries.extend(
                 [
-                    f"{question} 对比 差异 优缺点 适用场景 成本 风险",
-                    f"{question} 指标 效果 约束 前提",
+                    f"{question} comparison dimensions differences tradeoffs costs risks",
+                    f"{question} advantages disadvantages use cases recommendation",
                 ]
             )
         elif question_mode == "list":
             queries.extend(
                 [
-                    f"{question} 清单 列表 分类 条目 模块 功能",
-                    f"{question} 目录 章节 要点",
+                    f"{question} list categories items checklist",
+                    f"{question} composition structure details",
                 ]
             )
 
@@ -929,7 +981,7 @@ class KnowledgeBaseService:
         normalized = text.strip()
         if len(normalized) <= limit:
             return normalized
-        return normalized[: limit - 1] + "…"
+        return normalized[: limit - 1] + "..."
 
     def _group_hits_for_context(
         self,
@@ -1159,25 +1211,34 @@ class KnowledgeBaseService:
 
     def _build_system_prompt(self, question_mode: QuestionMode, thinking_mode: ThinkingMode) -> str:
         base_rules = (
-            "你是企业知识库问答助手，只能基于提供的参考内容回答。"
-            "如果证据不足，要明确说缺少哪些信息，不要编造。"
-            "关键结论后请添加引用标签，例如 [S1]、[S2]、[W1]。"
+            "You are a helpful assistant. "
+            "Prefer evidence from the provided knowledge base and web context when available. "
+            "If there is no relevant evidence, still answer using general knowledge instead of refusing. "
+            "Do not fabricate citations. Only use [Sx]/[Wx] labels when evidence truly exists. "
+            "Answer in the same language as the user. "
+            "Do not add role-playing preambles like 'I am an enterprise knowledge base assistant' unless asked."
         )
 
         mode_rules: dict[QuestionMode, str] = {
             "overview": (
-                "这是概述类问题。请按以下结构回答："
-                "1) 一句话总结；2) 背景与目标；3) 建设范围与内容；"
-                "4) 核心能力与技术路线；5)业务价值；6) 信息缺口；7) 引用来源。"
+                "For overview questions, answer with: summary, background, key scope, core capabilities, and practical value."
             ),
-            "technical": "这是技术类问题。请按 架构-模块-流程-关键参数/约束-风险与建议 的结构回答。",
-            "comparison": "这是对比类问题。请给出对比维度、差异、适用场景和取舍建议。",
-            "list": "这是清单类问题。请按主题分组列出条目，并尽量完整。",
-            "general": "先给结论，再给支撑要点，并附上引用标签。",
+            "technical": (
+                "For technical questions, answer with: architecture, modules, flow, key parameters/constraints, and risks."
+            ),
+            "comparison": (
+                "For comparison questions, answer with: dimensions, differences, trade-offs, and recommendation."
+            ),
+            "list": "For list questions, group items by topic and keep coverage complete.",
+            "general": "State the conclusion first, then concise supporting points.",
         }
 
-        depth_rule = "尽量简洁，避免冗长。" if thinking_mode == "quick" else "请更深入、更完整地综合信息后回答。"
-        return f"{base_rules}{mode_rules[question_mode]}{depth_rule}"
+        depth_rule = (
+            " Keep the answer concise."
+            if thinking_mode == "quick"
+            else " Provide a deeper and more complete answer."
+        )
+        return f"{base_rules} {mode_rules[question_mode]}{depth_rule}"
 
     def _should_polish_answer(self, answer: str, question_mode: QuestionMode, thinking_mode: ThinkingMode) -> bool:
         compact = re.sub(r"\s+", "", answer)
@@ -1266,27 +1327,10 @@ class KnowledgeBaseService:
         thinking_mode: ThinkingMode,
     ) -> str:
         polish_system_prompt = (
-            "你是知识库答案润色器。"
-            "只能在不改变事实的前提下优化结构、可读性和完整性。"
-            "禁止添加参考材料里没有的信息。"
-            "保留并尽量补齐引用标签格式 [Sx]/[Wx]。"
+            "You are a response editor. Improve structure and readability without changing facts. "
+            "Do not add unsupported facts. Keep citation markers [Sx]/[Wx] only when they already exist."
         )
-        polish_user_prompt = f"""原问题：
-{question}
-
-问题模式：{question_mode}
-
-证据标签：
-{citation_guide}
-
-待润色回答：
-{answer}
-
-润色要求：
-1) 保持事实不变；
-2) 提升结构与可读性；
-3) 关键句补上引用标签；
-4) 不新增事实。"""
+        polish_user_prompt = f"""Original question:\n{question}\n\nQuestion mode:\n{question_mode}\n\nEvidence labels:\n{citation_guide}\n\nDraft answer:\n{answer}\n\nRequirements:\n1) Keep facts unchanged\n2) Improve clarity and structure\n3) Keep or improve citation marker placement\n4) Do not invent new facts"""
 
         completion = self._chat_completion(
             model_name=model_name,
@@ -1343,18 +1387,8 @@ class KnowledgeBaseService:
             web_context, web_citations = self._build_web_context(web_hits)
 
         if not hits and not web_context:
-            return {
-                "fallback_answer": (
-                    "知识库中没有检索到足够相关的内容。"
-                    "你可以换更具体的问题，或先上传相关文档后重建索引。"
-                ),
-                "rewritten_question": rewritten_question,
-                "hits": [],
-                "citations": [],
-                "question_mode": question_mode,
-                "citation_guide": "",
-                "messages": [],
-            }
+            # No retrieval evidence: fall back to normal model chat while keeping structured prompt context.
+            pass
 
         context = ""
         citation_items: list[dict[str, Any]] = []
@@ -1367,14 +1401,17 @@ class KnowledgeBaseService:
 
         history_text = "\n".join(f"{item.role}: {item.content}" for item in (history or []))
         user_prompt_parts = [
-            f"问题:\n{question}",
-            f"历史对话:\n{history_text or '（无）'}",
-            f"问题模式:\n{question_mode}",
-            f"证据标签说明:\n{combined_citation_guide}",
-            f"知识库参考上下文:\n{context}",
+            f"Question:\n{question}",
+            f"Conversation history:\n{history_text or '(none)'}",
+            f"Question mode:\n{question_mode}",
+            f"Evidence labels:\n{combined_citation_guide or '(none)'}",
+            f"Knowledge-base context:\n{context or '(none)'}",
+            "Instruction: Prioritize the provided evidence when relevant. "
+            "If evidence is missing or irrelevant, answer normally using general model knowledge. "
+            "Answer the question directly without unnecessary self-introduction.",
         ]
         if web_context:
-            user_prompt_parts.append(f"联网搜索补充上下文:\n{web_context}")
+            user_prompt_parts.append(f"External web context:\n{web_context}")
 
         return {
             "fallback_answer": None,
@@ -1559,7 +1596,7 @@ class KnowledgeBaseService:
 
         final_answer = "".join(collected).strip()
         if not final_answer:
-            final_answer = "模型没有返回内容，请稍后重试。"
+            final_answer = "The model returned an empty response. Please try again."
         elif self._should_polish_answer(final_answer, prepared["question_mode"], thinking_mode):
             final_answer = self._polish_answer(
                 answer=final_answer,
@@ -1588,3 +1625,4 @@ class KnowledgeBaseService:
             "usage": usage,
             "cost_estimate": cost_estimate,
         }
+

@@ -52,6 +52,10 @@ export interface ChatModelOption {
   model: string;
   provider: string;
   supports_native_web_search?: boolean;
+  provider_configured?: boolean;
+  api_key_configured?: boolean;
+  base_url?: string | null;
+  base_url_configured?: boolean;
   available: boolean;
   unavailable_reason?: string | null;
 }

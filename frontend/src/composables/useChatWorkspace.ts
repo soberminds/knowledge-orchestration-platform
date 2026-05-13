@@ -13,10 +13,11 @@ import {
 import type { ChatSession, UiMessage } from "../types/chat";
 
 const STARTER_PROMPTS = [
-  "请总结我的知识库中关于项目架构的关键点。",
-  "这个项目从文档到问答的完整 RAG 流程是什么？",
-  "请列出当前知识库里最值得先读的 5 条结论。",
+  "Summarize the key architecture points from my knowledge base.",
+  "What is the end-to-end RAG flow in this project?",
+  "List the top 5 findings worth reading first in this knowledge base.",
 ];
+
 
 function createId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -35,7 +36,7 @@ function createWelcomeMessage(): UiMessage {
     id: createId(),
     role: "assistant",
     createdAt: Date.now(),
-    content: "Hi, ask any question from your knowledge base and I will answer with citations.",
+    content: "I prioritize knowledge-base evidence when available, and I can still answer with general model knowledge when relevant context is missing.",
     sources: [],
     citations: [],
   };
@@ -80,6 +81,8 @@ export function useChatWorkspace(topK: Ref<number>) {
   const nativeWebSearchEnabled = ref(false);
   const externalWebSearchEnabled = ref(false);
   const externalWebSearchAvailable = ref(false);
+  const optionsLoading = ref(false);
+  const optionsLastCheckedAt = ref<number | null>(null);
 
   const activeSession = computed(
     () => sessions.value.find((session) => session.id === activeSessionId.value) ?? null,
@@ -149,7 +152,7 @@ export function useChatWorkspace(topK: Ref<number>) {
         await scrollToBottom();
       }
 
-      if (/[\n。！？.!?;；]/.test(char)) {
+      if (/[\n.!?;:\u3002\uFF01\uFF1F\uFF1B]/.test(char)) {
         await delay(20);
       } else {
         await delay(6);
@@ -274,6 +277,10 @@ export function useChatWorkspace(topK: Ref<number>) {
   }
 
   async function loadChatOptions() {
+    if (optionsLoading.value) {
+      return;
+    }
+    optionsLoading.value = true;
     try {
       const options = await getChatOptions();
       availableModels.value = options.models?.length ? options.models : [options.default_model];
@@ -309,6 +316,9 @@ export function useChatWorkspace(topK: Ref<number>) {
       externalWebSearchAvailable.value = false;
       externalWebSearchEnabled.value = false;
       nativeWebSearchEnabled.value = false;
+    } finally {
+      optionsLastCheckedAt.value = Date.now();
+      optionsLoading.value = false;
     }
   }
 
@@ -339,6 +349,8 @@ export function useChatWorkspace(topK: Ref<number>) {
     selectedModelSupportsNativeSearch,
     externalWebSearchEnabled,
     externalWebSearchAvailable,
+    optionsLoading,
+    optionsLastCheckedAt,
     loadChatOptions,
   };
 }
