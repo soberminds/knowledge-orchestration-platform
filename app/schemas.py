@@ -217,6 +217,9 @@ class OfficeCallbackStatusResponse(BaseModel):
     message: str = ""
     callback_status: int | None = None
     updated_at: str | None = None
+    index_status: Literal["idle", "queued", "running", "success", "failed"] = "idle"
+    index_message: str = ""
+    index_updated_at: str | None = None
 
 
 class HealthResponse(BaseModel):

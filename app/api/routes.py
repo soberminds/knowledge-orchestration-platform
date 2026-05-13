@@ -232,16 +232,20 @@ def _set_office_callback_status(
 ) -> None:
     now_iso = datetime.now().isoformat(timespec="seconds")
     status = "success" if success else "failed"
-    payload: dict[str, Any] = {
-        "path": relative_path,
-        "has_event": True,
-        "status": status,
-        "success": success,
-        "message": message.strip(),
-        "callback_status": callback_status,
-        "updated_at": now_iso,
-    }
     with _office_callback_status_lock:
+        previous = dict(_office_callback_status_by_path.get(relative_path, {}))
+        payload: dict[str, Any] = {
+            "path": relative_path,
+            "has_event": True,
+            "status": status,
+            "success": success,
+            "message": message.strip(),
+            "callback_status": callback_status,
+            "updated_at": now_iso,
+            "index_status": str(previous.get("index_status", "idle")),
+            "index_message": str(previous.get("index_message", "")),
+            "index_updated_at": previous.get("index_updated_at"),
+        }
         _office_callback_status_by_path[relative_path] = payload
 
 
@@ -251,6 +255,56 @@ def _get_office_callback_status(relative_path: str) -> OfficeCallbackStatusRespo
     if not payload:
         return OfficeCallbackStatusResponse(path=relative_path)
     return OfficeCallbackStatusResponse(**payload)
+
+
+def _set_office_index_status(
+    relative_path: str,
+    *,
+    index_status: str,
+    index_message: str = "",
+) -> None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    with _office_callback_status_lock:
+        previous = dict(_office_callback_status_by_path.get(relative_path, {}))
+        payload: dict[str, Any] = {
+            "path": relative_path,
+            "has_event": bool(previous.get("has_event", False)),
+            "status": str(previous.get("status", "unknown")),
+            "success": previous.get("success"),
+            "message": str(previous.get("message", "")),
+            "callback_status": previous.get("callback_status"),
+            "updated_at": previous.get("updated_at"),
+            "index_status": index_status,
+            "index_message": index_message.strip(),
+            "index_updated_at": now_iso,
+        }
+        _office_callback_status_by_path[relative_path] = payload
+
+
+def _run_onlyoffice_index_update(
+    relative_path: str,
+    absolute_path: str,
+    mode: str,
+    service: KnowledgeBaseService,
+) -> None:
+    _set_office_index_status(relative_path, index_status="running", index_message=f"Indexing ({mode})...")
+    try:
+        if mode == "full":
+            stats = service.rebuild_index()
+        else:
+            stats = service.reindex_source_file(Path(absolute_path))
+        _set_office_index_status(
+            relative_path,
+            index_status="success",
+            index_message=f"Indexed chunks: {stats.chunks_indexed}.",
+        )
+    except Exception as exc:
+        logger.exception("ONLYOFFICE index update failed for %s: %s", relative_path, exc)
+        _set_office_index_status(
+            relative_path,
+            index_status="failed",
+            index_message=f"Index update failed: {exc}",
+        )
 
 
 def _http_probe(url: str, *, method: str = "GET", timeout_sec: int = 6, headers: dict[str, str] | None = None, body: bytes | None = None) -> tuple[bool, int | None, str]:
@@ -666,6 +720,7 @@ async def office_editor_callback(
     if status in OFFICE_CALLBACK_SAVE_STATUSES:
         download_url = str(payload.get("url") or "").strip()
         if not download_url:
+            _set_office_index_status(relative_path, index_status="failed", index_message="No download URL in callback payload.")
             _set_office_callback_status(
                 relative_path,
                 success=False,
@@ -680,10 +735,16 @@ async def office_editor_callback(
             _atomic_write_bytes(file_path, content)
             if settings.onlyoffice_auto_rebuild_index_on_save:
                 mode = _effective_onlyoffice_index_update_mode()
-                if mode == "full":
-                    background_tasks.add_task(service.rebuild_index)
-                else:
-                    background_tasks.add_task(service.reindex_source_file, file_path)
+                _set_office_index_status(relative_path, index_status="queued", index_message=f"Queued index update ({mode}).")
+                background_tasks.add_task(
+                    _run_onlyoffice_index_update,
+                    relative_path,
+                    str(file_path.resolve()),
+                    mode,
+                    service,
+                )
+            else:
+                _set_office_index_status(relative_path, index_status="idle", index_message="Auto index update is disabled.")
             _set_office_callback_status(
                 relative_path,
                 success=True,
@@ -693,6 +754,7 @@ async def office_editor_callback(
             return JSONResponse({"error": 0}, status_code=200)
         except Exception as exc:
             message = f"Save failed: {exc}"
+            _set_office_index_status(relative_path, index_status="failed", index_message=message)
             _set_office_callback_status(
                 relative_path,
                 success=False,

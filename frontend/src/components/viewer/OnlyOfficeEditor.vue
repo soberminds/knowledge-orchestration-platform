@@ -24,6 +24,7 @@ const activeScriptSrc = ref("");
 const editorInstance = ref<any>(null);
 const callbackStatus = ref<OfficeCallbackStatusResponse | null>(null);
 const callbackStatusTimer = ref<number | null>(null);
+const isDocumentDirty = ref(false);
 
 const callbackStatusTagType = computed(() => {
   const payload = callbackStatus.value;
@@ -64,6 +65,65 @@ const callbackStatusMessage = computed(() => {
   return payload.message;
 });
 
+const indexStatusTagType = computed(() => {
+  const payload = callbackStatus.value;
+  const state = payload?.index_status ?? "idle";
+  if (state === "success") {
+    return "success";
+  }
+  if (state === "failed") {
+    return "danger";
+  }
+  if (state === "queued" || state === "running") {
+    return "warning";
+  }
+  return "info";
+});
+
+const indexStatusLabel = computed(() => {
+  const payload = callbackStatus.value;
+  const state = payload?.index_status ?? "idle";
+  if (state === "queued") {
+    return t("documents.office_index_status_queued");
+  }
+  if (state === "running") {
+    return t("documents.office_index_status_running");
+  }
+  if (state === "success") {
+    return t("documents.office_index_status_success");
+  }
+  if (state === "failed") {
+    return t("documents.office_index_status_failed");
+  }
+  return t("documents.office_index_status_idle");
+});
+
+const indexStatusTimeText = computed(() => {
+  const payload = callbackStatus.value;
+  if (!payload?.index_updated_at) {
+    return t("documents.office_index_not_updated");
+  }
+  const parsed = new Date(payload.index_updated_at);
+  if (Number.isNaN(parsed.getTime())) {
+    return payload.index_updated_at;
+  }
+  return parsed.toLocaleString();
+});
+
+const indexStatusMessage = computed(() => {
+  const payload = callbackStatus.value;
+  if (!payload?.index_message) {
+    return "";
+  }
+  return payload.index_message;
+});
+
+const dirtyStatusLabel = computed(() => {
+  return isDocumentDirty.value ? t("documents.office_dirty_yes") : t("documents.office_dirty_no");
+});
+
+const dirtyTagType = computed(() => (isDocumentDirty.value ? "warning" : "success"));
+
 function setError(message: string) {
   loadError.value = message;
   emit("error", message);
@@ -75,6 +135,7 @@ function clearError() {
 
 function clearCallbackStatus() {
   callbackStatus.value = null;
+  isDocumentDirty.value = false;
 }
 
 function stopCallbackStatusPolling() {
@@ -202,7 +263,18 @@ async function openOnlyOfficeEditor() {
 
     const editorId = `onlyoffice-editor-${Date.now()}`;
     editorHostRef.value.id = editorId;
-    editorInstance.value = new docsApi.DocEditor(editorId, payload.config);
+    const config = { ...(payload.config as Record<string, any>) };
+    const originalEvents = (config.events as Record<string, any> | undefined) ?? {};
+    config.events = {
+      ...originalEvents,
+      onDocumentStateChange: (event: any) => {
+        isDocumentDirty.value = Boolean(event?.data);
+        if (typeof originalEvents.onDocumentStateChange === "function") {
+          originalEvents.onDocumentStateChange(event);
+        }
+      },
+    };
+    editorInstance.value = new docsApi.DocEditor(editorId, config);
     emit("ready");
   } catch (error) {
     const message = error instanceof Error ? error.message : t("documents.office_open_failed");
@@ -251,6 +323,16 @@ onBeforeUnmount(() => {
       </el-tag>
       <span class="onlyoffice-callback-time">{{ callbackStatusTimeText }}</span>
       <span v-if="callbackStatusMessage" class="onlyoffice-callback-message">{{ callbackStatusMessage }}</span>
+      <span class="onlyoffice-divider"></span>
+      <span class="onlyoffice-callback-label">{{ t("documents.office_index_last_update") }}</span>
+      <el-tag size="small" :type="indexStatusTagType">
+        {{ indexStatusLabel }}
+      </el-tag>
+      <span class="onlyoffice-callback-time">{{ indexStatusTimeText }}</span>
+      <span v-if="indexStatusMessage" class="onlyoffice-callback-message">{{ indexStatusMessage }}</span>
+      <span class="onlyoffice-divider"></span>
+      <span class="onlyoffice-callback-label">{{ t("documents.office_dirty_label") }}</span>
+      <el-tag size="small" :type="dirtyTagType">{{ dirtyStatusLabel }}</el-tag>
     </section>
 
     <section v-loading="loading" class="onlyoffice-stage">
@@ -296,6 +378,13 @@ onBeforeUnmount(() => {
 
 .onlyoffice-callback-message {
   color: #64748b;
+}
+
+.onlyoffice-divider {
+  width: 1px;
+  height: 14px;
+  background: #cbd5e1;
+  margin: 0 2px;
 }
 
 .onlyoffice-stage {

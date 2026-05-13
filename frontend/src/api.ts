@@ -181,6 +181,9 @@ export interface OfficeCallbackStatusResponse {
   message: string;
   callback_status?: number | null;
   updated_at?: string | null;
+  index_status: "idle" | "queued" | "running" | "success" | "failed";
+  index_message: string;
+  index_updated_at?: string | null;
 }
 
 interface ChatStreamDeltaEvent {

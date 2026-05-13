@@ -48,9 +48,10 @@ const renderedPdfPages = ref<number[]>([]);
 const autoPagingBusy = ref(false);
 const autoPagingText = ref("");
 const isFullscreen = ref(false);
+const fileVersionToken = ref(Date.now());
 
-const fileUrl = computed(() => buildFileUrl(props.sourcePath));
-const previewPdfUrl = computed(() => buildPreviewPdfUrl(props.sourcePath));
+const fileUrl = computed(() => `${buildFileUrl(props.sourcePath)}&v=${fileVersionToken.value}`);
+const previewPdfUrl = computed(() => `${buildPreviewPdfUrl(props.sourcePath)}&v=${fileVersionToken.value}`);
 const extension = computed(() => {
   const part = props.sourcePath.split("?")[0];
   const dot = part.lastIndexOf(".");
@@ -817,6 +818,7 @@ async function loadPdfDocument(localToken: number, url: string) {
 }
 
 async function loadDocument() {
+  fileVersionToken.value = Date.now();
   const localToken = ++runToken;
   loading.value = true;
   errorMessage.value = "";
@@ -957,13 +959,7 @@ watch(
     if (!active) {
       return;
     }
-    if (isDocx.value && !officePdfMode.value) {
-      docxViewerRef.value?.refreshViewer?.();
-      return;
-    }
-    if (isPdfLike.value) {
-      requestSettledPdfRender();
-    }
+    void loadDocument();
   },
 );
 
