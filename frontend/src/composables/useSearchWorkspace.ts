@@ -1,8 +1,10 @@
 import type { Ref } from "vue";
 import { ref } from "vue";
 import { search, type SourceHit } from "../api";
+import { useI18n } from "./useI18n";
 
 export function useSearchWorkspace(topK: Ref<number>) {
+  const { t } = useI18n();
   const query = ref("");
   const hits = ref<SourceHit[]>([]);
   const searching = ref(false);
@@ -15,7 +17,7 @@ export function useSearchWorkspace(topK: Ref<number>) {
   async function runSearch() {
     const trimmed = query.value.trim();
     if (!trimmed) {
-      errorMessage.value = "Please enter a query.";
+      errorMessage.value = t("error.search_query_required");
       return;
     }
 
@@ -28,7 +30,7 @@ export function useSearchWorkspace(topK: Ref<number>) {
       });
       hits.value = result.hits;
     } catch (error) {
-      errorMessage.value = error instanceof Error ? error.message : "Search failed";
+      errorMessage.value = error instanceof Error ? error.message : t("error.search_failed");
       throw error;
     } finally {
       searching.value = false;

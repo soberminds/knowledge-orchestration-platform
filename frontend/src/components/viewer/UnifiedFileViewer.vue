@@ -1,7 +1,8 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import MarkdownIt from "markdown-it";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { buildFileUrl, buildPreviewPdfUrl, getFilePageText } from "../../api";
+import { useI18n } from "../../composables/useI18n";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.js?url";
 import DocxPageViewer from "./DocxPageViewer.vue";
@@ -24,13 +25,14 @@ const viewerRootRef = ref<HTMLElement | null>(null);
 const containerRef = ref<HTMLElement | null>(null);
 const pdfStackRef = ref<HTMLElement | null>(null);
 const docxViewerRef = ref<InstanceType<typeof DocxPageViewer> | null>(null);
+const { t } = useI18n();
 
 const loading = ref(false);
 const errorMessage = ref("");
 const textHtml = ref("");
 const pageCount = ref(1);
 const currentPage = ref(1);
-const pageLabel = ref("Preview");
+const pageLabel = ref<"preview" | "page">("preview");
 const zoomPercent = ref(90);
 const contentFormat = ref<"plain" | "markdown" | "table">("plain");
 const tableHeaders = ref<string[]>([]);
@@ -44,7 +46,7 @@ const officePdfError = ref("");
 
 const renderedPdfPages = ref<number[]>([]);
 const autoPagingBusy = ref(false);
-const autoPagingText = ref("Loading next page...");
+const autoPagingText = ref("");
 const isFullscreen = ref(false);
 
 const fileUrl = computed(() => buildFileUrl(props.sourcePath));
@@ -68,6 +70,7 @@ const isPdfLike = computed(() => isPdf.value || officePdfMode.value);
 const showSidePager = computed(() => isPdfLike.value || (isDocx.value && !officePdfMode.value));
 const hasSnippet = computed(() => (props.snippet ?? "").trim().length > 0);
 const hasPagination = computed(() => pageCount.value > 1);
+const pageLabelText = computed(() => (pageLabel.value === "page" ? t("viewer.page") : t("viewer.preview")));
 const canFullscreen = computed(() => {
   if (typeof document === "undefined") {
     return false;
@@ -423,7 +426,7 @@ async function renderTextDocument(localToken: number) {
 
   pageCount.value = Math.max(1, payload.page_count ?? 1);
   currentPage.value = Math.min(Math.max(1, payload.page ?? currentPage.value), pageCount.value);
-  pageLabel.value = payload.page_label ?? (pageCount.value > 1 ? `Page ${currentPage.value}` : "Preview");
+  pageLabel.value = pageCount.value > 1 ? "page" : "preview";
   if (payload.format === "table") {
     contentFormat.value = "table";
   } else if (payload.format === "markdown") {
@@ -742,7 +745,7 @@ async function maybeAutoPageByScroll() {
   const nearTop = host.scrollTop <= 120;
   if (nearTop && loadedFirstPage > 1) {
     autoPagingBusy.value = true;
-    autoPagingText.value = "Loading previous page...";
+    autoPagingText.value = t("viewer.loading_previous_page");
     try {
       await prependPrevPdfPage(runToken);
     } finally {
@@ -756,7 +759,7 @@ async function maybeAutoPageByScroll() {
   const nearBottom = host.scrollTop + host.clientHeight >= host.scrollHeight - 160;
   if (nearBottom && loadedLastPage < pageCount.value) {
     autoPagingBusy.value = true;
-    autoPagingText.value = "Loading next page...";
+    autoPagingText.value = t("viewer.loading_next_page");
     try {
       await appendNextPdfPage(runToken);
     } finally {
@@ -795,7 +798,7 @@ async function loadPdfDocument(localToken: number, url: string) {
 
   pageCount.value = Math.max(1, pdfDoc.numPages || 1);
   currentPage.value = clamp(currentPage.value, 1, pageCount.value);
-  pageLabel.value = "Page";
+  pageLabel.value = "page";
   resetPdfStack();
 
   await ensurePdfPageRange(localToken, currentPage.value);
@@ -819,7 +822,7 @@ async function loadDocument() {
   errorMessage.value = "";
   textHtml.value = "";
   pageCount.value = 1;
-  pageLabel.value = "Preview";
+  pageLabel.value = "preview";
   contentFormat.value = "plain";
   resetTablePayload();
   officePdfMode.value = false;
@@ -841,7 +844,7 @@ async function loadDocument() {
         return;
       } catch (previewError) {
         officePdfMode.value = false;
-        officePdfError.value = previewError instanceof Error ? previewError.message : "Office PDF preview unavailable";
+        officePdfError.value = previewError instanceof Error ? previewError.message : t("viewer.office_pdf_preview_unavailable");
         if (isDocx.value) {
           // Fallback to docx HTML viewer.
           return;
@@ -859,7 +862,7 @@ async function loadDocument() {
 
     await loadPdfDocument(localToken, fileUrl.value);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to load file preview";
+    const message = error instanceof Error ? error.message : t("viewer.file_preview_load_failed");
     errorMessage.value = message;
     emit("error", message);
   } finally {
@@ -875,7 +878,7 @@ function onDocxPageState(payload: { currentPage: number; pageCount: number }) {
   }
   pageCount.value = Math.max(1, payload.pageCount);
   currentPage.value = clamp(payload.currentPage, 1, pageCount.value);
-  pageLabel.value = "Page";
+  pageLabel.value = "page";
 }
 
 async function jumpToPdfPage(targetPage: number) {
@@ -1020,7 +1023,7 @@ defineExpose({
       <div class="toolbar-actions">
         <template v-if="hasPagination">
           <button type="button" class="tool-btn" @click="goPrevPage" :disabled="currentPage <= 1">-1</button>
-          <span class="tool-meta">{{ pageLabel }} {{ currentPage }} / {{ pageCount }}</span>
+          <span class="tool-meta">{{ pageLabelText }} {{ currentPage }} / {{ pageCount }}</span>
           <button type="button" class="tool-btn" @click="goNextPage" :disabled="currentPage >= pageCount">+1</button>
           <span class="tool-sep"></span>
         </template>
@@ -1033,12 +1036,12 @@ defineExpose({
           v-if="canFullscreen"
           type="button"
           class="tool-btn tool-icon-btn"
-          :title="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'"
+          :title="isFullscreen ? t('viewer.exit_fullscreen') : t('viewer.fullscreen')"
           @click="toggleFullscreen"
         >
           <span aria-hidden="true">⛶</span>
         </button>
-        <a :href="fileUrl" target="_blank" rel="noreferrer" class="open-link">Open Source File</a>
+        <a :href="fileUrl" target="_blank" rel="noreferrer" class="open-link">{{ t("viewer.open_source_file") }}</a>
       </div>
     </header>
 
@@ -1064,7 +1067,7 @@ defineExpose({
 
         <template v-else>
           <section v-if="hasSnippet" class="text-hit-callout">
-            <small>Citation Snippet</small>
+            <small>{{ t("viewer.citation_snippet") }}</small>
             <p>{{ snippet }}</p>
           </section>
           <template v-if="isDocx && !officePdfMode">
@@ -1074,7 +1077,7 @@ defineExpose({
               type="warning"
               show-icon
               :closable="false"
-              :title="`High-fidelity PDF preview unavailable, fallback to DOCX HTML mode: ${officePdfError}`"
+              :title="t('viewer.office_pdf_unavailable', { error: officePdfError })"
             />
             <DocxPageViewer
               ref="docxViewerRef"
@@ -1092,7 +1095,7 @@ defineExpose({
               type="warning"
               show-icon
               :closable="false"
-              title="Legacy .doc preview fell back to text mode. Install LibreOffice or Word for high-fidelity PDF preview."
+              :title="t('viewer.legacy_doc_fallback')"
             />
             <el-alert
               v-if="officePdfError"
@@ -1460,3 +1463,4 @@ defineExpose({
   }
 }
 </style>
+

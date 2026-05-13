@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import type { ChatModelOption } from "../../api";
 import type { UiMessage } from "../../types/chat";
+import { useI18n } from "../../composables/useI18n";
 import ChatComposer from "./ChatComposer.vue";
 import MessageList from "./MessageList.vue";
 import ModelHealthPanel from "./ModelHealthPanel.vue";
@@ -40,6 +41,7 @@ const emit = defineEmits<{
 
 const showStarters = computed(() => props.messages.length <= 1);
 const modelHealthVisible = ref(false);
+const { t } = useI18n();
 
 interface ModelGroup {
   provider: string;
@@ -128,7 +130,7 @@ const modelGroups = computed<ModelGroup[]>(() => {
   <section class="chat-workspace">
     <header class="workspace-head">
       <h2>{{ title }}</h2>
-      <p>Chat workspace with retrieval-augmented streaming responses.</p>
+      <p>{{ t("chat.workspace_subtitle") }}</p>
     </header>
 
     <ModelHealthPanel

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { ChatModelOption } from "../../api";
+import { useI18n } from "../../composables/useI18n";
 
 interface ModelGroup {
   provider: string;
@@ -37,6 +38,8 @@ const emit = defineEmits<{
   (event: "pick-starter", prompt: string): void;
 }>();
 
+const { t } = useI18n();
+
 const totalModelCount = computed(() => props.modelGroups.reduce((sum, group) => sum + group.models.length, 0));
 const availableModelCount = computed(() =>
   props.modelGroups.reduce((sum, group) => sum + group.models.filter((item) => item.available).length, 0),
@@ -53,32 +56,32 @@ const selectedModelOption = computed(() => {
 });
 
 const modelSummary = computed(() => {
-  const raw = selectedModelOption.value?.model || props.selectedModel || "Model";
+  const raw = selectedModelOption.value?.model || props.selectedModel || t("chat.model_prefix");
   return raw.length > 26 ? `${raw.slice(0, 26)}...` : raw;
 });
 
-const thinkingSummary = computed(() => (props.thinkingMode === "deep" ? "Deep" : "Quick"));
+const thinkingSummary = computed(() => (props.thinkingMode === "deep" ? t("chat.mode_deep") : t("chat.mode_quick")));
 
 const webSummary = computed(() => {
   if (!props.nativeWebSearchSupported && !props.externalWebSearchAvailable) {
-    return "Web Off";
+    return t("chat.web_off");
   }
   const enabled = props.nativeWebSearchEnabled || props.externalWebSearchEnabled;
-  return enabled ? "Web On" : "Web Off";
+  return enabled ? t("chat.web_on") : t("chat.web_off");
 });
 
 function modelDescription(model: ChatModelOption): string {
   if (!model.available) {
-    return model.unavailable_reason || "Not configured";
+    return model.unavailable_reason || t("chat.model_not_configured");
   }
   if (model.thinking_style === "qwen") {
     const budget = model.deep_thinking_budget ?? 2048;
-    return `Qwen deep budget ${budget}`;
+    return t("chat.model_qwen_budget", { budget });
   }
   if (model.thinking_style === "deepseek") {
-    return `DeepSeek effort ${model.deep_reasoning_effort || "high"}`;
+    return t("chat.model_deepseek_effort", { effort: model.deep_reasoning_effort || "high" });
   }
-  return "General model";
+  return t("chat.model_general");
 }
 
 function pickModel(model: ChatModelOption) {
@@ -115,16 +118,16 @@ function normalizeTopK(value: unknown): number {
         type="textarea"
         :rows="2"
         resize="none"
-        placeholder="Ask your question (Enter to send, Shift+Enter for newline)"
+        :placeholder="t('chat.input_placeholder')"
         @update:model-value="$emit('update:modelValue', String($event))"
         @keydown.enter.exact.prevent="$emit('send')"
       />
-      <div class="composer-actions">
-        <span class="helper-text">Prefer KB evidence; fallback to general chat when needed.</span>
-        <el-button type="primary" :loading="loading" @click="$emit('send')">
-          Send
+    <div class="composer-actions">
+      <span class="helper-text">{{ t("chat.helper_text") }}</span>
+      <el-button type="primary" :loading="loading" @click="$emit('send')">
+        {{ t("chat.send") }}
         </el-button>
-      </div>
+    </div>
     </div>
 
     <div class="bubble-row">
@@ -132,15 +135,15 @@ function normalizeTopK(value: unknown): number {
         <template #reference>
           <button class="option-pill option-pill--primary" type="button">
             <span class="option-dot" />
-            Model: {{ modelSummary }}
+            {{ t("chat.model_prefix") }}: {{ modelSummary }}
           </button>
         </template>
 
         <section class="settings-panel">
           <header class="settings-head">
-            <strong>Model Selection</strong>
+            <strong>{{ t("chat.settings_model_selection") }}</strong>
             <el-button link type="primary" :loading="optionsLoading" @click="$emit('refresh-model-options')">
-              Refresh
+              {{ t("chat.settings_refresh") }}
             </el-button>
           </header>
 
@@ -161,7 +164,7 @@ function normalizeTopK(value: unknown): number {
               >
                 <span class="model-main">{{ model.model }}</span>
                 <span class="model-sub">{{ modelDescription(model) }}</span>
-                <span v-if="model.model === selectedModel" class="model-check">Selected</span>
+                <span v-if="model.model === selectedModel" class="model-check">{{ t("chat.settings_selected") }}</span>
               </button>
             </section>
           </div>
@@ -175,22 +178,22 @@ function normalizeTopK(value: unknown): number {
         trigger="click"
       >
         <template #reference>
-          <button class="option-pill" type="button">Web: {{ webSummary }}</button>
+          <button class="option-pill" type="button">{{ t("chat.web_prefix") }}: {{ webSummary }}</button>
         </template>
         <section class="settings-panel">
           <header class="settings-head">
-            <strong>Web Search</strong>
+            <strong>{{ t("chat.settings_web_search") }}</strong>
           </header>
           <div class="settings-row switch-stack">
             <div v-if="nativeWebSearchSupported" class="switch-line">
-              <span>Native web</span>
+              <span>{{ t("chat.settings_native_web") }}</span>
               <el-switch
                 :model-value="nativeWebSearchEnabled"
                 @update:model-value="$emit('update:native-web-search-enabled', Boolean($event))"
               />
             </div>
             <div v-if="externalWebSearchAvailable" class="switch-line">
-              <span>External web</span>
+              <span>{{ t("chat.settings_external_web") }}</span>
               <el-switch
                 :model-value="externalWebSearchEnabled"
                 @update:model-value="$emit('update:external-web-search-enabled', Boolean($event))"
@@ -202,36 +205,36 @@ function normalizeTopK(value: unknown): number {
 
       <el-popover placement="top-start" :width="300" trigger="click">
         <template #reference>
-          <button class="option-pill" type="button">Thinking: {{ thinkingSummary }}</button>
+          <button class="option-pill" type="button">{{ t("chat.thinking_prefix") }}: {{ thinkingSummary }}</button>
         </template>
         <section class="settings-panel">
           <header class="settings-head">
-            <strong>Thinking Mode</strong>
+            <strong>{{ t("chat.settings_thinking_mode") }}</strong>
           </header>
           <el-segmented
             :model-value="thinkingMode"
             :options="[
-              { label: 'Quick', value: 'quick' },
-              { label: 'Deep', value: 'deep' },
+              { label: t('chat.mode_quick'), value: 'quick' },
+              { label: t('chat.mode_deep'), value: 'deep' },
             ]"
             @change="$emit('update:thinking-mode', String($event) as 'quick' | 'deep')"
           />
           <p class="hint-line">
-            Quick is faster. Deep uses model-native reasoning budget when supported.
+            {{ t("chat.settings_thinking_hint") }}
           </p>
         </section>
       </el-popover>
 
       <el-popover placement="top-start" :width="280" trigger="click">
         <template #reference>
-          <button class="option-pill" type="button">top_k: {{ topK }}</button>
+          <button class="option-pill" type="button">{{ t("chat.topk_prefix") }}: {{ topK }}</button>
         </template>
         <section class="settings-panel">
           <header class="settings-head">
-            <strong>Retrieval Range</strong>
+            <strong>{{ t("chat.settings_retrieval_range") }}</strong>
           </header>
           <div class="settings-row">
-            <label>top_k</label>
+            <label>{{ t("chat.settings_top_k") }}</label>
             <el-input-number
               :model-value="topK"
               :min="1"
@@ -241,7 +244,7 @@ function normalizeTopK(value: unknown): number {
               @update:model-value="$emit('update:top-k', normalizeTopK($event))"
             />
           </div>
-          <p class="hint-line">Higher top_k increases recall but may add noise.</p>
+          <p class="hint-line">{{ t("chat.settings_top_k_hint") }}</p>
         </section>
       </el-popover>
 
@@ -251,7 +254,7 @@ function normalizeTopK(value: unknown): number {
         type="button"
         @click="$emit('toggle-model-health')"
       >
-        Model Health {{ availableModelCount }}/{{ totalModelCount }}
+        {{ t("chat.model_health") }} {{ availableModelCount }}/{{ totalModelCount }}
       </button>
     </div>
   </footer>

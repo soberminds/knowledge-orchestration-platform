@@ -1,5 +1,6 @@
 import type { Ref } from "vue";
 import { computed, nextTick, reactive, ref } from "vue";
+import { useI18n } from "./useI18n";
 import {
   chatStream,
   getChatOptions,
@@ -12,42 +13,35 @@ import {
 } from "../api";
 import type { ChatSession, UiMessage } from "../types/chat";
 
-const STARTER_PROMPTS = [
-  "Summarize the key architecture points from my knowledge base.",
-  "What is the end-to-end RAG flow in this project?",
-  "List the top 5 findings worth reading first in this knowledge base.",
-];
-
-
 function createId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function buildSessionTitle(text: string) {
+function buildSessionTitle(text: string, fallbackTitle: string) {
   const normalized = text.trim().replace(/\s+/g, " ");
   if (!normalized) {
-    return "New Chat";
+    return fallbackTitle;
   }
   return normalized.length > 24 ? `${normalized.slice(0, 24)}...` : normalized;
 }
 
-function createWelcomeMessage(): UiMessage {
+function createWelcomeMessage(welcomeText: string): UiMessage {
   return {
     id: createId(),
     role: "assistant",
     createdAt: Date.now(),
-    content: "I prioritize knowledge-base evidence when available, and I can still answer with general model knowledge when relevant context is missing.",
+    content: welcomeText,
     sources: [],
     citations: [],
   };
 }
 
-function createSession(seedTitle = "New Chat"): ChatSession {
+function createSession(seedTitle: string, welcomeText: string): ChatSession {
   return {
     id: createId(),
     title: seedTitle,
     updatedAt: Date.now(),
-    messages: [createWelcomeMessage()],
+    messages: [createWelcomeMessage(welcomeText)],
   };
 }
 
@@ -68,6 +62,7 @@ function delay(ms: number) {
 }
 
 export function useChatWorkspace(topK: Ref<number>) {
+  const { t } = useI18n();
   const sessions = ref<ChatSession[]>([]);
   const activeSessionId = ref("");
   const loading = ref(false);
@@ -93,7 +88,11 @@ export function useChatWorkspace(topK: Ref<number>) {
     () => modelOptions.value.find((item) => item.model === selectedModel.value) ?? null,
   );
   const selectedModelSupportsNativeSearch = computed(() => Boolean(selectedModelOption.value?.supports_native_web_search));
-  const starterPrompts = STARTER_PROMPTS;
+  const starterPrompts = computed(() => [
+    t("chat.starter.summary"),
+    t("chat.starter.rag_flow"),
+    t("chat.starter.top_findings"),
+  ]);
 
   async function scrollToBottom(smooth = false) {
     await nextTick();
@@ -120,7 +119,7 @@ export function useChatWorkspace(topK: Ref<number>) {
   }
 
   function newChat() {
-    const session = createSession();
+    const session = createSession(t("chat.new_chat"), t("chat.welcome_message"));
     sessions.value.unshift(session);
     activeSessionId.value = session.id;
     composer.value = "";
@@ -195,7 +194,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     if (selectedOption && !selectedOption.available) {
       errorMessage.value =
         selectedOption.unavailable_reason ||
-        `Model "${selected}" is temporarily unavailable. Please configure its API key in .env.`;
+        t("error.model_temporarily_unavailable", { model: selected });
       return;
     }
 
@@ -213,8 +212,8 @@ export function useChatWorkspace(topK: Ref<number>) {
     session.messages.push(userMessage);
     session.updatedAt = Date.now();
 
-    if (session.title === "New Chat" || session.messages.length <= 3) {
-      session.title = buildSessionTitle(question);
+    if (session.messages.length <= 3) {
+      session.title = buildSessionTitle(question, t("chat.new_chat"));
     }
 
     const assistantMessage = reactive<UiMessage>({
@@ -260,7 +259,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     } catch (error) {
       assistantMessage.streaming = false;
       assistantMessage.failed = true;
-      const message = error instanceof Error ? error.message : "Chat request failed";
+      const message = error instanceof Error ? error.message : t("error.chat_request_failed");
       assistantMessage.content = message;
       errorMessage.value = message;
     } finally {

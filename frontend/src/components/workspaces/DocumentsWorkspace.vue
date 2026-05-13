@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { DocumentInfo } from "../../api";
+import { useI18n } from "../../composables/useI18n";
 
 const props = defineProps<{
   documents: DocumentInfo[];
@@ -17,6 +18,7 @@ const emit = defineEmits<{
 }>();
 
 const fileInputRef = ref<HTMLInputElement | null>(null);
+const { locale, t } = useI18n();
 
 const selectedFileNames = computed(() => props.selectedFiles.map((file) => file.name));
 
@@ -40,7 +42,7 @@ function formatDateTime(value: string) {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return date.toLocaleString("zh-CN", { hour12: false });
+  return date.toLocaleString(locale.value, { hour12: false });
 }
 
 function formatBytes(bytes: number) {
@@ -66,8 +68,8 @@ function deleteDocument(path: string) {
   <section class="workspace-standard">
     <header class="workspace-head">
       <div>
-        <h2>Document Management</h2>
-        <p>Upload source files and inspect currently indexed documents.</p>
+        <h2>{{ t("documents.title") }}</h2>
+        <p>{{ t("documents.subtitle") }}</p>
       </div>
     </header>
 
@@ -80,7 +82,7 @@ function deleteDocument(path: string) {
             multiple
             @change="onSelectFiles"
           />
-          <span>Select Files</span>
+          <span>{{ t("documents.select_files") }}</span>
         </label>
 
         <el-button
@@ -89,7 +91,7 @@ function deleteDocument(path: string) {
           :disabled="!selectedFiles.length"
           @click="$emit('upload')"
         >
-          Upload and Rebuild
+          {{ t("documents.upload_rebuild") }}
         </el-button>
       </div>
 
@@ -118,11 +120,11 @@ function deleteDocument(path: string) {
           </div>
 
           <div class="item-actions">
-            <el-button size="small" text type="primary" @click="openDocument(doc.path)">Open</el-button>
+            <el-button size="small" text type="primary" @click="openDocument(doc.path)">{{ t("documents.open") }}</el-button>
             <el-popconfirm
-              title="Delete this file?"
-              confirm-button-text="Delete"
-              cancel-button-text="Cancel"
+              :title="t('documents.delete_confirm_title')"
+              :confirm-button-text="t('documents.delete_confirm_button')"
+              :cancel-button-text="t('documents.delete_cancel_button')"
               width="220"
               @confirm="deleteDocument(doc.path)"
             >
@@ -133,7 +135,7 @@ function deleteDocument(path: string) {
                   type="danger"
                   :loading="deletingPath === doc.path"
                 >
-                  Delete
+                  {{ t("documents.delete") }}
                 </el-button>
               </template>
             </el-popconfirm>
@@ -143,7 +145,7 @@ function deleteDocument(path: string) {
 
       <el-empty
         v-if="!documents.length"
-        description="No documents found yet."
+        :description="t('documents.empty')"
       />
     </section>
   </section>

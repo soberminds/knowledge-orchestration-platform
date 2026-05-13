@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
+import { useI18n } from "../../composables/useI18n";
 
 const props = defineProps<{
   headers: string[];
@@ -15,6 +16,7 @@ const gridRef = ref<HTMLElement | null>(null);
 const locateRowInput = ref("");
 const locateColInput = ref("");
 const activeCellKey = ref("");
+const { t } = useI18n();
 
 function normalizeForMatch(raw: string): string {
   return raw.replace(/[\s\u3000]/g, "").replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, "").toLowerCase();
@@ -59,7 +61,7 @@ const normalizedRows = computed(() => {
 const tableSummary = computed(() => {
   const rowCount = props.totalRows ?? props.rows.length;
   const colCount = props.totalColumns ?? props.headers.length;
-  return `Rows ${rowCount}, Columns ${colCount}`;
+  return t("sheet.rows_columns", { rows: rowCount, columns: colCount });
 });
 
 function colIndexToLetters(index: number): string {
@@ -186,18 +188,18 @@ watch(
     <header class="sheet-toolbar">
       <div class="sheet-meta">
         <strong>{{ tableSummary }}</strong>
-        <small v-if="truncated">Preview truncated for performance.</small>
+        <small v-if="truncated">{{ t("sheet.preview_truncated") }}</small>
       </div>
       <div class="sheet-locator">
         <label>
-          Row
+          {{ t("sheet.row") }}
           <input v-model="locateRowInput" type="number" min="1" />
         </label>
         <label>
-          Col
-          <input v-model="locateColInput" type="text" placeholder="A / 3" />
+          {{ t("sheet.col") }}
+          <input v-model="locateColInput" type="text" :placeholder="t('sheet.col_input_placeholder')" />
         </label>
-        <button type="button" class="locate-btn" @click="locateFromToolbar">Go</button>
+        <button type="button" class="locate-btn" @click="locateFromToolbar">{{ t("sheet.go") }}</button>
       </div>
     </header>
 

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { HealthResponse } from "../../api";
+import { useI18n } from "../../composables/useI18n";
 
 defineProps<{
   health: HealthResponse | null;
@@ -13,39 +14,41 @@ defineEmits<{
   (event: "rebuild"): void;
   (event: "refresh"): void;
 }>();
+
+const { t } = useI18n();
 </script>
 
 <template>
   <section class="workspace-standard">
     <header class="workspace-head">
       <div>
-        <h2>Index Maintenance</h2>
-        <p>Inspect index status and manually rebuild vector chunks.</p>
+        <h2>{{ t("index.title") }}</h2>
+        <p>{{ t("index.subtitle") }}</p>
       </div>
     </header>
 
     <section class="tool-card">
       <div class="status-grid">
         <article>
-          <span>Service Status</span>
+          <span>{{ t("index.service_status") }}</span>
           <strong>{{ statusText }}</strong>
         </article>
         <article>
-          <span>Collection Name</span>
+          <span>{{ t("index.collection_name") }}</span>
           <strong>{{ health?.collection_name ?? "-" }}</strong>
         </article>
         <article>
-          <span>Chunk Count</span>
+          <span>{{ t("index.chunk_count") }}</span>
           <strong>{{ indexedChunks }}</strong>
         </article>
       </div>
 
       <div class="index-actions">
         <el-button type="primary" :loading="ingesting" @click="$emit('rebuild')">
-          Rebuild Index
+          {{ t("index.rebuild") }}
         </el-button>
         <el-button plain :loading="refreshing" @click="$emit('refresh')">
-          Refresh Status
+          {{ t("index.refresh") }}
         </el-button>
       </div>
     </section>

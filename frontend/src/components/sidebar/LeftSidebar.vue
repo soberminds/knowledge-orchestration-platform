@@ -1,7 +1,10 @@
 <script setup lang="ts">
+import { computed } from "vue";
+import { useI18n } from "../../composables/useI18n";
+import type { LocaleCode } from "../../i18n/messages";
 import type { NavTab, WorkspaceTab, ChatSession } from "../../types/chat";
 
-defineProps<{
+const props = defineProps<{
   navTabs: NavTab[];
   activeTab: WorkspaceTab;
   recentSessions: ChatSession[];
@@ -16,6 +19,12 @@ defineEmits<{
   (event: "select-tab", tab: WorkspaceTab): void;
   (event: "select-session", sessionId: string): void;
 }>();
+
+const { locale, localeOptions, setLocale, t } = useI18n();
+const localeValue = computed<LocaleCode>({
+  get: () => locale.value,
+  set: (value) => setLocale(value),
+});
 </script>
 
 <template>
@@ -23,15 +32,27 @@ defineEmits<{
     <div class="sidebar-head">
       <div class="logo-mark">R</div>
       <div class="head-text">
-        <strong>RAG Studio</strong>
-        <small>Knowledge Copilot</small>
+        <strong>{{ t("sidebar.brand_name") }}</strong>
+        <small>{{ t("sidebar.brand_subtitle") }}</small>
       </div>
     </div>
 
-    <button class="new-chat-btn" @click="$emit('new-chat')">+ New Chat</button>
+    <div class="sidebar-language">
+      <span>{{ t("sidebar.language") }}</span>
+      <el-select v-model="localeValue" size="small" class="language-select">
+        <el-option
+          v-for="option in localeOptions"
+          :key="option.code"
+          :label="t(option.nameKey)"
+          :value="option.code"
+        />
+      </el-select>
+    </div>
+
+    <button class="new-chat-btn" @click="$emit('new-chat')">{{ t("sidebar.new_chat") }}</button>
 
     <section class="nav-section">
-      <h3>Workspaces</h3>
+      <h3>{{ t("sidebar.workspaces") }}</h3>
       <button
         v-for="tab in navTabs"
         :key="tab.id"
@@ -44,7 +65,7 @@ defineEmits<{
     </section>
 
     <section class="nav-section recent-section">
-      <h3>Recent</h3>
+      <h3>{{ t("sidebar.recent") }}</h3>
       <button
         v-for="session in recentSessions"
         :key="session.id"
@@ -57,15 +78,15 @@ defineEmits<{
 
     <section class="sidebar-foot">
       <article>
-        <span>Index</span>
+        <span>{{ t("sidebar.index") }}</span>
         <strong>{{ statusText }}</strong>
       </article>
       <article>
-        <span>Documents</span>
+        <span>{{ t("sidebar.documents") }}</span>
         <strong>{{ documentCount }}</strong>
       </article>
       <article>
-        <span>Chunks</span>
+        <span>{{ t("sidebar.chunks") }}</span>
         <strong>{{ indexedChunks }}</strong>
       </article>
     </section>
@@ -112,6 +133,24 @@ defineEmits<{
 .head-text small {
   font-size: 0.8rem;
   color: var(--ink-soft);
+}
+
+.sidebar-language {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 2px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.language-select {
+  width: 104px;
 }
 
 .new-chat-btn {

@@ -1,4 +1,5 @@
 import { computed, ref } from "vue";
+import { useI18n } from "./useI18n";
 import {
   deleteDocument as deleteDocumentApi,
   getHealth,
@@ -18,6 +19,7 @@ function wait(ms: number) {
 }
 
 export function useDashboard() {
+  const { t } = useI18n();
   const health = ref<HealthResponse | null>(null);
   const documents = ref<DocumentInfo[]>([]);
   const selectedFiles = ref<File[]>([]);
@@ -28,7 +30,7 @@ export function useDashboard() {
   const deletingPath = ref("");
   const errorMessage = ref("");
 
-  const statusText = computed(() => health.value?.status ?? "loading");
+  const statusText = computed(() => health.value?.status ?? t("status.loading"));
   const indexedChunks = computed(() => health.value?.indexed_chunks ?? 0);
 
   function setSelectedFiles(files: File[]) {
@@ -66,7 +68,7 @@ export function useDashboard() {
         }
       }
     } catch (error) {
-      errorMessage.value = error instanceof Error ? error.message : "Failed to refresh dashboard";
+      errorMessage.value = error instanceof Error ? error.message : t("error.refresh_dashboard_failed");
       throw error;
     } finally {
       refreshing.value = false;
@@ -79,7 +81,7 @@ export function useDashboard() {
 
   async function uploadAndBuild() {
     if (!selectedFiles.value.length) {
-      errorMessage.value = "Please select files first.";
+      errorMessage.value = t("error.select_files_first");
       return;
     }
 
@@ -90,7 +92,7 @@ export function useDashboard() {
       selectedFiles.value = [];
       await refreshDashboard();
     } catch (error) {
-      errorMessage.value = error instanceof Error ? error.message : "Upload failed";
+      errorMessage.value = error instanceof Error ? error.message : t("error.upload_failed");
       throw error;
     } finally {
       uploading.value = false;
@@ -104,7 +106,7 @@ export function useDashboard() {
       await deleteDocumentApi(path);
       await refreshDashboard();
     } catch (error) {
-      errorMessage.value = error instanceof Error ? error.message : "Failed to delete document";
+      errorMessage.value = error instanceof Error ? error.message : t("error.delete_document_failed");
       throw error;
     } finally {
       deletingPath.value = "";
@@ -118,7 +120,7 @@ export function useDashboard() {
       await rebuildIndex();
       await refreshDashboard();
     } catch (error) {
-      errorMessage.value = error instanceof Error ? error.message : "Failed to rebuild index";
+      errorMessage.value = error instanceof Error ? error.message : t("error.rebuild_index_failed");
       throw error;
     } finally {
       ingesting.value = false;

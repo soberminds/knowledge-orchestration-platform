@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { SourceHit } from "../../api";
+import { useI18n } from "../../composables/useI18n";
 
 defineProps<{
   query: string;
@@ -13,14 +14,16 @@ defineEmits<{
   (event: "update:topK", value: number): void;
   (event: "run-search"): void;
 }>();
+
+const { t } = useI18n();
 </script>
 
 <template>
   <section class="workspace-standard">
     <header class="workspace-head">
       <div>
-        <h2>Search Playground</h2>
-        <p>Run retrieval only and inspect the matched chunks without LLM generation.</p>
+        <h2>{{ t("search.title") }}</h2>
+        <p>{{ t("search.subtitle") }}</p>
       </div>
       <div class="head-actions">
         <el-tag effect="plain" type="success">top_k: {{ topK }}</el-tag>
@@ -39,7 +42,7 @@ defineEmits<{
       <div class="search-line">
         <el-input
           :model-value="query"
-          placeholder="Try a keyword, for example: flex layout summary"
+          :placeholder="t('search.placeholder')"
           @update:model-value="$emit('update:query', String($event))"
           @keyup.enter="$emit('run-search')"
         />
@@ -48,7 +51,7 @@ defineEmits<{
           :loading="searching"
           @click="$emit('run-search')"
         >
-          Search
+          {{ t("search.button") }}
         </el-button>
       </div>
     </section>
@@ -70,7 +73,7 @@ defineEmits<{
 
       <el-empty
         v-if="!hits.length"
-        description="No search results yet."
+        :description="t('search.empty')"
       />
     </section>
   </section>

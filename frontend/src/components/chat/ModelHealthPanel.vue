@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { ChatModelOption } from "../../api";
+import { useI18n } from "../../composables/useI18n";
 
 const props = defineProps<{
   modelOptions: ChatModelOption[];
@@ -13,15 +14,17 @@ const emit = defineEmits<{
   (event: "refresh"): void;
 }>();
 
+const { locale, t } = useI18n();
+
 const totalCount = computed(() => props.modelOptions.length);
 const availableCount = computed(() => props.modelOptions.filter((item) => item.available).length);
 const unavailableCount = computed(() => Math.max(0, totalCount.value - availableCount.value));
 
 const formattedCheckedAt = computed(() => {
   if (!props.lastCheckedAt) {
-    return "Not checked yet";
+    return t("model_health.not_checked");
   }
-  return new Date(props.lastCheckedAt).toLocaleString("zh-CN", { hour12: false });
+  return new Date(props.lastCheckedAt).toLocaleString(locale.value, { hour12: false });
 });
 
 function providerLabel(provider: string) {
@@ -38,14 +41,14 @@ function providerLabel(provider: string) {
 }
 
 function checkLabel(enabled: boolean) {
-  return enabled ? "Configured" : "Missing";
+  return enabled ? t("model_health.configured") : t("model_health.missing");
 }
 
 function thinkingStyleLabel(style?: string | null) {
   const token = String(style || "none").trim().toLowerCase();
-  if (token === "deepseek") return "DeepSeek mapping";
-  if (token === "qwen") return "Qwen mapping";
-  return "Generic mapping";
+  if (token === "deepseek") return t("model_health.style.deepseek");
+  if (token === "qwen") return t("model_health.style.qwen");
+  return t("model_health.style.generic");
 }
 </script>
 
@@ -53,23 +56,23 @@ function thinkingStyleLabel(style?: string | null) {
   <section class="model-health-panel">
     <header class="panel-head">
       <div>
-        <h3>Model Health Check</h3>
-        <p>Last check: {{ formattedCheckedAt }}</p>
+        <h3>{{ t("model_health.title") }}</h3>
+        <p>{{ t("model_health.last_check", { time: formattedCheckedAt }) }}</p>
       </div>
-      <el-button size="small" :loading="loading" @click="emit('refresh')">Refresh</el-button>
+      <el-button size="small" :loading="loading" @click="emit('refresh')">{{ t("chat.settings_refresh") }}</el-button>
     </header>
 
     <section class="summary-grid">
       <article class="summary-card">
-        <span>Total</span>
+        <span>{{ t("model_health.total") }}</span>
         <strong>{{ totalCount }}</strong>
       </article>
       <article class="summary-card ok">
-        <span>Available</span>
+        <span>{{ t("model_health.available") }}</span>
         <strong>{{ availableCount }}</strong>
       </article>
       <article class="summary-card bad">
-        <span>Unavailable</span>
+        <span>{{ t("model_health.unavailable") }}</span>
         <strong>{{ unavailableCount }}</strong>
       </article>
     </section>
@@ -88,7 +91,7 @@ function thinkingStyleLabel(style?: string | null) {
           <div class="model-name">{{ option.model }}</div>
           <div class="head-tags">
             <el-tag size="small" :type="option.available ? 'success' : 'danger'">
-              {{ option.available ? "Available" : "Unavailable" }}
+              {{ option.available ? t("model_health.tag_available") : t("model_health.tag_unavailable") }}
             </el-tag>
             <el-tag size="small" effect="plain">{{ providerLabel(option.provider) }}</el-tag>
             <el-tag
@@ -97,44 +100,44 @@ function thinkingStyleLabel(style?: string | null) {
               effect="dark"
               type="info"
             >
-              Selected
+              {{ t("model_health.tag_selected") }}
             </el-tag>
           </div>
         </div>
 
         <div class="check-row">
           <span class="check-pill neutral">
-            Thinking Style: {{ thinkingStyleLabel(option.thinking_style) }}
+            {{ t("model_health.thinking_style", { style: thinkingStyleLabel(option.thinking_style) }) }}
           </span>
           <span
             class="check-pill"
             :class="{ ok: Boolean(option.api_key_configured), bad: !Boolean(option.api_key_configured) }"
           >
-            API Key: {{ checkLabel(Boolean(option.api_key_configured)) }}
+            {{ t("model_health.api_key", { status: checkLabel(Boolean(option.api_key_configured)) }) }}
           </span>
           <span
             class="check-pill"
             :class="{ ok: Boolean(option.base_url_configured), bad: !Boolean(option.base_url_configured) }"
           >
-            Base URL: {{ checkLabel(Boolean(option.base_url_configured)) }}
+            {{ t("model_health.base_url", { status: checkLabel(Boolean(option.base_url_configured)) }) }}
           </span>
           <span class="check-pill neutral">
-            Native Search: {{ option.supports_native_web_search ? "Yes" : "No" }}
+            {{ t("model_health.native_search", { value: option.supports_native_web_search ? t("model_health.yes") : t("model_health.no") }) }}
           </span>
         </div>
 
         <p class="base-url">
-          <span>Base URL:</span>
-          <code>{{ option.base_url || "(not set)" }}</code>
+          <span>{{ t("model_health.base_url_label") }}</span>
+          <code>{{ option.base_url || t("model_health.base_url_not_set") }}</code>
         </p>
         <p v-if="option.thinking_style === 'deepseek'" class="mapping-detail">
-          Deep mapping: thinking=enabled, reasoning_effort={{ option.deep_reasoning_effort || "high" }}
+          {{ t("model_health.deepseek_mapping", { effort: option.deep_reasoning_effort || "high" }) }}
         </p>
         <p v-if="option.thinking_style === 'qwen'" class="mapping-detail">
-          Deep mapping: enable_thinking=true, thinking_budget={{ option.deep_thinking_budget ?? "(default)" }}
+          {{ t("model_health.qwen_mapping", { budget: option.deep_thinking_budget ?? "(default)" }) }}
         </p>
         <p v-if="!option.available" class="reason">
-          {{ option.unavailable_reason || "Unavailable. Please check provider settings." }}
+          {{ option.unavailable_reason || t("model_health.default_unavailable_reason") }}
         </p>
       </article>
     </el-scrollbar>

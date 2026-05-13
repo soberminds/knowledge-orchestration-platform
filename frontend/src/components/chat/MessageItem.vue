@@ -1,6 +1,7 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import type { CitationRef } from "../../api";
+import { useI18n } from "../../composables/useI18n";
 import type { UiMessage } from "../../types/chat";
 import UnifiedFileViewer from "../viewer/UnifiedFileViewer.vue";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
@@ -18,6 +19,7 @@ const viewerPage = ref(1);
 const viewerSnippet = ref("");
 const viewerError = ref("");
 const viewerRef = ref<InstanceType<typeof UnifiedFileViewer> | null>(null);
+const { t } = useI18n();
 
 const citationItems = computed<CitationRef[]>(() => {
   if (props.message.citations.length) {
@@ -47,7 +49,11 @@ const usageSummary = computed(() => {
     return "";
   }
   const usage = props.message.usage;
-  return `tokens in/out/total: ${usage.prompt_tokens}/${usage.completion_tokens}/${usage.total_tokens}`;
+  return t("message.tokens_summary", {
+    prompt: usage.prompt_tokens,
+    completion: usage.completion_tokens,
+    total: usage.total_tokens,
+  });
 });
 
 const costSummary = computed(() => {
@@ -61,8 +67,8 @@ const costSummary = computed(() => {
   const cost = props.message.costEstimate;
   const currency = cost.currency || "CNY";
   const total = Number(cost.total_cost || 0).toFixed(6);
-  const model = props.message.model ? `model: ${props.message.model} ` : "";
-  return `${model}estimated cost: ${currency} ${total}`;
+  const model = props.message.model ? `${props.message.model} ` : "";
+  return t("message.estimated_cost", { model, currency, total });
 });
 
 function citationElementId(label: string) {
@@ -107,7 +113,7 @@ async function focusCitation(label: string) {
 <template>
   <article :class="['message-row', message.role === 'user' ? 'is-user' : 'is-assistant']">
     <div class="avatar">
-      {{ message.role === "user" ? "You" : "AI" }}
+      {{ message.role === "user" ? t("message.you") : t("message.ai") }}
     </div>
 
     <div class="message-body">
@@ -121,18 +127,18 @@ async function focusCitation(label: string) {
         <span v-if="message.streaming" class="stream-cursor">|</span>
       </div>
 
-      <p v-if="message.failed" class="failed-note">Request failed. Please retry.</p>
+      <p v-if="message.failed" class="failed-note">{{ t("message.request_failed_retry") }}</p>
       <p v-if="usageSummary || costSummary" class="usage-note">
         <span v-if="usageSummary">{{ usageSummary }}</span>
-        <span v-if="usageSummary && costSummary"> · </span>
+        <span v-if="usageSummary && costSummary">{{ t("message.separator") }}</span>
         <span v-if="costSummary">{{ costSummary }}</span>
       </p>
 
       <details v-if="message.sources.length" ref="sourceDetailsRef" class="source-details">
-        <summary>Sources ({{ message.sources.length }})</summary>
+        <summary>{{ t("message.sources_count", { count: message.sources.length }) }}</summary>
 
         <div v-if="citationItems.length" class="citation-index">
-          <h4>Evidence Tags</h4>
+          <h4>{{ t("message.evidence_tags") }}</h4>
           <ul>
             <li
               v-for="citation in citationItems"
@@ -144,9 +150,9 @@ async function focusCitation(label: string) {
                 [{{ citation.label }}]
               </button>
               <span class="citation-source">{{ citation.source }}</span>
-              <span v-if="citation.page !== null && citation.page !== undefined">p{{ citation.page }}</span>
-              <span v-if="citation.score !== null && citation.score !== undefined">score {{ citation.score }}</span>
-              <span v-if="citation.chunk_indices.length">chunks {{ citation.chunk_indices.join(", ") }}</span>
+              <span v-if="citation.page !== null && citation.page !== undefined">{{ t("message.page_prefix") }}{{ citation.page }}</span>
+              <span v-if="citation.score !== null && citation.score !== undefined">{{ t("message.score_prefix") }} {{ citation.score }}</span>
+              <span v-if="citation.chunk_indices.length">{{ t("message.chunks_prefix") }} {{ citation.chunk_indices.join(", ") }}</span>
             </li>
           </ul>
         </div>
@@ -155,9 +161,9 @@ async function focusCitation(label: string) {
           <li v-for="(source, index) in message.sources" :key="`${message.id}-${index}`">
             <div class="source-head">
               <strong>[{{ index + 1 }}] {{ source.source }}</strong>
-              <span>chunk {{ source.chunk_index }}</span>
-              <span v-if="source.page !== null && source.page !== undefined">p{{ source.page }}</span>
-              <span v-if="source.score !== null && source.score !== undefined">score {{ source.score }}</span>
+              <span>{{ t("message.chunk") }} {{ source.chunk_index }}</span>
+              <span v-if="source.page !== null && source.page !== undefined">{{ t("message.page_prefix") }}{{ source.page }}</span>
+              <span v-if="source.score !== null && source.score !== undefined">{{ t("message.score_prefix") }} {{ source.score }}</span>
             </div>
             <p>{{ source.preview }}</p>
           </li>
@@ -172,7 +178,7 @@ async function focusCitation(label: string) {
     top="3vh"
     append-to-body
     class="citation-dialog"
-    :title="viewerSourcePath || 'Citation Viewer'"
+    :title="viewerSourcePath || t('message.citation_viewer_title')"
     @opened="onViewerDialogOpened"
   >
     <section class="viewer-host">

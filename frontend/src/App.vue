@@ -6,17 +6,19 @@ import UnifiedFileViewer from "./components/viewer/UnifiedFileViewer.vue";
 import DocumentsWorkspace from "./components/workspaces/DocumentsWorkspace.vue";
 import IndexWorkspace from "./components/workspaces/IndexWorkspace.vue";
 import SearchWorkspace from "./components/workspaces/SearchWorkspace.vue";
+import { useI18n } from "./composables/useI18n";
 import { useChatWorkspace } from "./composables/useChatWorkspace";
 import { useDashboard } from "./composables/useDashboard";
 import { useSearchWorkspace } from "./composables/useSearchWorkspace";
 import type { NavTab, WorkspaceTab } from "./types/chat";
 
-const navTabs: NavTab[] = [
-  { id: "chat", label: "Chat", subtitle: "streaming Q&A" },
-  { id: "documents", label: "Documents", subtitle: "upload and inspect" },
-  { id: "index", label: "Index", subtitle: "rebuild and health" },
-  { id: "search", label: "Search", subtitle: "retrieval playground" },
-];
+const { t } = useI18n();
+const navTabs = computed<NavTab[]>(() => [
+  { id: "chat", label: t("nav.chat.label"), subtitle: t("nav.chat.subtitle") },
+  { id: "documents", label: t("nav.documents.label"), subtitle: t("nav.documents.subtitle") },
+  { id: "index", label: t("nav.index.label"), subtitle: t("nav.index.subtitle") },
+  { id: "search", label: t("nav.search.label"), subtitle: t("nav.search.subtitle") },
+]);
 
 const activeTab = ref<WorkspaceTab>("chat");
 const topK = ref(4);
@@ -115,12 +117,12 @@ onMounted(async () => {
 
       <ChatWorkspace
         v-if="activeTab === 'chat'"
-        :title="chatWorkspace.activeSession.value?.title ?? 'Chat'"
+        :title="chatWorkspace.activeSession.value?.title ?? t('app.chat_default_title')"
         :messages="chatWorkspace.messages.value"
         :loading="chatWorkspace.loading.value"
         :composer="chatWorkspace.composer.value"
         :top-k="topK"
-        :starter-prompts="chatWorkspace.starterPrompts"
+        :starter-prompts="chatWorkspace.starterPrompts.value"
         :available-models="chatWorkspace.availableModels.value"
         :model-options="chatWorkspace.modelOptions.value"
         :selected-model="chatWorkspace.selectedModel.value"
@@ -182,7 +184,7 @@ onMounted(async () => {
         width="92%"
         top="3vh"
         append-to-body
-        :title="documentViewerPath || 'Document Viewer'"
+        :title="documentViewerPath || t('app.document_viewer_title')"
         @opened="onDocumentViewerOpened"
       >
         <section class="viewer-host">

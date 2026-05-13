@@ -1,7 +1,8 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { renderAsync } from "docx-preview";
 import { buildFileUrl } from "../../api";
+import { useI18n } from "../../composables/useI18n";
 
 const props = defineProps<{
   sourcePath: string;
@@ -24,6 +25,7 @@ const pageCount = ref(1);
 const currentPage = ref(1);
 const pageElements = ref<HTMLElement[]>([]);
 let scrollTicking = false;
+const { t } = useI18n();
 
 const fileUrl = computed(() => buildFileUrl(props.sourcePath));
 const canPrevPage = computed(() => currentPage.value > 1);
@@ -363,7 +365,7 @@ async function renderDocxDocument() {
     updateCurrentPageFromScroll();
     highlightSnippetInDocx(container, props.snippet ?? "");
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to render DOCX preview";
+    const message = error instanceof Error ? error.message : t("viewer.docx_preview_failed");
     errorMessage.value = message;
     if (containerRef.value) {
       containerRef.value.innerHTML = "";
@@ -458,9 +460,9 @@ defineExpose({
   <section class="docx-viewer">
     <header class="docx-toolbar">
       <div class="toolbar-left">
-        <button type="button" class="tool-btn" :disabled="!canPrevPage" @click="goPrevPage">‹</button>
+        <button type="button" class="tool-btn" :disabled="!canPrevPage" @click="goPrevPage">-1</button>
         <span class="tool-meta">{{ currentPage }} / {{ pageCount }}</span>
-        <button type="button" class="tool-btn" :disabled="!canNextPage" @click="goNextPage">›</button>
+        <button type="button" class="tool-btn" :disabled="!canNextPage" @click="goNextPage">+1</button>
       </div>
 
       <div class="toolbar-middle">
@@ -471,7 +473,7 @@ defineExpose({
       </div>
 
       <div class="toolbar-right">
-        <a :href="fileUrl" target="_blank" rel="noreferrer" class="download-link">下载</a>
+        <a :href="fileUrl" target="_blank" rel="noreferrer" class="download-link">{{ t("viewer.download") }}</a>
       </div>
     </header>
 
@@ -650,3 +652,4 @@ defineExpose({
   }
 }
 </style>
+
