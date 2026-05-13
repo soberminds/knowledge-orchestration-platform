@@ -123,6 +123,24 @@ export interface FilePageTextResponse {
   table_truncated?: boolean;
 }
 
+export interface FileEditableTextResponse {
+  path: string;
+  extension: string;
+  content: string;
+  encoding: string;
+  size_bytes: number;
+  editable: boolean;
+}
+
+export interface FileEditableTextSaveResponse {
+  path: string;
+  saved: boolean;
+  extension: string;
+  encoding: string;
+  size_bytes: number;
+  modified_at: string;
+}
+
 interface ChatStreamDeltaEvent {
   type: "delta";
   delta: string;
@@ -364,4 +382,15 @@ export async function getFilePageText(path: string, page?: number): Promise<File
     params.set("page", String(page));
   }
   return requestJson<FilePageTextResponse>(`/api/file/page-text?${params.toString()}`);
+}
+
+export async function getFileEditableText(path: string): Promise<FileEditableTextResponse> {
+  return requestJson<FileEditableTextResponse>(`/api/file/edit-text?path=${encodeURIComponent(path)}`);
+}
+
+export async function saveFileEditableText(path: string, content: string): Promise<FileEditableTextSaveResponse> {
+  return requestJson<FileEditableTextSaveResponse>("/api/file/edit-text", {
+    method: "PUT",
+    body: JSON.stringify({ path, content }),
+  });
 }

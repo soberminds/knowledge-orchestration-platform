@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -25,6 +27,9 @@ from app.schemas import (
     ChatOptionsResponse,
     ChatResponse,
     DocumentInfo,
+    FileEditTextResponse,
+    FileEditTextSaveRequest,
+    FileEditTextSaveResponse,
     HealthResponse,
     IngestResponse,
     SearchRequest,
@@ -32,13 +37,16 @@ from app.schemas import (
     SourceHit,
     TokenUsage,
 )
-from app.services.files import read_file_page_text
+from app.services.files import TEXT_FILE_EXTENSIONS, read_file_page_text
 from app.services.knowledge_base import KnowledgeBaseService, ModelUnavailableError, SearchHit
 from app.services.preview_pdf import get_preview_pdf_path
 
 
 router = APIRouter(prefix="/api", tags=["rag"])
 logger = logging.getLogger(__name__)
+TEXT_EDIT_MAX_BYTES = 2 * 1024 * 1024
+TEXT_EDIT_ENCODINGS: tuple[str, ...] = ("utf-8", "utf-8-sig", "gb18030")
+EDITABLE_TEXT_EXTENSIONS = set(TEXT_FILE_EXTENSIONS)
 
 
 def _to_source_hit(hit: SearchHit) -> SourceHit:
@@ -109,6 +117,56 @@ def _resolve_file_path(path_value: str) -> Path:
     return candidate
 
 
+def _relative_path_from_root(file_path: Path) -> str:
+    return str(file_path.relative_to(settings.root_dir)).replace("\\", "/")
+
+
+def _validate_text_edit_file(file_path: Path) -> tuple[str, int]:
+    extension = file_path.suffix.lower()
+    if extension not in EDITABLE_TEXT_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported editable extension: {extension}.",
+        )
+
+    size_bytes = int(file_path.stat().st_size)
+    if size_bytes > TEXT_EDIT_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large to edit inline ({size_bytes} bytes > {TEXT_EDIT_MAX_BYTES} bytes).",
+        )
+    return extension, size_bytes
+
+
+def _decode_text_bytes(raw: bytes) -> tuple[str, str]:
+    for encoding in TEXT_EDIT_ENCODINGS:
+        try:
+            return raw.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    raise HTTPException(
+        status_code=415,
+        detail="Cannot decode this file as text. Please use UTF-8 or GB18030 encoded text files.",
+    )
+
+
+def _atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8") -> int:
+    encoded = content.encode(encoding)
+    if len(encoded) > TEXT_EDIT_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Saved content too large ({len(encoded)} bytes > {TEXT_EDIT_MAX_BYTES} bytes).",
+        )
+
+    temp_path = file_path.with_name(f"{file_path.name}.tmp")
+    with temp_path.open("wb") as temp_file:
+        temp_file.write(encoded)
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+    temp_path.replace(file_path)
+    return len(encoded)
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> HealthResponse:
     indexed_chunks = 0
@@ -172,6 +230,38 @@ async def open_file(path: str) -> FileResponse:
     return FileResponse(
         path=str(file_path),
         media_type=media_type,
+    )
+
+
+@router.get("/file/edit-text", response_model=FileEditTextResponse)
+async def get_file_edit_text(path: str) -> FileEditTextResponse:
+    file_path = _resolve_file_path(path)
+    extension, size_bytes = _validate_text_edit_file(file_path)
+    raw = file_path.read_bytes()
+    content, encoding = _decode_text_bytes(raw)
+    return FileEditTextResponse(
+        path=_relative_path_from_root(file_path),
+        extension=extension,
+        content=content,
+        encoding=encoding,
+        size_bytes=size_bytes,
+        editable=True,
+    )
+
+
+@router.put("/file/edit-text", response_model=FileEditTextSaveResponse)
+async def save_file_edit_text(payload: FileEditTextSaveRequest) -> FileEditTextSaveResponse:
+    file_path = _resolve_file_path(payload.path)
+    extension, _ = _validate_text_edit_file(file_path)
+    size_bytes = _atomic_write_text(file_path, payload.content, encoding="utf-8")
+    modified_at = datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(timespec="seconds")
+    return FileEditTextSaveResponse(
+        path=_relative_path_from_root(file_path),
+        saved=True,
+        extension=extension,
+        encoding="utf-8",
+        size_bytes=size_bytes,
+        modified_at=modified_at,
     )
 
 

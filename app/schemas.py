@@ -142,6 +142,35 @@ class DocumentInfo(BaseModel):
     extension: str
 
 
+class FileEditTextResponse(BaseModel):
+    """Text edit payload for editable source files."""
+
+    path: str
+    extension: str
+    content: str
+    encoding: str
+    size_bytes: int
+    editable: bool = True
+
+
+class FileEditTextSaveRequest(BaseModel):
+    """Save payload for text-edit operation."""
+
+    path: str = Field(min_length=1)
+    content: str = ""
+
+
+class FileEditTextSaveResponse(BaseModel):
+    """Result payload after saving editable text file."""
+
+    path: str
+    saved: bool = True
+    extension: str
+    encoding: str
+    size_bytes: int
+    modified_at: str
+
+
 class HealthResponse(BaseModel):
     """Response payload for /api/health."""
 

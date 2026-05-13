@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { DocumentInfo } from "../../api";
+import { getFileEditableText, saveFileEditableText, type DocumentInfo } from "../../api";
 import { useI18n } from "../../composables/useI18n";
 
 const props = defineProps<{
@@ -15,12 +15,59 @@ const emit = defineEmits<{
   (event: "upload"): void;
   (event: "open-document", path: string): void;
   (event: "delete-document", path: string): void;
+  (event: "document-saved", path: string): void;
 }>();
 
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const { locale, t } = useI18n();
+const editDialogVisible = ref(false);
+const editLoading = ref(false);
+const editSaving = ref(false);
+const editError = ref("");
+const editPath = ref("");
+const editEncoding = ref("utf-8");
+const editContent = ref("");
+const editOriginalContent = ref("");
+
+const EDITABLE_TEXT_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".markdown",
+  ".csv",
+  ".tsv",
+  ".json",
+  ".jsonl",
+  ".yaml",
+  ".yml",
+  ".xml",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".toml",
+  ".log",
+  ".rst",
+  ".rtf",
+  ".sql",
+  ".py",
+  ".js",
+  ".ts",
+  ".jsx",
+  ".tsx",
+  ".java",
+  ".c",
+  ".cpp",
+  ".h",
+  ".hpp",
+  ".go",
+  ".rs",
+  ".sh",
+  ".bat",
+  ".ps1",
+]);
 
 const selectedFileNames = computed(() => props.selectedFiles.map((file) => file.name));
+const canSaveEdit = computed(() => !editLoading.value && !editSaving.value);
+const editDirty = computed(() => editContent.value !== editOriginalContent.value);
 
 watch(
   () => props.selectedFiles.length,
@@ -61,6 +108,65 @@ function openDocument(path: string) {
 
 function deleteDocument(path: string) {
   emit("delete-document", path);
+}
+
+function isEditableDocument(doc: DocumentInfo): boolean {
+  return EDITABLE_TEXT_EXTENSIONS.has((doc.extension || "").toLowerCase());
+}
+
+async function openEditDialog(doc: DocumentInfo) {
+  if (!isEditableDocument(doc)) {
+    return;
+  }
+
+  editDialogVisible.value = true;
+  editLoading.value = true;
+  editSaving.value = false;
+  editError.value = "";
+  editPath.value = doc.path;
+  editContent.value = "";
+  editOriginalContent.value = "";
+  editEncoding.value = "utf-8";
+
+  try {
+    const payload = await getFileEditableText(doc.path);
+    editPath.value = payload.path;
+    editEncoding.value = payload.encoding || "utf-8";
+    editContent.value = payload.content || "";
+    editOriginalContent.value = payload.content || "";
+  } catch (error) {
+    editError.value = error instanceof Error ? error.message : t("documents.edit_load_failed");
+  } finally {
+    editLoading.value = false;
+  }
+}
+
+function closeEditDialog() {
+  editDialogVisible.value = false;
+  editLoading.value = false;
+  editSaving.value = false;
+  editError.value = "";
+  editPath.value = "";
+  editContent.value = "";
+  editOriginalContent.value = "";
+  editEncoding.value = "utf-8";
+}
+
+async function saveEditedDocument() {
+  if (!editPath.value) {
+    return;
+  }
+  editSaving.value = true;
+  editError.value = "";
+  try {
+    await saveFileEditableText(editPath.value, editContent.value);
+    editOriginalContent.value = editContent.value;
+    emit("document-saved", editPath.value);
+  } catch (error) {
+    editError.value = error instanceof Error ? error.message : t("documents.edit_save_failed");
+  } finally {
+    editSaving.value = false;
+  }
 }
 </script>
 
@@ -121,6 +227,15 @@ function deleteDocument(path: string) {
 
           <div class="item-actions">
             <el-button size="small" text type="primary" @click="openDocument(doc.path)">{{ t("documents.open") }}</el-button>
+            <el-button
+              size="small"
+              text
+              type="success"
+              :disabled="!isEditableDocument(doc)"
+              @click="openEditDialog(doc)"
+            >
+              {{ t("documents.edit") }}
+            </el-button>
             <el-popconfirm
               :title="t('documents.delete_confirm_title')"
               :confirm-button-text="t('documents.delete_confirm_button')"
@@ -148,6 +263,58 @@ function deleteDocument(path: string) {
         :description="t('documents.empty')"
       />
     </section>
+
+    <el-dialog
+      v-model="editDialogVisible"
+      width="80%"
+      top="5vh"
+      append-to-body
+      :title="t('documents.edit_dialog_title')"
+      @closed="closeEditDialog"
+    >
+      <section class="edit-dialog-body">
+        <p class="edit-tip">{{ t("documents.edit_tip") }}</p>
+        <div class="edit-meta">
+          <span class="edit-path">{{ editPath }}</span>
+          <el-tag size="small" type="info">{{ t("documents.edit_encoding", { encoding: editEncoding }) }}</el-tag>
+          <el-tag size="small" :type="editDirty ? 'warning' : 'success'">
+            {{ editDirty ? t("documents.edit_unsaved") : t("documents.edit_saved") }}
+          </el-tag>
+        </div>
+
+        <el-alert
+          v-if="editError"
+          :title="editError"
+          type="error"
+          show-icon
+          :closable="false"
+        />
+
+        <el-skeleton v-if="editLoading" :rows="8" animated />
+
+        <el-input
+          v-else
+          v-model="editContent"
+          type="textarea"
+          :autosize="{ minRows: 20, maxRows: 28 }"
+          class="edit-textarea"
+        />
+      </section>
+
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="editDialogVisible = false">{{ t("documents.cancel") }}</el-button>
+          <el-button
+            type="primary"
+            :loading="editSaving"
+            :disabled="!canSaveEdit || !editDirty"
+            @click="saveEditedDocument"
+          >
+            {{ t("documents.save") }}
+          </el-button>
+        </span>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -273,6 +440,35 @@ function deleteDocument(path: string) {
   font-size: 0.83rem;
 }
 
+.edit-dialog-body {
+  display: grid;
+  gap: 10px;
+}
+
+.edit-tip {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #475569;
+}
+
+.edit-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.edit-path {
+  font-size: 0.86rem;
+  color: #334155;
+  word-break: break-all;
+}
+
+.edit-textarea :deep(.el-textarea__inner) {
+  font-family: "JetBrains Mono", "Consolas", "Courier New", monospace;
+  line-height: 1.45;
+}
+
 @media (max-width: 720px) {
   .workspace-head {
     padding-left: 12px;
@@ -298,6 +494,11 @@ function deleteDocument(path: string) {
   .item-actions {
     width: 100%;
     justify-content: flex-end;
+  }
+
+  .edit-meta {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

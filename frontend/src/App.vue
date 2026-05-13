@@ -81,6 +81,14 @@ async function deleteDocumentFromWorkspace(path: string) {
   }
 }
 
+async function onDocumentSaved() {
+  try {
+    await dashboard.refreshDashboard();
+  } catch {
+    // Error is already tracked by useDashboard state.
+  }
+}
+
 function onDocumentViewerOpened() {
   documentViewerRef.value?.refreshViewer?.();
 }
@@ -155,6 +163,7 @@ onMounted(async () => {
         @upload="dashboard.uploadAndBuild"
         @open-document="openDocumentFromWorkspace"
         @delete-document="deleteDocumentFromWorkspace"
+        @document-saved="onDocumentSaved"
       />
 
       <IndexWorkspace
