@@ -117,6 +117,7 @@ class Settings:
     preview_convert_timeout_sec: int = _env_int("PREVIEW_CONVERT_TIMEOUT_SEC", 120)
     soffice_bin: str = os.getenv("SOFFICE_BIN", "").strip()
     public_backend_url: str = os.getenv("PUBLIC_BACKEND_URL", "http://127.0.0.1:8000").strip().rstrip("/")
+    public_backend_internal_url: str = os.getenv("PUBLIC_BACKEND_INTERNAL_URL", "").strip().rstrip("/")
     onlyoffice_document_server_url: str = os.getenv("ONLYOFFICE_DOCUMENT_SERVER_URL", "").strip().rstrip("/")
     onlyoffice_document_server_internal_url: str = os.getenv("ONLYOFFICE_DOCUMENT_SERVER_INTERNAL_URL", "").strip().rstrip("/")
     onlyoffice_jwt_enabled: bool = _env_bool("ONLYOFFICE_JWT_ENABLED", True)

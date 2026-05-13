@@ -97,6 +97,10 @@ function boolLabel(value: boolean | null | undefined) {
         <span>{{ t("documents.office_health_backend_url") }}:</span>
         <code>{{ health.public_backend_url }}</code>
       </p>
+      <p v-if="health.public_backend_internal_url">
+        <span>{{ t("documents.office_health_backend_internal_url") }}:</span>
+        <code>{{ health.public_backend_internal_url }}</code>
+      </p>
       <p>
         <span>{{ t("documents.office_health_ds_version") }}:</span>
         <code>{{ health.document_server_version || "-" }}</code>

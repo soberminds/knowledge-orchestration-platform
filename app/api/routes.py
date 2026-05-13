@@ -10,11 +10,13 @@ import json
 import logging
 import mimetypes
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+from urllib.parse import urlparse, urlunparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -35,6 +37,7 @@ from app.schemas import (
     HealthResponse,
     IngestResponse,
     OfficeEditorConfigResponse,
+    OfficeCallbackStatusResponse,
     OfficeHealthResponse,
     SearchRequest,
     SearchResponse,
@@ -67,6 +70,8 @@ TEXT_EDIT_MAX_BYTES = 2 * 1024 * 1024
 TEXT_EDIT_ENCODINGS: tuple[str, ...] = ("utf-8", "utf-8-sig", "gb18030")
 EDITABLE_TEXT_EXTENSIONS = set(TEXT_FILE_EXTENSIONS)
 OFFICE_CALLBACK_SAVE_STATUSES = {2, 6}
+_office_callback_status_lock = threading.Lock()
+_office_callback_status_by_path: dict[str, dict[str, Any]] = {}
 
 
 def _to_source_hit(hit: SearchHit) -> SourceHit:
@@ -202,6 +207,11 @@ def _public_backend_url() -> str:
     return value or "http://127.0.0.1:8000"
 
 
+def _public_backend_internal_url() -> str:
+    value = (settings.public_backend_internal_url or "").strip().rstrip("/")
+    return value
+
+
 def _onlyoffice_callback_secret() -> str:
     return callback_signing_secret(settings.root_dir, settings.onlyoffice_jwt_secret)
 
@@ -211,6 +221,36 @@ def _effective_onlyoffice_index_update_mode() -> str:
     if mode in {"incremental", "full"}:
         return mode
     return "incremental"
+
+
+def _set_office_callback_status(
+    relative_path: str,
+    *,
+    success: bool,
+    message: str = "",
+    callback_status: int | None = None,
+) -> None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    status = "success" if success else "failed"
+    payload: dict[str, Any] = {
+        "path": relative_path,
+        "has_event": True,
+        "status": status,
+        "success": success,
+        "message": message.strip(),
+        "callback_status": callback_status,
+        "updated_at": now_iso,
+    }
+    with _office_callback_status_lock:
+        _office_callback_status_by_path[relative_path] = payload
+
+
+def _get_office_callback_status(relative_path: str) -> OfficeCallbackStatusResponse:
+    with _office_callback_status_lock:
+        payload = _office_callback_status_by_path.get(relative_path)
+    if not payload:
+        return OfficeCallbackStatusResponse(path=relative_path)
+    return OfficeCallbackStatusResponse(**payload)
 
 
 def _http_probe(url: str, *, method: str = "GET", timeout_sec: int = 6, headers: dict[str, str] | None = None, body: bytes | None = None) -> tuple[bool, int | None, str]:
@@ -234,12 +274,44 @@ def _http_probe(url: str, *, method: str = "GET", timeout_sec: int = 6, headers:
         return False, None, str(exc)
 
 
+def _resolve_callback_download_url(download_url: str) -> str:
+    value = (download_url or "").strip()
+    if not value:
+        return value
+
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value
+
+    # Preferred override: explicit backend-internal URL for callback downloads.
+    internal_base = _public_backend_internal_url()
+    if internal_base:
+        internal_parsed = urlparse(internal_base)
+        public_parsed = urlparse(_public_backend_url())
+        if parsed.netloc == public_parsed.netloc:
+            rewritten = parsed._replace(
+                scheme=internal_parsed.scheme or parsed.scheme,
+                netloc=internal_parsed.netloc or parsed.netloc,
+            )
+            return urlunparse(rewritten)
+
+    # Host-mode fallback: backend on host cannot always fetch host.docker.internal.
+    host = (parsed.hostname or "").strip().lower()
+    if host in {"host.docker.internal", "gateway.docker.internal"}:
+        port = f":{parsed.port}" if parsed.port else ""
+        rewritten = parsed._replace(netloc=f"127.0.0.1{port}")
+        return urlunparse(rewritten)
+
+    return value
+
+
 def _probe_onlyoffice_health() -> OfficeHealthResponse:
     now_iso = datetime.now().isoformat(timespec="seconds")
     ds_public_url = (settings.onlyoffice_document_server_url or "").strip().rstrip("/")
     ds_internal_url = (settings.onlyoffice_document_server_internal_url or "").strip().rstrip("/")
     ds_probe_url = ds_internal_url or ds_public_url
     backend_url = _public_backend_url()
+    backend_internal_url = _public_backend_internal_url()
     jwt_enabled = bool(settings.onlyoffice_jwt_enabled)
     jwt_secret_set = bool((settings.onlyoffice_jwt_secret or "").strip())
     callback_signing_ready = bool(_onlyoffice_callback_secret())
@@ -326,7 +398,16 @@ def _probe_onlyoffice_health() -> OfficeHealthResponse:
             notes.append("CommandService endpoint is unreachable from backend.")
 
     sample_token = build_path_token("data/uploads/healthcheck.docx", _onlyoffice_callback_secret(), settings.onlyoffice_callback_ttl_sec)
-    callback_url = build_callback_url(backend_url, sample_token)
+    callback_base = backend_internal_url
+    if not callback_base:
+        parsed_backend = urlparse(backend_url)
+        if (parsed_backend.hostname or "").strip().lower() in {"host.docker.internal", "gateway.docker.internal"}:
+            host = "127.0.0.1"
+            port = f":{parsed_backend.port}" if parsed_backend.port else ""
+            callback_base = f"{parsed_backend.scheme}://{host}{port}"
+        else:
+            callback_base = backend_url
+    callback_url = build_callback_url(callback_base, sample_token)
     cb_reachable, cb_status, _ = _http_probe(callback_url, method="GET", timeout_sec=4)
     if cb_reachable and cb_status is not None:
         callback_reachable = cb_status in {200, 400, 401, 403, 404, 405, 422}
@@ -340,6 +421,7 @@ def _probe_onlyoffice_health() -> OfficeHealthResponse:
         document_server_url=ds_public_url or None,
         document_server_internal_url=ds_internal_url or None,
         public_backend_url=backend_url,
+        public_backend_internal_url=backend_internal_url or None,
         index_update_mode=_effective_onlyoffice_index_update_mode(),
         auto_rebuild_index_on_save=settings.onlyoffice_auto_rebuild_index_on_save,
         jwt_enabled=jwt_enabled,
@@ -535,6 +617,13 @@ async def office_health() -> OfficeHealthResponse:
     return await run_in_threadpool(_probe_onlyoffice_health)
 
 
+@router.get("/office/callback-status", response_model=OfficeCallbackStatusResponse)
+async def office_callback_status(path: str) -> OfficeCallbackStatusResponse:
+    file_path = _resolve_file_path(path)
+    relative_path = _relative_path_from_root(file_path)
+    return _get_office_callback_status(relative_path)
+
+
 @router.post("/office/callback")
 async def office_editor_callback(
     request: Request,
@@ -577,10 +666,17 @@ async def office_editor_callback(
     if status in OFFICE_CALLBACK_SAVE_STATUSES:
         download_url = str(payload.get("url") or "").strip()
         if not download_url:
+            _set_office_callback_status(
+                relative_path,
+                success=False,
+                message="Callback missing download url.",
+                callback_status=status,
+            )
             return JSONResponse({"error": 1, "message": "Callback missing download url."}, status_code=200)
+        resolved_download_url = _resolve_callback_download_url(download_url)
 
         try:
-            content = await run_in_threadpool(download_binary, download_url, settings.preview_convert_timeout_sec)
+            content = await run_in_threadpool(download_binary, resolved_download_url, settings.preview_convert_timeout_sec)
             _atomic_write_bytes(file_path, content)
             if settings.onlyoffice_auto_rebuild_index_on_save:
                 mode = _effective_onlyoffice_index_update_mode()
@@ -588,10 +684,29 @@ async def office_editor_callback(
                     background_tasks.add_task(service.rebuild_index)
                 else:
                     background_tasks.add_task(service.reindex_source_file, file_path)
+            _set_office_callback_status(
+                relative_path,
+                success=True,
+                message="Saved and queued for index refresh.",
+                callback_status=status,
+            )
             return JSONResponse({"error": 0}, status_code=200)
         except Exception as exc:
-            logger.exception("ONLYOFFICE callback save failed for %s: %s", relative_path, exc)
-            return JSONResponse({"error": 1, "message": f"Save failed: {exc}"}, status_code=200)
+            message = f"Save failed: {exc}"
+            _set_office_callback_status(
+                relative_path,
+                success=False,
+                message=message,
+                callback_status=status,
+            )
+            logger.exception(
+                "ONLYOFFICE callback save failed for %s: raw_url=%s resolved_url=%s err=%s",
+                relative_path,
+                download_url,
+                resolved_download_url,
+                exc,
+            )
+            return JSONResponse({"error": 1, "message": message}, status_code=200)
 
     return JSONResponse({"error": 0}, status_code=200)
 

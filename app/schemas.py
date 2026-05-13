@@ -190,6 +190,7 @@ class OfficeHealthResponse(BaseModel):
     document_server_url: str | None = None
     document_server_internal_url: str | None = None
     public_backend_url: str
+    public_backend_internal_url: str | None = None
     index_update_mode: str
     auto_rebuild_index_on_save: bool
     jwt_enabled: bool
@@ -204,6 +205,18 @@ class OfficeHealthResponse(BaseModel):
     callback_reachable: bool
     callback_http_status: int | None = None
     notes: list[str] = Field(default_factory=list)
+
+
+class OfficeCallbackStatusResponse(BaseModel):
+    """Latest ONLYOFFICE callback-save status for one file."""
+
+    path: str
+    has_event: bool = False
+    status: Literal["unknown", "success", "failed"] = "unknown"
+    success: bool | None = None
+    message: str = ""
+    callback_status: int | None = None
+    updated_at: str | None = None
 
 
 class HealthResponse(BaseModel):

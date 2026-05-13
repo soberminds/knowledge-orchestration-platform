@@ -156,6 +156,7 @@ export interface OfficeHealthResponse {
   document_server_url?: string | null;
   document_server_internal_url?: string | null;
   public_backend_url: string;
+  public_backend_internal_url?: string | null;
   index_update_mode: string;
   auto_rebuild_index_on_save: boolean;
   jwt_enabled: boolean;
@@ -170,6 +171,16 @@ export interface OfficeHealthResponse {
   callback_reachable: boolean;
   callback_http_status?: number | null;
   notes: string[];
+}
+
+export interface OfficeCallbackStatusResponse {
+  path: string;
+  has_event: boolean;
+  status: "unknown" | "success" | "failed";
+  success?: boolean | null;
+  message: string;
+  callback_status?: number | null;
+  updated_at?: string | null;
 }
 
 interface ChatStreamDeltaEvent {
@@ -443,4 +454,8 @@ export async function getOfficeEditorConfig(
 
 export async function getOfficeHealth(): Promise<OfficeHealthResponse> {
   return requestJson<OfficeHealthResponse>("/api/office/health");
+}
+
+export async function getOfficeCallbackStatus(path: string): Promise<OfficeCallbackStatusResponse> {
+  return requestJson<OfficeCallbackStatusResponse>(`/api/office/callback-status?path=${encodeURIComponent(path)}`);
 }

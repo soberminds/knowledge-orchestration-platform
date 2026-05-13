@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { getOfficeEditorConfig } from "../../api";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { getOfficeCallbackStatus, getOfficeEditorConfig, type OfficeCallbackStatusResponse } from "../../api";
 import { useI18n } from "../../composables/useI18n";
 
 type OfficeEditorMode = "edit" | "view";
@@ -22,6 +22,47 @@ const loadError = ref("");
 const editorHostRef = ref<HTMLElement | null>(null);
 const activeScriptSrc = ref("");
 const editorInstance = ref<any>(null);
+const callbackStatus = ref<OfficeCallbackStatusResponse | null>(null);
+const callbackStatusTimer = ref<number | null>(null);
+
+const callbackStatusTagType = computed(() => {
+  const payload = callbackStatus.value;
+  if (!payload || !payload.has_event || payload.status === "unknown") {
+    return "info";
+  }
+  return payload.status === "success" ? "success" : "danger";
+});
+
+const callbackStatusLabel = computed(() => {
+  const payload = callbackStatus.value;
+  if (!payload || !payload.has_event || payload.status === "unknown") {
+    return t("documents.office_callback_status_unknown");
+  }
+  if (payload.status === "success") {
+    return t("documents.office_callback_status_success");
+  }
+  return t("documents.office_callback_status_failed");
+});
+
+const callbackStatusTimeText = computed(() => {
+  const payload = callbackStatus.value;
+  if (!payload?.has_event || !payload.updated_at) {
+    return t("documents.office_callback_not_saved");
+  }
+  const parsed = new Date(payload.updated_at);
+  if (Number.isNaN(parsed.getTime())) {
+    return payload.updated_at;
+  }
+  return parsed.toLocaleString();
+});
+
+const callbackStatusMessage = computed(() => {
+  const payload = callbackStatus.value;
+  if (!payload?.has_event || !payload.message) {
+    return "";
+  }
+  return payload.message;
+});
 
 function setError(message: string) {
   loadError.value = message;
@@ -30,6 +71,44 @@ function setError(message: string) {
 
 function clearError() {
   loadError.value = "";
+}
+
+function clearCallbackStatus() {
+  callbackStatus.value = null;
+}
+
+function stopCallbackStatusPolling() {
+  if (callbackStatusTimer.value !== null) {
+    window.clearInterval(callbackStatusTimer.value);
+    callbackStatusTimer.value = null;
+  }
+}
+
+async function refreshCallbackStatus() {
+  const sourcePath = props.sourcePath?.trim();
+  if (!sourcePath) {
+    clearCallbackStatus();
+    return;
+  }
+
+  try {
+    callbackStatus.value = await getOfficeCallbackStatus(sourcePath);
+  } catch {
+    // Callback status is a best-effort UX hint.
+  }
+}
+
+function startCallbackStatusPolling() {
+  stopCallbackStatusPolling();
+  if (!props.visible || !props.sourcePath?.trim()) {
+    clearCallbackStatus();
+    return;
+  }
+
+  void refreshCallbackStatus();
+  callbackStatusTimer.value = window.setInterval(() => {
+    void refreshCallbackStatus();
+  }, 2500);
 }
 
 function destroyEditor() {
@@ -137,16 +216,20 @@ watch(
   () => [props.visible, props.sourcePath, props.mode, locale.value] as const,
   async () => {
     if (!props.visible) {
+      stopCallbackStatusPolling();
+      clearCallbackStatus();
       destroyEditor();
       clearError();
       return;
     }
+    startCallbackStatusPolling();
     await openOnlyOfficeEditor();
   },
   { immediate: true },
 );
 
 onBeforeUnmount(() => {
+  stopCallbackStatusPolling();
   destroyEditor();
 });
 </script>
@@ -161,6 +244,14 @@ onBeforeUnmount(() => {
       :closable="false"
       class="onlyoffice-alert"
     />
+    <section class="onlyoffice-callback-status">
+      <span class="onlyoffice-callback-label">{{ t("documents.office_callback_last_save") }}</span>
+      <el-tag size="small" :type="callbackStatusTagType">
+        {{ callbackStatusLabel }}
+      </el-tag>
+      <span class="onlyoffice-callback-time">{{ callbackStatusTimeText }}</span>
+      <span v-if="callbackStatusMessage" class="onlyoffice-callback-message">{{ callbackStatusMessage }}</span>
+    </section>
 
     <section v-loading="loading" class="onlyoffice-stage">
       <div ref="editorHostRef" class="onlyoffice-host" />
@@ -179,6 +270,32 @@ onBeforeUnmount(() => {
 
 .onlyoffice-alert {
   margin-bottom: 2px;
+}
+
+.onlyoffice-callback-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+}
+
+.onlyoffice-callback-label {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.onlyoffice-callback-time {
+  color: #475569;
+}
+
+.onlyoffice-callback-message {
+  color: #64748b;
 }
 
 .onlyoffice-stage {
