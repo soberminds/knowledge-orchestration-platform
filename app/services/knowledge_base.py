@@ -1300,6 +1300,28 @@ class KnowledgeBaseService:
         )
         return f"{base_rules} {mode_rules[question_mode]}{depth_rule}"
 
+    def _is_model_identity_question(self, question: str) -> bool:
+        normalized = re.sub(r"\s+", "", question.lower())
+        keywords = (
+            "你是什么模型",
+            "你是啥模型",
+            "你现在用的什么模型",
+            "当前模型",
+            "你用的是哪个模型",
+            "whatmodel",
+            "whichmodel",
+            "modelareyou",
+        )
+        return any(keyword in normalized for keyword in keywords)
+
+    def _build_model_identity_answer(self, model_name: str) -> str:
+        provider = self._resolve_provider_name(model_name)
+        return (
+            f"当前这次回答调用的模型是：{model_name}（provider: {provider}）。\n"
+            "说明：聊天文本里的自我介绍不一定能准确反映后端实际路由，"
+            "请以消息下方的“模型 + tokens + 成本/定价提示”为准。"
+        )
+
     def _should_polish_answer(self, answer: str, question_mode: QuestionMode, thinking_mode: ThinkingMode) -> bool:
         compact = re.sub(r"\s+", "", answer)
         if len(compact) < 120:
@@ -1496,6 +1518,22 @@ class KnowledgeBaseService:
     ) -> dict[str, Any]:
         model_name = self.resolve_model(model)
         self._resolve_model_client(model_name)
+        if self._is_model_identity_question(question):
+            fallback_answer = self._build_model_identity_answer(model_name)
+            usage = self._normalize_usage(
+                None,
+                prompt_fallback_text=question,
+                completion_fallback_text=fallback_answer,
+            )
+            return {
+                "answer": fallback_answer,
+                "rewritten_question": question,
+                "hits": [],
+                "citations": [],
+                "model": model_name,
+                "usage": usage,
+                "cost_estimate": self._estimate_cost(model_name, usage),
+            }
         use_native_web_search, use_external_web_search = self._resolve_web_search_plan(
             model_name=model_name,
             native_web_search=native_web_search,
@@ -1538,6 +1576,7 @@ class KnowledgeBaseService:
             stream=False,
             native_web_search=use_native_web_search,
         )
+        resolved_model_name = str(getattr(completion, "model", "") or model_name)
         answer = (completion.choices[0].message.content or "").strip()
 
         if self._should_polish_answer(answer, prepared["question_mode"], thinking_mode):
@@ -1563,7 +1602,7 @@ class KnowledgeBaseService:
             "rewritten_question": prepared["rewritten_question"],
             "hits": prepared["hits"],
             "citations": prepared["citations"],
-            "model": model_name,
+            "model": resolved_model_name,
             "usage": usage,
             "cost_estimate": cost_estimate,
         }
@@ -1581,6 +1620,25 @@ class KnowledgeBaseService:
     ) -> Iterator[dict[str, Any]]:
         model_name = self.resolve_model(model)
         self._resolve_model_client(model_name)
+        if self._is_model_identity_question(question):
+            fallback_answer = self._build_model_identity_answer(model_name)
+            usage = self._normalize_usage(
+                None,
+                prompt_fallback_text=question,
+                completion_fallback_text=fallback_answer,
+            )
+            yield {"type": "delta", "delta": fallback_answer}
+            yield {
+                "type": "done",
+                "answer": fallback_answer,
+                "rewritten_question": question,
+                "hits": [],
+                "citations": [],
+                "model": model_name,
+                "usage": usage,
+                "cost_estimate": self._estimate_cost(model_name, usage),
+            }
+            return
         use_native_web_search, use_external_web_search = self._resolve_web_search_plan(
             model_name=model_name,
             native_web_search=native_web_search,
@@ -1630,8 +1688,12 @@ class KnowledgeBaseService:
             stream=True,
             native_web_search=use_native_web_search,
         )
+        resolved_model_name = model_name
 
         for chunk in stream:
+            chunk_model = getattr(chunk, "model", None)
+            if chunk_model:
+                resolved_model_name = str(chunk_model)
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
                 usage_obj = chunk_usage
@@ -1678,7 +1740,7 @@ class KnowledgeBaseService:
             "rewritten_question": rewritten_question,
             "hits": hits,
             "citations": prepared["citations"],
-            "model": model_name,
+            "model": resolved_model_name,
             "usage": usage,
             "cost_estimate": cost_estimate,
         }

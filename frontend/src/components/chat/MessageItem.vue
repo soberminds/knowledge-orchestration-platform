@@ -56,6 +56,13 @@ const usageSummary = computed(() => {
   });
 });
 
+const modelSummary = computed(() => {
+  if (props.message.role !== "assistant" || !props.message.model) {
+    return "";
+  }
+  return t("message.model_used", { model: props.message.model });
+});
+
 const costSummary = computed(() => {
   if (
     props.message.role !== "assistant" ||
@@ -69,6 +76,20 @@ const costSummary = computed(() => {
   const total = Number(cost.total_cost || 0).toFixed(6);
   const model = props.message.model ? `${props.message.model} ` : "";
   return t("message.estimated_cost", { model, currency, total });
+});
+
+const costHintSummary = computed(() => {
+  if (
+    props.message.role !== "assistant" ||
+    !props.message.usage ||
+    props.message.costEstimate?.total_cost != null
+  ) {
+    return "";
+  }
+  if (!props.message.model) {
+    return t("message.cost_not_configured");
+  }
+  return t("message.cost_not_configured_with_model", { model: props.message.model });
 });
 
 function citationElementId(label: string) {
@@ -128,10 +149,13 @@ async function focusCitation(label: string) {
       </div>
 
       <p v-if="message.failed" class="failed-note">{{ t("message.request_failed_retry") }}</p>
-      <p v-if="usageSummary || costSummary" class="usage-note">
+      <p v-if="modelSummary || usageSummary || costSummary || costHintSummary" class="usage-note">
+        <span v-if="modelSummary">{{ modelSummary }}</span>
+        <span v-if="modelSummary && (usageSummary || costSummary || costHintSummary)">{{ t("message.separator") }}</span>
         <span v-if="usageSummary">{{ usageSummary }}</span>
-        <span v-if="usageSummary && costSummary">{{ t("message.separator") }}</span>
+        <span v-if="usageSummary && (costSummary || costHintSummary)">{{ t("message.separator") }}</span>
         <span v-if="costSummary">{{ costSummary }}</span>
+        <span v-else-if="costHintSummary">{{ costHintSummary }}</span>
       </p>
 
       <details v-if="message.sources.length" ref="sourceDetailsRef" class="source-details">
