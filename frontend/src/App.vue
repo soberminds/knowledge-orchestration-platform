@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import ChatWorkspace from "./components/chat/ChatWorkspace.vue";
 import LeftSidebar from "./components/sidebar/LeftSidebar.vue";
 import OnlyOfficeEditor from "./components/viewer/OnlyOfficeEditor.vue";
@@ -30,6 +30,8 @@ const documentViewerRef = ref<InstanceType<typeof UnifiedFileViewer> | null>(nul
 const officeEditorVisible = ref(false);
 const officeEditorPath = ref("");
 const officeEditorError = ref("");
+const officeEditorFullscreen = ref(false);
+const officeEditorRef = ref<InstanceType<typeof OnlyOfficeEditor> | null>(null);
 
 const dashboard = useDashboard();
 const chatWorkspace = useChatWorkspace(topK);
@@ -44,6 +46,10 @@ const activeErrorMessage = computed(() => {
   }
   return dashboard.errorMessage.value;
 });
+
+const officeEditorHostStyle = computed(() => ({
+  height: officeEditorFullscreen.value ? "calc(100vh - 74px)" : "82vh",
+}));
 
 function switchTab(tab: WorkspaceTab) {
   activeTab.value = tab;
@@ -75,6 +81,7 @@ function openDocumentFromWorkspace(path: string) {
 function openOfficeEditorFromWorkspace(path: string) {
   officeEditorPath.value = path;
   officeEditorError.value = "";
+  officeEditorFullscreen.value = false;
   officeEditorVisible.value = true;
 }
 
@@ -109,6 +116,7 @@ function onDocumentViewerOpened() {
 }
 
 async function onOfficeEditorClosed() {
+  officeEditorFullscreen.value = false;
   officeEditorPath.value = "";
   officeEditorError.value = "";
   try {
@@ -117,6 +125,29 @@ async function onOfficeEditorClosed() {
     // Error is already tracked by useDashboard state.
   }
 }
+
+function toggleOfficeEditorFullscreen() {
+  officeEditorFullscreen.value = !officeEditorFullscreen.value;
+}
+
+function notifyOfficeEditorResize() {
+  officeEditorRef.value?.resizeEditor?.();
+  window.setTimeout(() => {
+    window.dispatchEvent(new Event("resize"));
+    officeEditorRef.value?.resizeEditor?.();
+  }, 80);
+}
+
+watch(
+  () => officeEditorFullscreen.value,
+  async () => {
+    if (!officeEditorVisible.value) {
+      return;
+    }
+    await nextTick();
+    notifyOfficeEditorResize();
+  },
+);
 
 onMounted(async () => {
   chatWorkspace.initialize();
@@ -248,14 +279,46 @@ onMounted(async () => {
 
       <el-dialog
         v-model="officeEditorVisible"
-        width="96%"
-        top="2vh"
+        :fullscreen="officeEditorFullscreen"
+        :width="officeEditorFullscreen ? '100%' : '96%'"
+        :top="officeEditorFullscreen ? '0' : '2vh'"
         append-to-body
         destroy-on-close
-        :title="officeEditorPath || t('documents.office_edit')"
+        class="office-editor-dialog"
+        @opened="notifyOfficeEditorResize"
         @closed="onOfficeEditorClosed"
       >
-        <section class="viewer-host">
+        <template #header>
+          <div class="dialog-head">
+            <span class="dialog-title">{{ officeEditorPath || t("documents.office_edit") }}</span>
+            <button
+              type="button"
+              class="dialog-tool-btn dialog-tool-icon-btn"
+              :title="officeEditorFullscreen ? t('viewer.exit_fullscreen') : t('viewer.fullscreen')"
+              @click="toggleOfficeEditorFullscreen"
+            >
+              <svg
+                v-if="!officeEditorFullscreen"
+                class="dialog-tool-icon"
+                viewBox="0 0 20 20"
+                aria-hidden="true"
+              >
+                <path d="M4 8V4h4M12 4h4v4M16 12v4h-4M8 16H4v-4"></path>
+              </svg>
+              <svg
+                v-else
+                class="dialog-tool-icon"
+                viewBox="0 0 20 20"
+                aria-hidden="true"
+              >
+                <path d="M8 4H4v4M12 4h4v4M4 12v4h4M16 12v4h-4"></path>
+                <path d="M8 8L4 4M12 8l4-4M8 12l-4 4M12 12l4 4"></path>
+              </svg>
+            </button>
+          </div>
+        </template>
+
+        <section class="viewer-host office-viewer-host" :style="officeEditorHostStyle">
           <el-alert
             v-if="officeEditorError"
             :title="officeEditorError"
@@ -265,6 +328,7 @@ onMounted(async () => {
             class="viewer-error-banner"
           />
           <OnlyOfficeEditor
+            ref="officeEditorRef"
             :visible="officeEditorVisible"
             :source-path="officeEditorPath"
             mode="edit"
@@ -278,11 +342,96 @@ onMounted(async () => {
 
 <style scoped>
 .viewer-host {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
 }
 
 .viewer-error-banner {
   margin-bottom: 2px;
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dialog-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.dialog-tool-btn {
+  min-width: 32px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 7px;
+  border: 1px solid #cfd8e3;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  line-height: 1;
+  font-size: 0.78rem;
+}
+
+.dialog-tool-icon-btn {
+  min-width: 34px;
+  padding: 0;
+}
+
+.dialog-tool-icon {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.office-viewer-host {
+  flex: 1;
+  min-height: 0;
+}
+
+.office-viewer-host :deep(.onlyoffice-root) {
+  flex: 1;
+  min-height: 0;
+}
+
+:deep(.el-dialog.office-editor-dialog) {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 4vh);
+}
+
+:deep(.el-dialog.office-editor-dialog.is-fullscreen) {
+  height: 100vh;
+  max-height: 100vh;
+}
+
+:deep(.office-editor-dialog .el-dialog__header) {
+  margin-right: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid #e7ecf3;
+  background: #f4f8fc;
+}
+
+:deep(.office-editor-dialog .el-dialog__body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 12px;
 }
 </style>

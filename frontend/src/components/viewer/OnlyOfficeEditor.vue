@@ -22,6 +22,7 @@ const loadError = ref("");
 const editorHostRef = ref<HTMLElement | null>(null);
 const activeScriptSrc = ref("");
 const editorInstance = ref<any>(null);
+const resizeTimers = ref<number[]>([]);
 const callbackStatus = ref<OfficeCallbackStatusResponse | null>(null);
 const callbackStatusTimer = ref<number | null>(null);
 const isDocumentDirty = ref(false);
@@ -143,6 +144,40 @@ function stopCallbackStatusPolling() {
     window.clearInterval(callbackStatusTimer.value);
     callbackStatusTimer.value = null;
   }
+}
+
+function clearResizeTimers() {
+  if (!resizeTimers.value.length) {
+    return;
+  }
+  for (const id of resizeTimers.value) {
+    window.clearTimeout(id);
+  }
+  resizeTimers.value = [];
+}
+
+function resizeEditor() {
+  try {
+    if (editorInstance.value && typeof editorInstance.value.resize === "function") {
+      editorInstance.value.resize();
+    }
+  } catch {
+    // Ignore SDK resize errors.
+  }
+}
+
+function requestEditorResize() {
+  clearResizeTimers();
+  const delays = [0, 100, 280, 560];
+  const ids: number[] = [];
+  for (const delay of delays) {
+    const id = window.setTimeout(() => {
+      resizeEditor();
+      window.dispatchEvent(new Event("resize"));
+    }, delay);
+    ids.push(id);
+  }
+  resizeTimers.value = ids;
 }
 
 async function refreshCallbackStatus() {
@@ -275,6 +310,7 @@ async function openOnlyOfficeEditor() {
       },
     };
     editorInstance.value = new docsApi.DocEditor(editorId, config);
+    requestEditorResize();
     emit("ready");
   } catch (error) {
     const message = error instanceof Error ? error.message : t("documents.office_open_failed");
@@ -288,6 +324,7 @@ watch(
   () => [props.visible, props.sourcePath, props.mode, locale.value] as const,
   async () => {
     if (!props.visible) {
+      clearResizeTimers();
       stopCallbackStatusPolling();
       clearCallbackStatus();
       destroyEditor();
@@ -301,8 +338,13 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  clearResizeTimers();
   stopCallbackStatusPolling();
   destroyEditor();
+});
+
+defineExpose({
+  resizeEditor: requestEditorResize,
 });
 </script>
 
@@ -388,7 +430,8 @@ onBeforeUnmount(() => {
 }
 
 .onlyoffice-stage {
-  min-height: 70vh;
+  height: 100%;
+  min-height: 0;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
   overflow: hidden;
@@ -398,6 +441,6 @@ onBeforeUnmount(() => {
 .onlyoffice-host {
   width: 100%;
   height: 100%;
-  min-height: 70vh;
+  min-height: 0;
 }
 </style>

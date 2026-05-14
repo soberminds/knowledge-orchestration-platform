@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import {
   getFileEditableText,
@@ -39,6 +39,7 @@ const editPath = ref("");
 const editEncoding = ref("utf-8");
 const editContent = ref("");
 const editOriginalContent = ref("");
+const editDialogFullscreen = ref(false);
 
 const EDITABLE_TEXT_EXTENSIONS = new Set([
   ".txt",
@@ -145,6 +146,7 @@ async function openEditDialog(doc: DocumentInfo) {
     return;
   }
 
+  editDialogFullscreen.value = false;
   editDialogVisible.value = true;
   editLoading.value = true;
   editSaving.value = false;
@@ -168,6 +170,7 @@ async function openEditDialog(doc: DocumentInfo) {
 }
 
 function closeEditDialog() {
+  editDialogFullscreen.value = false;
   editDialogVisible.value = false;
   editLoading.value = false;
   editSaving.value = false;
@@ -193,6 +196,10 @@ async function saveEditedDocument() {
   } finally {
     editSaving.value = false;
   }
+}
+
+function toggleEditDialogFullscreen() {
+  editDialogFullscreen.value = !editDialogFullscreen.value;
 }
 </script>
 
@@ -308,13 +315,44 @@ async function saveEditedDocument() {
 
     <el-dialog
       v-model="editDialogVisible"
-      width="80%"
-      top="5vh"
+      :fullscreen="editDialogFullscreen"
+      :width="editDialogFullscreen ? '100%' : '80%'"
+      :top="editDialogFullscreen ? '0' : '5vh'"
       append-to-body
-      :title="t('documents.edit_dialog_title')"
+      class="edit-dialog"
       @closed="closeEditDialog"
     >
-      <section class="edit-dialog-body">
+      <template #header>
+        <div class="dialog-head">
+          <span class="dialog-title">{{ t("documents.edit_dialog_title") }}</span>
+          <button
+            type="button"
+            class="dialog-tool-btn dialog-tool-icon-btn"
+            :title="editDialogFullscreen ? t('viewer.exit_fullscreen') : t('viewer.fullscreen')"
+            @click="toggleEditDialogFullscreen"
+          >
+            <svg
+              v-if="!editDialogFullscreen"
+              class="dialog-tool-icon"
+              viewBox="0 0 20 20"
+              aria-hidden="true"
+            >
+              <path d="M4 8V4h4M12 4h4v4M16 12v4h-4M8 16H4v-4"></path>
+            </svg>
+            <svg
+              v-else
+              class="dialog-tool-icon"
+              viewBox="0 0 20 20"
+              aria-hidden="true"
+            >
+              <path d="M8 4H4v4M12 4h4v4M4 12v4h4M16 12v4h-4"></path>
+              <path d="M8 8L4 4M12 8l4-4M8 12l-4 4M12 12l4 4"></path>
+            </svg>
+          </button>
+        </div>
+      </template>
+
+      <section class="edit-dialog-body" :class="{ 'is-fullscreen': editDialogFullscreen }">
         <p class="edit-tip">{{ t("documents.edit_tip") }}</p>
         <div class="edit-meta">
           <span class="edit-path">{{ editPath }}</span>
@@ -338,8 +376,10 @@ async function saveEditedDocument() {
           v-else
           v-model="editContent"
           type="textarea"
-          :autosize="{ minRows: 20, maxRows: 28 }"
+          :autosize="!editDialogFullscreen ? { minRows: 20, maxRows: 28 } : false"
+          :rows="editDialogFullscreen ? 1 : 20"
           class="edit-textarea"
+          :class="{ 'is-fullscreen': editDialogFullscreen }"
         />
       </section>
 
@@ -485,6 +525,55 @@ async function saveEditedDocument() {
 .edit-dialog-body {
   display: grid;
   gap: 10px;
+  min-height: 0;
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dialog-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.dialog-tool-btn {
+  min-width: 32px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 7px;
+  border: 1px solid #cfd8e3;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  line-height: 1;
+  font-size: 0.78rem;
+}
+
+.dialog-tool-icon-btn {
+  min-width: 34px;
+  padding: 0;
+}
+
+.dialog-tool-icon {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  fill: none;
+  vector-effect: non-scaling-stroke;
 }
 
 .edit-tip {
@@ -509,6 +598,49 @@ async function saveEditedDocument() {
 .edit-textarea :deep(.el-textarea__inner) {
   font-family: "JetBrains Mono", "Consolas", "Courier New", monospace;
   line-height: 1.45;
+}
+
+.edit-dialog-body.is-fullscreen {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  height: 100%;
+}
+
+.edit-textarea.is-fullscreen {
+  height: 100%;
+}
+
+.edit-textarea.is-fullscreen :deep(.el-textarea) {
+  height: 100%;
+}
+
+.edit-textarea.is-fullscreen :deep(.el-textarea__inner) {
+  height: 100%;
+  resize: none;
+}
+
+:deep(.el-dialog.edit-dialog) {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 10vh);
+}
+
+:deep(.el-dialog.edit-dialog.is-fullscreen) {
+  height: 100vh;
+  max-height: 100vh;
+}
+
+:deep(.edit-dialog .el-dialog__header) {
+  margin-right: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid #e7ecf3;
+  background: #f4f8fc;
+}
+
+:deep(.edit-dialog .el-dialog__body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 @media (max-width: 720px) {
@@ -544,3 +676,5 @@ async function saveEditedDocument() {
   }
 }
 </style>
+
+
