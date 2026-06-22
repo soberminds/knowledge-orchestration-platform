@@ -89,9 +89,35 @@
 
 ### 2) 安装后端依赖
 
-```bash
-pip install -r requirements.txt
+建议始终在 Python 3.11 的独立虚拟环境里安装依赖。这样不会把包装到系统 Python 里，也更容易排查环境问题。
+
+```powershell
+# 先确认本机有 Python 3.11
+py -3.11 --version
+
+# 如果还没有虚拟环境，先用 Python 3.11 创建
+py -3.11 -m venv .venv311
+
+# 激活虚拟环境（PowerShell）
+.\.venv311\Scripts\Activate.ps1
+
+# 在当前虚拟环境里安装后端依赖
+python -m pip install -U pip
+python -m pip install -r requirements.txt
 ```
+
+如果你不想先激活，也可以直接指定虚拟环境里的解释器：
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+说明：
+
+- `.venv311` 是本项目建议使用的 Python 3.11 虚拟环境目录。
+- 如果你机器上没有 Python 3.11，需要先安装 Python 3.11，再创建这个虚拟环境。
+- 后端依赖会安装到 `.venv311\Lib\site-packages`，不会落到系统 Python 目录里。
+- `requirements.txt` 只是依赖清单，真正安装后的包在虚拟环境内部。
 
 ### 3) 启动后端
 
@@ -122,17 +148,17 @@ npm run dev
 > `.venv311` 是本地虚拟环境目录，不需要提交到 GitHub。
 
 ```powershell
-cd "e:\00-我的AI Agent\RGA知识库"
+cd "e:\02-我的项目\01-RAG知识库\knowledge-orchestration-platform"
 
-# 方式 A：如果 python3.11 已在 PATH
-python3.11 -m venv .venv311
+# 方式 A：如果 py 启动器可用
+py -3.11 -m venv .venv311
 
-# 方式 B：如果 python3.11 不在 PATH，使用完整路径
+# 方式 B：如果你知道 Python 3.11 的完整路径，也可以直接指定
 # C:\Users\<你的用户名>\AppData\Local\Programs\Python\Python311\python.exe -m venv .venv311
 
-.\.venv311\Scripts\activate
+.\.venv311\Scripts\Activate.ps1
 python -m pip install -U pip
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
