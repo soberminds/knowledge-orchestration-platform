@@ -1,4 +1,4 @@
-# RAG 知识库项目（FastAPI + LangChain + Chroma + DeepSeek）
+﻿# RAG 知识库项目（FastAPI + LangChain + Chroma + DeepSeek）
 
 一个可本地运行的知识库问答项目：支持 Markdown/TXT/PDF/DOCX/Office 文件入库，先检索再生成，最终由 DeepSeek 输出答案。
 
@@ -287,3 +287,34 @@ These values are deployment-side settings (not auto-assigned by provider account
   - backend image from this repo `Dockerfile`
   - ONLYOFFICE from official `onlyoffice/documentserver` image
   - reverse proxy/domain to expose stable HTTPS URLs
+
+## Windows 一键启动
+
+如果你在 Windows 上本地开发，可以直接在仓库根目录运行：
+
+```powershell
+.\启动脚本\start-dev.ps1
+```
+
+或者双击：
+
+- `启动脚本\start-dev.cmd`
+
+它会按需完成这些事：
+
+- 如果 `.venv311` 不存在，就用 Python 3.11 创建它
+- 如果后端依赖没有准备好，就自动安装 `requirements.txt`
+- 如果 `frontend/node_modules` 不存在，就自动执行 `npm install`
+- 然后分别启动后端 `8000` 和前端 `5173`
+
+停止开发环境可以用：
+
+```powershell
+.\启动脚本\stop-dev.ps1
+```
+
+或者直接双击：
+
+- `启动脚本\stop-dev.cmd`
+
+
