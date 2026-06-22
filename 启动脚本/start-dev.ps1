@@ -14,10 +14,6 @@ $requirementsStamp = Join-Path $root '.venv311\.requirements.stamp'
 $frontendDir = Join-Path $root 'frontend'
 $frontendNodeModules = Join-Path $frontendDir 'node_modules'
 $statePath = Join-Path $root '.dev-processes.json'
-$backendStdout = Join-Path $root 'backend.stdout.log'
-$backendStderr = Join-Path $root 'backend.stderr.log'
-$frontendStdout = Join-Path $root 'frontend.stdout.log'
-$frontendStderr = Join-Path $root 'frontend.stderr.log'
 
 function Get-ListeningProcessNames {
     param([int]$Port)
@@ -100,19 +96,26 @@ function Ensure-FrontendDependencies {
     }
 }
 
-function Start-DetachedWindow {
+function Start-VisibleWindow {
     param(
+        [string]$WindowTitle,
         [string]$ScriptPath,
-        [string]$WorkingDirectory,
-        [string]$StdoutPath,
-        [string]$StderrPath
+        [string]$WorkingDirectory
     )
 
-    return Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' -WorkingDirectory $WorkingDirectory -ArgumentList @(
+    $safeWindowTitle = $WindowTitle.Replace("'", "''")
+    $safeScriptPath = $ScriptPath.Replace("'", "''")
+    $bootstrapCommand = @"
+`$Host.UI.RawUI.WindowTitle = '$safeWindowTitle'
+& '$safeScriptPath'
+"@
+
+    return Start-Process -FilePath 'powershell.exe' -WorkingDirectory $WorkingDirectory -ArgumentList @(
+        '-NoExit',
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
-        '-File', $ScriptPath
-    ) -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
+        '-Command', $bootstrapCommand
+    ) -PassThru
 }
 
 Write-Host '准备启动开发环境...' -ForegroundColor Green
@@ -126,9 +129,9 @@ try {
         Ensure-BackendPython
         Ensure-BackendDependencies
         $backendScript = Join-Path $scriptDir 'run-backend.ps1'
-        $backendShell = Start-DetachedWindow -ScriptPath $backendScript -WorkingDirectory $root -StdoutPath $backendStdout -StderrPath $backendStderr
+        $backendShell = Start-VisibleWindow -WindowTitle 'KOP 后端开发服务' -ScriptPath $backendScript -WorkingDirectory $root
         $backendShellId = $backendShell.Id
-        Write-Host ('后端已启动，窗口 PID: {0}' -f $backendShellId) -ForegroundColor Green
+        Write-Host ('后端已在独立窗口中启动，窗口 PID: {0}' -f $backendShellId) -ForegroundColor Green
     } else {
         Write-Host ('端口 {0} 已在监听，跳过后端启动。占用进程：{1}' -f $backendPort, ($backendNames -join ', ')) -ForegroundColor Yellow
     }
@@ -137,9 +140,9 @@ try {
     if ($frontendNames.Count -eq 0) {
         Ensure-FrontendDependencies
         $frontendScript = Join-Path $scriptDir 'run-frontend.ps1'
-        $frontendShell = Start-DetachedWindow -ScriptPath $frontendScript -WorkingDirectory $root -StdoutPath $frontendStdout -StderrPath $frontendStderr
+        $frontendShell = Start-VisibleWindow -WindowTitle 'KOP 前端开发服务' -ScriptPath $frontendScript -WorkingDirectory $root
         $frontendShellId = $frontendShell.Id
-        Write-Host ('前端已启动，窗口 PID: {0}' -f $frontendShellId) -ForegroundColor Green
+        Write-Host ('前端已在独立窗口中启动，窗口 PID: {0}' -f $frontendShellId) -ForegroundColor Green
     } else {
         Write-Host ('端口 {0} 已在监听，跳过前端启动。占用进程：{1}' -f $frontendPort, ($frontendNames -join ', ')) -ForegroundColor Yellow
     }
@@ -158,8 +161,9 @@ try {
     Write-Host '开发环境启动完成。' -ForegroundColor Green
     Write-Host ('后端地址: http://127.0.0.1:{0}' -f $backendPort) -ForegroundColor Cyan
     Write-Host ('前端地址: http://127.0.0.1:{0}' -f $frontendPort) -ForegroundColor Cyan
+    Write-Host '前后端会在独立 PowerShell 窗口里持续输出实时日志。' -ForegroundColor Cyan
     Write-Host '停止命令: .\启动脚本\stop-dev.cmd' -ForegroundColor Cyan
-    Write-Host '如果某个窗口启动失败，可以看根目录下的 .log 文件。' -ForegroundColor DarkGray
+    Write-Host '如果服务启动失败，对应窗口会保留，方便直接查看报错。' -ForegroundColor DarkGray
 } catch {
     Write-Host ''
     Write-Host ('启动失败: {0}' -f $_.Exception.Message) -ForegroundColor Red

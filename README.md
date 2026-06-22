@@ -305,7 +305,9 @@ These values are deployment-side settings (not auto-assigned by provider account
 - 如果 `.venv311` 不存在，就用 Python 3.11 创建它
 - 如果后端依赖没有准备好，就自动安装 `requirements.txt`
 - 如果 `frontend/node_modules` 不存在，就自动执行 `npm install`
-- 然后分别启动后端 `8000` 和前端 `5173`
+- 分别打开两个独立 PowerShell 窗口，启动后端 `8000` 和前端 `5173`
+- 前后端窗口会持续显示实时日志，方便直接查看运行状态和报错
+- 如果服务启动失败，对应窗口不会马上关闭，便于排查问题
 
 停止开发环境可以用：
 
@@ -317,4 +319,8 @@ These values are deployment-side settings (not auto-assigned by provider account
 
 - `启动脚本\stop-dev.cmd`
 
+说明：
 
+- `start-dev.ps1` 是真正的启动逻辑
+- `start-dev.cmd` 是给 Windows 双击启动准备的薄封装
+- `stop-dev.ps1` / `stop-dev.cmd` 负责结束前后端窗口和占用的开发端口
