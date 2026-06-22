@@ -8,6 +8,7 @@ import {
 } from "../../api";
 import OnlyOfficeHealthPanel from "./OnlyOfficeHealthPanel.vue";
 import { useI18n } from "../../composables/useI18n";
+import { isEditableTextDocument, isOnlyOfficeDocument } from "../../utils/documentRouting";
 
 const props = defineProps<{
   documents: DocumentInfo[];
@@ -40,49 +41,6 @@ const editEncoding = ref("utf-8");
 const editContent = ref("");
 const editOriginalContent = ref("");
 const editDialogFullscreen = ref(false);
-
-const EDITABLE_TEXT_EXTENSIONS = new Set([
-  ".txt",
-  ".md",
-  ".markdown",
-  ".csv",
-  ".tsv",
-  ".json",
-  ".jsonl",
-  ".yaml",
-  ".yml",
-  ".xml",
-  ".ini",
-  ".cfg",
-  ".conf",
-  ".toml",
-  ".log",
-  ".rst",
-  ".rtf",
-  ".sql",
-  ".py",
-  ".js",
-  ".ts",
-  ".jsx",
-  ".tsx",
-  ".java",
-  ".c",
-  ".cpp",
-  ".h",
-  ".hpp",
-  ".go",
-  ".rs",
-  ".sh",
-  ".bat",
-  ".ps1",
-]);
-const OFFICE_PRO_EDITOR_EXTENSIONS = new Set([
-  ".doc",
-  ".docx",
-  ".xls",
-  ".xlsx",
-  ".xlsm",
-]);
 
 const selectedFileNames = computed(() => props.selectedFiles.map((file) => file.name));
 const canSaveEdit = computed(() => !editLoading.value && !editSaving.value);
@@ -130,11 +88,11 @@ function deleteDocument(path: string) {
 }
 
 function isEditableDocument(doc: DocumentInfo): boolean {
-  return EDITABLE_TEXT_EXTENSIONS.has((doc.extension || "").toLowerCase());
+  return isEditableTextDocument(doc.extension || doc.path);
 }
 
 function isOfficeProEditableDocument(doc: DocumentInfo): boolean {
-  return OFFICE_PRO_EDITOR_EXTENSIONS.has((doc.extension || "").toLowerCase());
+  return isOnlyOfficeDocument(doc.extension || doc.path);
 }
 
 function openOfficeEditor(path: string) {

@@ -7,6 +7,26 @@ import os
 from pathlib import Path
 
 
+def _strip_inline_comment(value: str) -> str:
+    """Strip trailing inline comments while preserving quoted content."""
+    in_single = False
+    in_double = False
+
+    for index, char in enumerate(value):
+        if char == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if char == "#" and not in_single and not in_double:
+            if index == 0 or value[index - 1].isspace():
+                value = value[:index]
+                break
+
+    return value.rstrip()
+
+
 def _load_env_file(path: Path) -> None:
     """Tiny .env loader, so the app works without python-dotenv."""
     if not path.exists():
@@ -26,7 +46,7 @@ def _load_env_file(path: Path) -> None:
 
         key, value = line.split("=", 1)
         key = key.strip().lstrip("\ufeff")
-        value = value.strip().strip('"').strip("'")
+        value = _strip_inline_comment(value).strip().strip('"').strip("'")
         if key:
             # Keep .env as the source of truth for local development so edits
             # take effect after a normal app restart/reload.
@@ -176,6 +196,8 @@ class Settings:
         ".xlsx",
         ".xlsm",
         ".xls",
+        ".ppt",
+        ".pptx",
     )
 
 

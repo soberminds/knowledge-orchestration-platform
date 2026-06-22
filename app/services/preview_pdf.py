@@ -11,7 +11,7 @@ import tempfile
 
 from app.core.settings import settings
 
-OFFICE_EXTENSIONS: tuple[str, ...] = (".doc", ".docx")
+OFFICE_EXTENSIONS: tuple[str, ...] = (".doc", ".docx", ".ppt", ".pptx")
 
 
 def get_preview_pdf_cache_path(source_path: Path) -> Path:
@@ -23,7 +23,7 @@ def get_preview_pdf_path(source_path: Path) -> Path:
     """Return a PDF path for previewing source_path.
 
     - `.pdf` returns itself.
-    - `.doc` / `.docx` are converted to cached PDF files.
+    - `.doc` / `.docx` / `.ppt` / `.pptx` are converted to cached PDF files.
     """
     suffix = source_path.suffix.lower()
     if suffix == ".pdf":
@@ -41,7 +41,7 @@ def _convert_office_to_pdf(source_path: Path) -> Path:
 
     errors: list[str] = []
     converted = _try_convert_with_libreoffice(source_path, target_pdf, errors)
-    if not converted:
+    if not converted and suffix in {".doc", ".docx"}:
         converted = _try_convert_with_word_com(source_path, target_pdf, errors)
 
     if not converted:
@@ -77,7 +77,7 @@ def _try_convert_with_libreoffice(source_path: Path, target_pdf: Path, errors: l
                     "--nodefault",
                     "--nofirststartwizard",
                     "--convert-to",
-                    "pdf:writer_pdf_Export",
+                    _libreoffice_pdf_filter(source_path),
                     "--outdir",
                     str(temp_out_dir),
                     str(source_path),
@@ -107,6 +107,12 @@ def _try_convert_with_libreoffice(source_path: Path, target_pdf: Path, errors: l
             continue
 
     return False
+
+
+def _libreoffice_pdf_filter(source_path: Path) -> str:
+    if source_path.suffix.lower() in {".ppt", ".pptx"}:
+        return "pdf:impress_pdf_Export"
+    return "pdf:writer_pdf_Export"
 
 
 def _try_convert_with_word_com(source_path: Path, target_pdf: Path, errors: list[str]) -> bool:

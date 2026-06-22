@@ -731,7 +731,7 @@ class KnowledgeBaseService:
                 raise FileNotFoundError(f"File not found: {path}")
 
             preview_cache_path: Path | None = None
-            if path.suffix.lower() in {".doc", ".docx"}:
+            if path.suffix.lower() in {".doc", ".docx", ".ppt", ".pptx"}:
                 try:
                     preview_cache_path = get_preview_pdf_cache_path(path)
                 except Exception:

@@ -12,6 +12,7 @@ import { useChatWorkspace } from "./composables/useChatWorkspace";
 import { useDashboard } from "./composables/useDashboard";
 import { useSearchWorkspace } from "./composables/useSearchWorkspace";
 import type { NavTab, WorkspaceTab } from "./types/chat";
+import { isOnlyOfficeDocument } from "./utils/documentRouting";
 
 const { t } = useI18n();
 const navTabs = computed<NavTab[]>(() => [
@@ -31,6 +32,7 @@ const officeEditorVisible = ref(false);
 const officeEditorPath = ref("");
 const officeEditorError = ref("");
 const officeEditorFullscreen = ref(false);
+const officeEditorMode = ref<"edit" | "view">("edit");
 const officeEditorRef = ref<InstanceType<typeof OnlyOfficeEditor> | null>(null);
 
 const dashboard = useDashboard();
@@ -50,6 +52,13 @@ const activeErrorMessage = computed(() => {
 const officeEditorHostStyle = computed(() => ({
   height: officeEditorFullscreen.value ? "calc(100vh - 74px)" : "82vh",
 }));
+
+const officeDialogTitle = computed(() => {
+  if (officeEditorPath.value) {
+    return officeEditorPath.value;
+  }
+  return officeEditorMode.value === "view" ? t("documents.open") : t("documents.office_edit");
+});
 
 function switchTab(tab: WorkspaceTab) {
   activeTab.value = tab;
@@ -72,16 +81,45 @@ function setTopK(value: number) {
   topK.value = Math.max(1, Math.min(10, Math.round(value)));
 }
 
+function closeDocumentViewerState() {
+  documentViewerVisible.value = false;
+  documentViewerPath.value = "";
+  documentViewerError.value = "";
+}
+
+function resetOfficeEditorState() {
+  officeEditorPath.value = "";
+  officeEditorError.value = "";
+  officeEditorFullscreen.value = false;
+  officeEditorMode.value = "edit";
+}
+
 function openDocumentFromWorkspace(path: string) {
+  if (isOnlyOfficeDocument(path)) {
+    closeDocumentViewerState();
+    officeEditorPath.value = path;
+    officeEditorError.value = "";
+    officeEditorFullscreen.value = false;
+    officeEditorMode.value = "view";
+    officeEditorVisible.value = true;
+    return;
+  }
+
+  if (officeEditorVisible.value) {
+    officeEditorVisible.value = false;
+  }
+  resetOfficeEditorState();
   documentViewerPath.value = path;
   documentViewerError.value = "";
   documentViewerVisible.value = true;
 }
 
 function openOfficeEditorFromWorkspace(path: string) {
+  closeDocumentViewerState();
   officeEditorPath.value = path;
   officeEditorError.value = "";
   officeEditorFullscreen.value = false;
+  officeEditorMode.value = "edit";
   officeEditorVisible.value = true;
 }
 
@@ -89,14 +127,11 @@ async function deleteDocumentFromWorkspace(path: string) {
   try {
     await dashboard.deleteDocument(path);
     if (documentViewerVisible.value && documentViewerPath.value === path) {
-      documentViewerVisible.value = false;
-      documentViewerPath.value = "";
-      documentViewerError.value = "";
+      closeDocumentViewerState();
     }
     if (officeEditorVisible.value && officeEditorPath.value === path) {
       officeEditorVisible.value = false;
-      officeEditorPath.value = "";
-      officeEditorError.value = "";
+      resetOfficeEditorState();
     }
   } catch {
     // The composable already stores the error message for display.
@@ -116,9 +151,7 @@ function onDocumentViewerOpened() {
 }
 
 async function onOfficeEditorClosed() {
-  officeEditorFullscreen.value = false;
-  officeEditorPath.value = "";
-  officeEditorError.value = "";
+  resetOfficeEditorState();
   try {
     await dashboard.refreshDashboard();
   } catch {
@@ -290,7 +323,7 @@ onMounted(async () => {
       >
         <template #header>
           <div class="dialog-head">
-            <span class="dialog-title">{{ officeEditorPath || t("documents.office_edit") }}</span>
+            <span class="dialog-title">{{ officeDialogTitle }}</span>
             <button
               type="button"
               class="dialog-tool-btn dialog-tool-icon-btn"
@@ -331,7 +364,7 @@ onMounted(async () => {
             ref="officeEditorRef"
             :visible="officeEditorVisible"
             :source-path="officeEditorPath"
-            mode="edit"
+            :mode="officeEditorMode"
             @error="officeEditorError = $event"
           />
         </section>

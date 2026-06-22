@@ -1,8 +1,10 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import type { CitationRef } from "../../api";
 import { useI18n } from "../../composables/useI18n";
 import type { UiMessage } from "../../types/chat";
+import { isOnlyOfficeDocument } from "../../utils/documentRouting";
+import OnlyOfficeEditor from "../viewer/OnlyOfficeEditor.vue";
 import UnifiedFileViewer from "../viewer/UnifiedFileViewer.vue";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 
@@ -19,6 +21,12 @@ const viewerPage = ref(1);
 const viewerSnippet = ref("");
 const viewerError = ref("");
 const viewerRef = ref<InstanceType<typeof UnifiedFileViewer> | null>(null);
+
+const officeViewerVisible = ref(false);
+const officeViewerSourcePath = ref("");
+const officeViewerError = ref("");
+const officeViewerRef = ref<InstanceType<typeof OnlyOfficeEditor> | null>(null);
+
 const { t } = useI18n();
 
 const citationItems = computed<CitationRef[]>(() => {
@@ -96,6 +104,18 @@ function citationElementId(label: string) {
   return `${props.message.id}-cite-${label}`;
 }
 
+function resetTextViewerState() {
+  viewerSourcePath.value = "";
+  viewerPage.value = 1;
+  viewerSnippet.value = "";
+  viewerError.value = "";
+}
+
+function resetOfficeViewerState() {
+  officeViewerSourcePath.value = "";
+  officeViewerError.value = "";
+}
+
 function openCitationViewer(citation: CitationRef) {
   if (/^https?:\/\//i.test(citation.source)) {
     window.open(citation.source, "_blank", "noopener,noreferrer");
@@ -103,6 +123,20 @@ function openCitationViewer(citation: CitationRef) {
   }
 
   activeCitationLabel.value = citation.label;
+
+  if (isOnlyOfficeDocument(citation.source)) {
+    viewerVisible.value = false;
+    resetTextViewerState();
+    officeViewerError.value = "";
+    officeViewerSourcePath.value = citation.source;
+    officeViewerVisible.value = true;
+    return;
+  }
+
+  if (officeViewerVisible.value) {
+    officeViewerVisible.value = false;
+  }
+  resetOfficeViewerState();
   viewerError.value = "";
   viewerSourcePath.value = citation.source;
   viewerPage.value = Math.max(1, citation.page ?? 1);
@@ -112,6 +146,14 @@ function openCitationViewer(citation: CitationRef) {
 
 function onViewerDialogOpened() {
   viewerRef.value?.refreshViewer?.();
+}
+
+function onOfficeViewerDialogOpened() {
+  officeViewerRef.value?.resizeEditor?.();
+}
+
+function onOfficeViewerDialogClosed() {
+  resetOfficeViewerState();
 }
 
 async function focusCitation(label: string) {
@@ -221,6 +263,36 @@ async function focusCitation(label: string) {
         :snippet="viewerSnippet"
         :active="viewerVisible"
         @error="viewerError = $event"
+      />
+    </section>
+  </el-dialog>
+
+  <el-dialog
+    v-model="officeViewerVisible"
+    width="96%"
+    top="2vh"
+    append-to-body
+    destroy-on-close
+    class="citation-office-dialog"
+    :title="officeViewerSourcePath || t('documents.open')"
+    @opened="onOfficeViewerDialogOpened"
+    @closed="onOfficeViewerDialogClosed"
+  >
+    <section class="viewer-host office-viewer-host">
+      <el-alert
+        v-if="officeViewerError"
+        :title="officeViewerError"
+        type="error"
+        show-icon
+        :closable="false"
+        class="viewer-error-banner"
+      />
+      <OnlyOfficeEditor
+        ref="officeViewerRef"
+        :visible="officeViewerVisible"
+        :source-path="officeViewerSourcePath"
+        mode="view"
+        @error="officeViewerError = $event"
       />
     </section>
   </el-dialog>
@@ -408,6 +480,32 @@ async function focusCitation(label: string) {
 
 .viewer-error-banner {
   margin-bottom: 2px;
+}
+
+.office-viewer-host {
+  min-height: 0;
+  height: 82vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.office-viewer-host :deep(.onlyoffice-root) {
+  flex: 1;
+  min-height: 0;
+}
+
+:deep(.el-dialog.citation-office-dialog) {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 4vh);
+}
+
+:deep(.citation-office-dialog .el-dialog__body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 12px;
 }
 
 @keyframes blink {

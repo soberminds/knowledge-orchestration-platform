@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
 import csv
 import io
 import re
 import subprocess
+import shutil
+import tempfile
 from typing import Any
 
 from langchain_core.documents import Document
@@ -53,7 +56,8 @@ TEXT_FILE_EXTENSIONS: tuple[str, ...] = (
 
 MARKDOWN_EXTENSIONS: tuple[str, ...] = (".md", ".markdown")
 SPREADSHEET_EXTENSIONS: tuple[str, ...] = (".xlsx", ".xlsm", ".xls")
-RICH_DOC_EXTENSIONS: tuple[str, ...] = (".pdf", ".doc", ".docx", *SPREADSHEET_EXTENSIONS)
+PRESENTATION_EXTENSIONS: tuple[str, ...] = (".pptx", ".ppt")
+RICH_DOC_EXTENSIONS: tuple[str, ...] = (".pdf", ".doc", ".docx", *SPREADSHEET_EXTENSIONS, *PRESENTATION_EXTENSIONS)
 TABLE_VIEW_MAX_ROWS = 600
 TABLE_VIEW_MAX_COLUMNS = 50
 
@@ -407,6 +411,169 @@ def _extract_delimited_text_as_markdown(path: Path, delimiter: str) -> str:
     return _rows_to_markdown_table(rows, "Delimited Preview")
 
 
+def _candidate_soffice_bins() -> list[str]:
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    def push(value: str | None) -> None:
+        if not value:
+            return
+        normalized = value.strip().strip('"')
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    push(settings.soffice_bin)
+    push(shutil.which("soffice"))
+    push(shutil.which("soffice.com"))
+    push(shutil.which("libreoffice"))
+
+    if os.name == "nt":
+        windows_bins = (
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files\LibreOffice\program\soffice.com",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.com",
+        )
+        for path_value in windows_bins:
+            if Path(path_value).exists():
+                push(path_value)
+
+    return candidates
+
+
+def _extract_presentation_pages_from_pptx(path: Path) -> list[dict[str, Any]]:
+    try:
+        from pptx import Presentation
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("Missing dependency: python-pptx") from exc
+
+    presentation = Presentation(str(path))
+    pages: list[dict[str, Any]] = []
+
+    for index, slide in enumerate(presentation.slides, start=1):
+        text_blocks: list[str] = []
+        table_blocks: list[str] = []
+        slide_title = ""
+
+        for shape in slide.shapes:
+            if getattr(shape, "has_text_frame", False):
+                raw_text = _safe_text(getattr(shape, "text", ""))
+                if raw_text:
+                    normalized = "\n".join(line.strip() for line in raw_text.splitlines() if line.strip())
+                    if normalized:
+                        if not slide_title:
+                            slide_title = normalized.splitlines()[0][:120]
+                        text_blocks.append(normalized)
+
+            if getattr(shape, "has_table", False):
+                rows: list[list[str]] = []
+                for row in shape.table.rows:
+                    values = [_safe_text(cell.text) for cell in row.cells]
+                    while values and not values[-1]:
+                        values.pop()
+                    if any(values):
+                        rows.append(values)
+                if rows:
+                    table_blocks.append(_rows_to_markdown_table(rows, f"Table {len(table_blocks) + 1}"))
+
+        content_blocks = list(text_blocks)
+        if table_blocks:
+            if content_blocks:
+                content_blocks.append("## Tables")
+            content_blocks.extend(table_blocks)
+
+        slide_label = slide_title or f"Slide {index}"
+        markdown_lines = [f"### Slide {index}: {slide_label}", ""]
+        if content_blocks:
+            markdown_lines.extend(content_blocks)
+        else:
+            markdown_lines.append("_No visible text on this slide._")
+
+        text_markdown = "\n\n".join(markdown_lines).strip()
+        text_plain = "\n\n".join(content_blocks).strip()
+        if not text_plain:
+            text_plain = slide_label
+
+        pages.append(
+            {
+                "page": index,
+                "name": slide_label,
+                "text_markdown": text_markdown,
+                "text_plain": text_plain,
+            }
+        )
+
+    if not pages:
+        pages.append(
+            {
+                "page": 1,
+                "name": "Slide 1",
+                "text_markdown": "### Slide 1\n\n_No visible text on this slide._",
+                "text_plain": "Slide 1",
+            }
+        )
+    return pages
+
+
+def _extract_presentation_pages(path: Path) -> list[dict[str, Any]]:
+    suffix = path.suffix.lower()
+    if suffix == ".pptx":
+        return _extract_presentation_pages_from_pptx(path)
+    if suffix != ".ppt":
+        return []
+
+    errors: list[str] = []
+    bins = _candidate_soffice_bins()
+    if not bins:
+        raise RuntimeError("Missing dependency: LibreOffice soffice binary")
+
+    for soffice_bin in bins:
+        try:
+            with tempfile.TemporaryDirectory(prefix="pptx_extract_") as temp_dir:
+                temp_out_dir = Path(temp_dir)
+                command = [
+                    soffice_bin,
+                    "--headless",
+                    "--invisible",
+                    "--nologo",
+                    "--norestore",
+                    "--nodefault",
+                    "--nofirststartwizard",
+                    "--convert-to",
+                    "pptx",
+                    "--outdir",
+                    str(temp_out_dir),
+                    str(path),
+                ]
+                proc = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(15, settings.preview_convert_timeout_sec),
+                    check=False,
+                )
+                if proc.returncode != 0:
+                    stderr = (proc.stderr or "").strip()
+                    stdout = (proc.stdout or "").strip()
+                    errors.append(f"LibreOffice failed ({Path(soffice_bin).name}): {stderr or stdout or 'exit!=0'}")
+                    continue
+
+                converted = next((candidate for candidate in temp_out_dir.glob("*.pptx") if candidate.is_file()), None)
+                if converted is None or converted.stat().st_size <= 0:
+                    errors.append(f"LibreOffice produced empty output ({Path(soffice_bin).name})")
+                    continue
+
+                return _extract_presentation_pages_from_pptx(converted)
+        except Exception as exc:
+            errors.append(f"LibreOffice exception ({Path(soffice_bin).name}): {exc}")
+            continue
+
+    joined = " | ".join(errors) if errors else "unknown conversion failure"
+    raise RuntimeError(f"Could not convert file to PPTX preview: {joined}")
+
+
 def read_file_page_text(path: Path, page: int | None = None) -> dict[str, Any]:
     """Return normalized text payload for the unified frontend viewer."""
     suffix = path.suffix.lower()
@@ -452,6 +619,21 @@ def read_file_page_text(path: Path, page: int | None = None) -> dict[str, Any]:
             "table_total_rows": selected["table_total_rows"],
             "table_total_columns": selected["table_total_columns"],
             "table_truncated": selected["table_truncated"],
+        }
+
+    if suffix in PRESENTATION_EXTENSIONS:
+        pages = _extract_presentation_pages(path)
+        total_pages = len(pages)
+        if page_number < 1 or page_number > total_pages:
+            raise ValueError(f"page out of range: 1..{total_pages}")
+
+        selected = pages[page_number - 1]
+        return {
+            "page": page_number,
+            "page_count": total_pages,
+            "page_label": selected["name"],
+            "format": "markdown",
+            "text": selected["text_markdown"],
         }
 
     if suffix == ".docx":
@@ -569,6 +751,21 @@ def load_documents_from_file(path: Path) -> list[Document]:
                 **base_metadata,
                 "page": int(item["page"]),
                 "sheet_name": str(item["name"]),
+            }
+            documents.append(Document(page_content=text, metadata=metadata))
+        return documents
+
+    if suffix in PRESENTATION_EXTENSIONS:
+        pages = _extract_presentation_pages(path)
+        documents: list[Document] = []
+        for item in pages:
+            text = str(item["text_plain"]).strip()
+            if not text:
+                continue
+            metadata = {
+                **base_metadata,
+                "page": int(item["page"]),
+                "slide_name": str(item["name"]),
             }
             documents.append(Document(page_content=text, metadata=metadata))
         return documents

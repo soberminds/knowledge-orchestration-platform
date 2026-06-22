@@ -1,6 +1,6 @@
 # RAG 知识库项目（FastAPI + LangChain + Chroma + DeepSeek）
 
-一个可本地运行的知识库问答项目：支持 Markdown/TXT/PDF/DOCX 入库，先检索再生成，最终由 DeepSeek 输出答案。
+一个可本地运行的知识库问答项目：支持 Markdown/TXT/PDF/DOCX/Office 文件入库，先检索再生成，最终由 DeepSeek 输出答案。
 
 ## 这套项目做了什么（校正版）
 
@@ -48,7 +48,7 @@
 
 有，用了，而且是关键路径在用：
 
-- `langchain_text_splitters.RecursiveCharacterTextSplitter`（切片）
+- `langchain_text_splitters.RecursiveCharacterTextSplitter`（文档切片）
 - `langchain_core.embeddings.Embeddings` 接口（Embedding 适配）
 - `langchain_chroma.Chroma`（向量库封装与检索）
 
@@ -68,7 +68,7 @@
 ## 核心后端文件
 
 - `app/core/settings.py`：环境变量与全局配置
-- `app/services/files.py`：文档读取（md/txt/pdf/docx）
+- `app/services/files.py`：文档读取（md/txt/pdf/docx/pptx/xls/xlsx）
 - `app/services/embeddings.py`：本地 embedding 适配到 LangChain 接口
 - `app/services/knowledge_base.py`：索引构建、检索、问答主链路
 - `app/services/tools.py`：Agent Tool 预留
@@ -170,7 +170,7 @@ uvicorn app.main:app --reload
 - `MODEL_PROVIDER_OVERRIDES_JSON` for explicit model->provider mapping
 - `EXTRA_PROVIDER_CONFIGS_JSON` for custom OpenAI-compatible gateways
 
-## ONLYOFFICE Professional Editing (doc/docx/xls/xlsx)
+## ONLYOFFICE Professional Editing (doc/docx/ppt/pptx/xls/xlsx/xlsm)
 
 This project now supports professional browser editing for Office files via ONLYOFFICE Docs.
 
@@ -199,7 +199,7 @@ docker run -d --name onlyoffice-docs -p 8088:80 \
 ### 3) Frontend usage
 
 - Open `Document Management`
-- For `doc/docx/xls/xlsx/xlsm`, click `专业编辑` / `Pro Edit`
+- For `doc/docx/ppt/pptx/xls/xlsx/xlsm`, click `专业编辑` / `Pro Edit`
 - Save in ONLYOFFICE editor; backend callback writes file to disk and can auto rebuild index
 
 ## ONLYOFFICE Incremental Index + Health (New)

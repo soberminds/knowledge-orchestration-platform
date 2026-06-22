@@ -18,6 +18,8 @@ OFFICE_EDITOR_EXTENSIONS: tuple[str, ...] = (
     ".xls",
     ".xlsx",
     ".xlsm",
+    ".ppt",
+    ".pptx",
 )
 
 
@@ -31,6 +33,8 @@ def to_onlyoffice_document_type(extension: str) -> str:
         return "word"
     if normalized in {".xls", ".xlsx", ".xlsm"}:
         return "cell"
+    if normalized in {".ppt", ".pptx"}:
+        return "slide"
     return "word"
 
 
