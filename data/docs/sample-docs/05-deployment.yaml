@@ -1,0 +1,16 @@
+project: smart-water-demo
+profile: local-dev
+services:
+  backend:
+    host: 127.0.0.1
+    port: 8000
+  frontend:
+    host: 127.0.0.1
+    port: 5173
+  onlyoffice:
+    enabled: true
+    url: http://127.0.0.1:8088
+rag:
+  top_k: 4
+  chunk_size: 800
+  chunk_overlap: 120
