@@ -126,6 +126,8 @@ class Settings:
     # Local embedding model for retrieval.
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
     embedding_device: str = os.getenv("EMBEDDING_DEVICE", "cpu")
+    hf_endpoint: str = os.getenv("HF_ENDPOINT", "https://huggingface.co").strip().rstrip("/")
+    hf_fallback_endpoint: str = os.getenv("HF_FALLBACK_ENDPOINT", "https://hf-mirror.com").strip().rstrip("/")
 
     # RAG tuning.
     top_k: int = _env_int("TOP_K", 4)

@@ -712,10 +712,14 @@ class KnowledgeBaseService:
                 raise FileNotFoundError(f"File not found: {target}")
 
             relative_source = self._relative_source_path(target)
-            self._delete_chunks_by_source(relative_source)
 
             documents = load_documents_from_file(target)
             chunks = self.split_documents(documents)
+            if chunks:
+                # Ensure embedding/vector store can initialize before removing
+                # the previous chunks for this file.
+                _ = self.vector_store
+            self._delete_chunks_by_source(relative_source)
             self._upsert_chunks(chunks)
 
             return IngestStats(

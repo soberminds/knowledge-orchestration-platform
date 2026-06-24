@@ -1,4 +1,4 @@
-﻿# RAG 知识库项目（FastAPI + LangChain + Chroma + DeepSeek）
+# RAG 知识库项目（FastAPI + LangChain + Chroma + DeepSeek）
 
 一个可本地运行的知识库问答项目：支持 Markdown/TXT/PDF/DOCX/Office 文件入库，先检索再生成，最终由 DeepSeek 输出答案。
 
@@ -71,6 +71,7 @@
 - `app/services/files.py`：文档读取（md/txt/pdf/docx/pptx/xls/xlsx）
 - `app/services/embeddings.py`：本地 embedding 适配到 LangChain 接口
 - `app/services/knowledge_base.py`：索引构建、检索、问答主链路
+- `业务逻辑解析/RAG全链路深度解析.md`：RAG 从文件解析、切片、向量化、Chroma 检索到 DeepSeek 回答的完整业务链路说明
 - `app/services/tools.py`：Agent Tool 预留
 - `app/api/routes.py`：HTTP API（upload/ingest/search/chat）
 - `app/main.py`：FastAPI 入口与启动流程
@@ -119,6 +120,33 @@ python -m pip install -r requirements.txt
 - 后端依赖会安装到 `.venv311\Lib\site-packages`，不会落到系统 Python 目录里。
 - `requirements.txt` 只是依赖清单，真正安装后的包在虚拟环境内部。
 
+### 2.1) Embedding 模型下载说明
+
+首次使用知识库检索、上传建索引、手动重建索引、或 ONLYOFFICE 保存后自动刷新索引时，后端可能会加载本地 embedding 模型。
+
+默认模型是：
+
+- `BAAI/bge-small-zh-v1.5`
+
+它的用途不是生成最终回答，而是：
+
+- 把文档切片转成向量
+- 把用户问题转成向量
+- 让 Chroma 做语义相似度检索
+
+重要说明：
+
+- **不是每次都重新下载**
+- 第一次本地没有缓存时，才会联网下载模型文件
+- 下载成功后，后续会优先使用本地缓存
+- 现在代码已经支持：`本地缓存 -> HF_ENDPOINT -> HF_FALLBACK_ENDPOINT` 这条兜底顺序
+
+推荐配置：
+
+- 海外网络或可直连环境：
+  - `HF_ENDPOINT=https://huggingface.co`
+  - `HF_FALLBACK_ENDPOINT=https://hf-mirror.com`
+- 中国网络或官方不稳定时，也可以交换主备顺序
 ### 3) 启动后端
 
 ```bash

@@ -1,4 +1,4 @@
-﻿param()
+param()
 
 $ErrorActionPreference = 'Stop'
 
@@ -21,4 +21,4 @@ Write-Host '访问地址: http://127.0.0.1:8000' -ForegroundColor Cyan
 Write-Host '按 Ctrl + C 可以停止后端服务。' -ForegroundColor DarkGray
 Write-Host ''
 
-& $pythonExe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+& $pythonExe -m uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000
