@@ -29,6 +29,7 @@ export interface ChatResponse {
   model?: string | null;
   usage?: TokenUsage | null;
   cost_estimate?: CostEstimate | null;
+  model_diagnostics?: ModelDiagnostics | null;
 }
 
 export interface TokenUsage {
@@ -45,6 +46,17 @@ export interface CostEstimate {
   output_cost?: number | null;
   total_cost?: number | null;
   estimated?: boolean;
+}
+
+export interface ModelDiagnostics {
+  requested_model?: string | null;
+  provider?: string | null;
+  resolved_model?: string | null;
+  native_web_search_used: boolean;
+  external_web_search_used: boolean;
+  thinking_mode?: string | null;
+  option_fallback_used: boolean;
+  warnings: string[];
 }
 
 export type ThinkingMode = "quick" | "deep";
@@ -102,6 +114,7 @@ export interface ChatMessageRecord {
   citations: CitationRef[];
   sources: SourceHit[];
   usage?: TokenUsage | null;
+  model_diagnostics?: ModelDiagnostics | null;
 }
 
 export interface ChatMessagePageResponse {
@@ -243,6 +256,7 @@ export interface ChatStreamDoneEvent {
   model?: string | null;
   usage?: TokenUsage | null;
   cost_estimate?: CostEstimate | null;
+  model_diagnostics?: ModelDiagnostics | null;
 }
 
 interface ChatStreamErrorEvent {

@@ -33,6 +33,7 @@ from app.schemas import (
     ChatMessagePageResponse,
     ChatMessageRecord,
     ChatRequest,
+    ModelDiagnostics,
     ChatOptionsResponse,
     ChatResponse,
     DocumentInfo,
@@ -135,6 +136,24 @@ def _to_cost_estimate(payload: dict | None) -> CostEstimate | None:
         return None
 
 
+def _to_model_diagnostics(payload: dict | None) -> ModelDiagnostics | None:
+    if not payload or not isinstance(payload, dict):
+        return None
+    try:
+        return ModelDiagnostics(
+            requested_model=str(payload.get("requested_model") or "") or None,
+            provider=str(payload.get("provider") or "") or None,
+            resolved_model=str(payload.get("resolved_model") or "") or None,
+            native_web_search_used=bool(payload.get("native_web_search_used", False)),
+            external_web_search_used=bool(payload.get("external_web_search_used", False)),
+            thinking_mode=str(payload.get("thinking_mode") or "") or None,
+            option_fallback_used=bool(payload.get("option_fallback_used", False)),
+            warnings=[str(item) for item in payload.get("warnings", []) if item],
+        )
+    except Exception:
+        return None
+
+
 def _source_hits_payload(hits: list[SearchHit]) -> list[dict[str, Any]]:
     return [_to_source_hit(hit).model_dump() for hit in hits]
 
@@ -176,6 +195,7 @@ def _save_chat_memory_turn(
             model_name=str(result.get("model") or request.model or "") or None,
             citations=_citation_refs_payload(result.get("citations", [])),
             usage=result.get("usage"),
+            model_diagnostics=result.get("model_diagnostics"),
             rewritten_question=str(result.get("rewritten_question") or ""),
             question_mode=str(result.get("question_mode") or "") or None,
         )
@@ -955,6 +975,7 @@ async def chat(
         model=str(result.get("model") or request.model or service.settings.deepseek_model),
         usage=_to_token_usage(result.get("usage")),
         cost_estimate=_to_cost_estimate(result.get("cost_estimate")),
+        model_diagnostics=_to_model_diagnostics(result.get("model_diagnostics")),
     )
 
 
@@ -995,6 +1016,7 @@ async def chat_stream(
                         "model": event.get("model", request.model or service.settings.deepseek_model),
                         "usage": usage.model_dump() if usage else None,
                         "cost_estimate": cost_estimate.model_dump() if cost_estimate else None,
+                        "model_diagnostics": event.get("model_diagnostics"),
                     }
                     _save_chat_memory_turn(
                         chat_memory,
@@ -1006,6 +1028,7 @@ async def chat_stream(
                             "citations": event.get("citations", []),
                             "model": payload["model"],
                             "usage": event.get("usage"),
+                            "model_diagnostics": event.get("model_diagnostics"),
                         },
                     )
                     yield _sse_payload(payload)

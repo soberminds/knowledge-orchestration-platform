@@ -363,6 +363,9 @@ class ChatMemoryService:
             usage = meta.get("usage")
             if not isinstance(usage, dict):
                 usage = None
+            model_diagnostics = meta.get("model_diagnostics")
+            if not isinstance(model_diagnostics, dict):
+                model_diagnostics = None
 
             sources = [
                 self._citation_to_source(citation)
@@ -380,6 +383,7 @@ class ChatMemoryService:
                     "citations": normalized_citations,
                     "sources": sources,
                     "usage": usage,
+                    "model_diagnostics": model_diagnostics,
                 }
             )
         return items, has_more
@@ -475,6 +479,7 @@ class ChatMemoryService:
         model_name: str | None,
         citations: list[dict[str, Any]] | None = None,
         usage: dict[str, Any] | None = None,
+        model_diagnostics: dict[str, Any] | None = None,
         rewritten_question: str | None = None,
         question_mode: str | None = None,
     ) -> None:
@@ -527,6 +532,7 @@ class ChatMemoryService:
                 "rewritten_question": rewritten_question,
                 "question_mode": question_mode,
                 "usage": usage,
+                "model_diagnostics": model_diagnostics,
             }
             session.execute(
                 text(

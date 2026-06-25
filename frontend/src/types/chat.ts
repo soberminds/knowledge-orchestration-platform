@@ -1,4 +1,4 @@
-import type { CitationRef, CostEstimate, SourceHit, TokenUsage } from "../api";
+import type { CitationRef, CostEstimate, ModelDiagnostics, SourceHit, TokenUsage } from "../api";
 
 export type WorkspaceTab = "chat" | "documents" | "index" | "search";
 
@@ -20,6 +20,7 @@ export interface UiMessage {
   model?: string;
   usage?: TokenUsage;
   costEstimate?: CostEstimate;
+  modelDiagnostics?: ModelDiagnostics;
   streaming?: boolean;
   failed?: boolean;
 }

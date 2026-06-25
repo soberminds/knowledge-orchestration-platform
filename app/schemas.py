@@ -52,6 +52,19 @@ class CitationRef(BaseModel):
     preview: str = ""
 
 
+class ModelDiagnostics(BaseModel):
+    """Runtime model-call diagnostics returned with each assistant answer."""
+
+    requested_model: str | None = None
+    provider: str | None = None
+    resolved_model: str | None = None
+    native_web_search_used: bool = False
+    external_web_search_used: bool = False
+    thinking_mode: str | None = None
+    option_fallback_used: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ChatResponse(BaseModel):
     """Response payload for /api/chat."""
 
@@ -63,6 +76,7 @@ class ChatResponse(BaseModel):
     model: str | None = None
     usage: TokenUsage | None = None
     cost_estimate: CostEstimate | None = None
+    model_diagnostics: ModelDiagnostics | None = None
 
 
 class ChatModelOption(BaseModel):
@@ -148,6 +162,7 @@ class ChatMessageRecord(BaseModel):
     citations: list[CitationRef] = Field(default_factory=list)
     sources: list[SourceHit] = Field(default_factory=list)
     usage: TokenUsage | None = None
+    model_diagnostics: ModelDiagnostics | None = None
 
 
 class ChatMessagePageResponse(BaseModel):

@@ -100,6 +100,32 @@ const costHintSummary = computed(() => {
   return t("message.cost_not_configured_with_model", { model: props.message.model });
 });
 
+const diagnosticsSummary = computed(() => {
+  if (props.message.role !== "assistant" || !props.message.modelDiagnostics) {
+    return "";
+  }
+  const diagnostics = props.message.modelDiagnostics;
+  const parts = [
+    `provider=${diagnostics.provider || "-"}`,
+    `requested=${diagnostics.requested_model || "-"}`,
+    `resolved=${diagnostics.resolved_model || props.message.model || "-"}`,
+    `nativeWeb=${diagnostics.native_web_search_used ? "on" : "off"}`,
+    `externalWeb=${diagnostics.external_web_search_used ? "on" : "off"}`,
+    `thinking=${diagnostics.thinking_mode || "-"}`,
+  ];
+  if (diagnostics.option_fallback_used) {
+    parts.push("fallback=on");
+  }
+  return parts.join(", ");
+});
+
+const diagnosticsWarnings = computed(() => {
+  if (props.message.role !== "assistant" || !props.message.modelDiagnostics?.warnings?.length) {
+    return [];
+  }
+  return props.message.modelDiagnostics.warnings;
+});
+
 function citationElementId(label: string) {
   return `${props.message.id}-cite-${label}`;
 }
@@ -191,14 +217,19 @@ async function focusCitation(label: string) {
       </div>
 
       <p v-if="message.failed" class="failed-note">{{ t("message.request_failed_retry") }}</p>
-      <p v-if="modelSummary || usageSummary || costSummary || costHintSummary" class="usage-note">
+      <p v-if="modelSummary || usageSummary || costSummary || costHintSummary || diagnosticsSummary" class="usage-note">
         <span v-if="modelSummary">{{ modelSummary }}</span>
-        <span v-if="modelSummary && (usageSummary || costSummary || costHintSummary)">{{ t("message.separator") }}</span>
+        <span v-if="modelSummary && (usageSummary || costSummary || costHintSummary || diagnosticsSummary)">{{ t("message.separator") }}</span>
         <span v-if="usageSummary">{{ usageSummary }}</span>
-        <span v-if="usageSummary && (costSummary || costHintSummary)">{{ t("message.separator") }}</span>
+        <span v-if="usageSummary && (costSummary || costHintSummary || diagnosticsSummary)">{{ t("message.separator") }}</span>
         <span v-if="costSummary">{{ costSummary }}</span>
         <span v-else-if="costHintSummary">{{ costHintSummary }}</span>
+        <span v-if="(costSummary || costHintSummary) && diagnosticsSummary">{{ t("message.separator") }}</span>
+        <span v-if="diagnosticsSummary">{{ diagnosticsSummary }}</span>
       </p>
+      <ul v-if="diagnosticsWarnings.length" class="diagnostics-warnings">
+        <li v-for="warning in diagnosticsWarnings" :key="warning">{{ warning }}</li>
+      </ul>
 
       <details v-if="message.sources.length" ref="sourceDetailsRef" class="source-details">
         <summary>{{ t("message.sources_count", { count: message.sources.length }) }}</summary>
@@ -369,6 +400,13 @@ async function focusCitation(label: string) {
 .usage-note {
   margin: 0.38rem 0 0;
   color: #64748b;
+  font-size: 0.8rem;
+}
+
+.diagnostics-warnings {
+  margin: 0.35rem 0 0;
+  padding-left: 1rem;
+  color: #b45309;
   font-size: 0.8rem;
 }
 

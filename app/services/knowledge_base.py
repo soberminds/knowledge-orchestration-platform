@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import threading
@@ -35,6 +36,7 @@ from app.services.preview_pdf import get_preview_pdf_cache_path
 
 QuestionMode = Literal["overview", "technical", "comparison", "list", "general"]
 ThinkingMode = Literal["quick", "deep"]
+logger = logging.getLogger(__name__)
 
 
 def _patch_posthog_capture_signature() -> None:
@@ -1349,8 +1351,16 @@ class KnowledgeBaseService:
             "你是什么模型",
             "你是啥模型",
             "你现在用的什么模型",
-            "当前模型",
+            "你调用的什么模型",
+            "你调用的是哪个模型",
+            "你用的是什么模型",
             "你用的是哪个模型",
+            "当前模型",
+            "实际模型",
+            "后端模型",
+            "你是不是千问",
+            "你是不是qwen",
+            "你是不是deepseek",
             "whatmodel",
             "whichmodel",
             "modelareyou",
@@ -1360,10 +1370,39 @@ class KnowledgeBaseService:
     def _build_model_identity_answer(self, model_name: str) -> str:
         provider = self._resolve_provider_name(model_name)
         return (
-            f"当前这次回答调用的模型是：{model_name}（provider: {provider}）。\n"
-            "说明：聊天文本里的自我介绍不一定能准确反映后端实际路由，"
-            "请以消息下方的“模型 + tokens + 成本/定价提示”为准。"
+            f"当前这次回答后端实际路由到的模型是：{model_name}\n"
+            f"Provider：{provider}\n"
+            "说明：模型正文里的自我介绍不一定可靠，请以后端返回的模型诊断信息为准。"
         )
+
+    def _build_model_diagnostics(
+        self,
+        *,
+        requested_model: str | None,
+        model_name: str,
+        provider: str,
+        resolved_model: str | None = None,
+        native_web_search_used: bool = False,
+        external_web_search_used: bool = False,
+        thinking_mode: ThinkingMode = "quick",
+    ) -> dict[str, Any]:
+        return {
+            "requested_model": requested_model or model_name,
+            "provider": provider,
+            "resolved_model": resolved_model or model_name,
+            "native_web_search_used": bool(native_web_search_used),
+            "external_web_search_used": bool(external_web_search_used),
+            "thinking_mode": thinking_mode,
+            "option_fallback_used": False,
+            "warnings": [],
+        }
+
+    def _append_model_diagnostic_warning(self, diagnostics: dict[str, Any] | None, message: str) -> None:
+        if diagnostics is None:
+            return
+        warnings = diagnostics.setdefault("warnings", [])
+        if isinstance(warnings, list) and message not in warnings:
+            warnings.append(message)
 
     def _should_polish_answer(self, answer: str, question_mode: QuestionMode, thinking_mode: ThinkingMode) -> bool:
         compact = re.sub(r"\s+", "", answer)
@@ -1409,6 +1448,7 @@ class KnowledgeBaseService:
         thinking_mode: ThinkingMode,
         stream: bool,
         native_web_search: bool = False,
+        diagnostics: dict[str, Any] | None = None,
     ):
         provider, client = self._resolve_model_client(model_name)
         options = self._completion_options(
@@ -1427,8 +1467,24 @@ class KnowledgeBaseService:
 
         try:
             return client.chat.completions.create(**kwargs)
-        except Exception:
+        except Exception as exc:
             # Some proxy models may not support thinking params.
+            warning = (
+                "模型扩展参数调用失败，后端已使用同一 provider/model 去掉扩展参数重试；"
+                "本次回答的原生联网或深度思考可能没有生效。"
+            )
+            logger.warning(
+                "LLM extended-options call failed; retrying without extra options. "
+                "provider=%s model=%s stream=%s option_keys=%s error=%s",
+                provider,
+                model_name,
+                stream,
+                sorted(options.keys()),
+                exc,
+            )
+            if diagnostics is not None:
+                diagnostics["option_fallback_used"] = True
+            self._append_model_diagnostic_warning(diagnostics, warning)
             fallback_kwargs: dict[str, Any] = {
                 "model": model_name,
                 "messages": messages,
@@ -1560,13 +1616,20 @@ class KnowledgeBaseService:
         external_web_search: bool = False,
     ) -> dict[str, Any]:
         model_name = self.resolve_model(model)
-        self._resolve_model_client(model_name)
+        provider, _ = self._resolve_model_client(model_name)
         if self._is_model_identity_question(question):
             fallback_answer = self._build_model_identity_answer(model_name)
             usage = self._normalize_usage(
                 None,
                 prompt_fallback_text=question,
                 completion_fallback_text=fallback_answer,
+            )
+            diagnostics = self._build_model_diagnostics(
+                requested_model=model,
+                model_name=model_name,
+                provider=provider,
+                resolved_model=model_name,
+                thinking_mode=thinking_mode,
             )
             return {
                 "answer": fallback_answer,
@@ -1576,12 +1639,21 @@ class KnowledgeBaseService:
                 "model": model_name,
                 "usage": usage,
                 "cost_estimate": self._estimate_cost(model_name, usage),
+                "model_diagnostics": diagnostics,
             }
         use_native_web_search, use_external_web_search = self._resolve_web_search_plan(
             model_name=model_name,
             native_web_search=native_web_search,
             external_web_search=external_web_search,
             web_search_legacy=web_search,
+        )
+        diagnostics = self._build_model_diagnostics(
+            requested_model=model,
+            model_name=model_name,
+            provider=provider,
+            native_web_search_used=use_native_web_search,
+            external_web_search_used=use_external_web_search,
+            thinking_mode=thinking_mode,
         )
         prepared = self._prepare_answer(
             question=question,
@@ -1605,6 +1677,7 @@ class KnowledgeBaseService:
                 "model": model_name,
                 "usage": usage,
                 "cost_estimate": self._estimate_cost(model_name, usage),
+                "model_diagnostics": diagnostics,
             }
 
         prepared["messages"][0]["content"] = self._build_system_prompt(
@@ -1618,8 +1691,10 @@ class KnowledgeBaseService:
             thinking_mode=thinking_mode,
             stream=False,
             native_web_search=use_native_web_search,
+            diagnostics=diagnostics,
         )
         resolved_model_name = str(getattr(completion, "model", "") or model_name)
+        diagnostics["resolved_model"] = resolved_model_name
         answer = (completion.choices[0].message.content or "").strip()
 
         if self._should_polish_answer(answer, prepared["question_mode"], thinking_mode):
@@ -1648,6 +1723,7 @@ class KnowledgeBaseService:
             "model": resolved_model_name,
             "usage": usage,
             "cost_estimate": cost_estimate,
+            "model_diagnostics": diagnostics,
         }
 
     def stream_answer(
@@ -1662,13 +1738,20 @@ class KnowledgeBaseService:
         external_web_search: bool = False,
     ) -> Iterator[dict[str, Any]]:
         model_name = self.resolve_model(model)
-        self._resolve_model_client(model_name)
+        provider, _ = self._resolve_model_client(model_name)
         if self._is_model_identity_question(question):
             fallback_answer = self._build_model_identity_answer(model_name)
             usage = self._normalize_usage(
                 None,
                 prompt_fallback_text=question,
                 completion_fallback_text=fallback_answer,
+            )
+            diagnostics = self._build_model_diagnostics(
+                requested_model=model,
+                model_name=model_name,
+                provider=provider,
+                resolved_model=model_name,
+                thinking_mode=thinking_mode,
             )
             yield {"type": "delta", "delta": fallback_answer}
             yield {
@@ -1680,6 +1763,7 @@ class KnowledgeBaseService:
                 "model": model_name,
                 "usage": usage,
                 "cost_estimate": self._estimate_cost(model_name, usage),
+                "model_diagnostics": diagnostics,
             }
             return
         use_native_web_search, use_external_web_search = self._resolve_web_search_plan(
@@ -1687,6 +1771,14 @@ class KnowledgeBaseService:
             native_web_search=native_web_search,
             external_web_search=external_web_search,
             web_search_legacy=web_search,
+        )
+        diagnostics = self._build_model_diagnostics(
+            requested_model=model,
+            model_name=model_name,
+            provider=provider,
+            native_web_search_used=use_native_web_search,
+            external_web_search_used=use_external_web_search,
+            thinking_mode=thinking_mode,
         )
         prepared = self._prepare_answer(
             question=question,
@@ -1714,6 +1806,7 @@ class KnowledgeBaseService:
                 "model": model_name,
                 "usage": usage,
                 "cost_estimate": self._estimate_cost(model_name, usage),
+                "model_diagnostics": diagnostics,
             }
             return
 
@@ -1730,6 +1823,7 @@ class KnowledgeBaseService:
             thinking_mode=thinking_mode,
             stream=True,
             native_web_search=use_native_web_search,
+            diagnostics=diagnostics,
         )
         resolved_model_name = model_name
 
@@ -1737,6 +1831,7 @@ class KnowledgeBaseService:
             chunk_model = getattr(chunk, "model", None)
             if chunk_model:
                 resolved_model_name = str(chunk_model)
+                diagnostics["resolved_model"] = resolved_model_name
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
                 usage_obj = chunk_usage
@@ -1786,5 +1881,7 @@ class KnowledgeBaseService:
             "model": resolved_model_name,
             "usage": usage,
             "cost_estimate": cost_estimate,
+            "model_diagnostics": diagnostics,
         }
+
 

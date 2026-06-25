@@ -91,6 +91,7 @@ function messageRecordToUiMessage(record: ChatMessageRecord): UiMessage | null {
     citations: record.citations ?? [],
     model: record.model ?? undefined,
     usage: record.usage ?? undefined,
+    modelDiagnostics: record.model_diagnostics ?? undefined,
   };
 }
 
@@ -306,6 +307,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     target.model = payload.model ?? undefined;
     target.usage = payload.usage ?? undefined;
     target.costEstimate = payload.cost_estimate ?? undefined;
+    target.modelDiagnostics = payload.model_diagnostics ?? undefined;
     target.streaming = false;
   }
 
