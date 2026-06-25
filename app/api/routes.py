@@ -22,11 +22,16 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Re
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
+from app.core.database import DatabaseUnavailableError
 from app.core.settings import settings
 from app.dependencies import get_chat_memory_service, get_knowledge_base_service
 from app.schemas import (
     CitationRef,
     CostEstimate,
+    ChatConversationListResponse,
+    ChatConversationSummary,
+    ChatMessagePageResponse,
+    ChatMessageRecord,
     ChatRequest,
     ChatOptionsResponse,
     ChatResponse,
@@ -1019,6 +1024,59 @@ async def chat_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get("/chat/conversations", response_model=ChatConversationListResponse)
+async def list_chat_conversations(
+    page: int = 1,
+    page_size: int = 20,
+    chat_memory: ChatMemoryService = Depends(get_chat_memory_service),
+) -> ChatConversationListResponse:
+    try:
+        items, has_more = await run_in_threadpool(
+            chat_memory.list_conversations,
+            page=max(1, page),
+            page_size=max(1, min(50, page_size)),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return ChatConversationListResponse(
+        items=[ChatConversationSummary(**item) for item in items],
+        page=max(1, page),
+        page_size=max(1, min(50, page_size)),
+        has_more=has_more,
+    )
+
+
+@router.get("/chat/conversations/{conversation_id}/messages", response_model=ChatMessagePageResponse)
+async def list_chat_messages(
+    conversation_id: int,
+    limit: int = 30,
+    before_seq_no: int | None = None,
+    chat_memory: ChatMemoryService = Depends(get_chat_memory_service),
+) -> ChatMessagePageResponse:
+    try:
+        items, has_more = await run_in_threadpool(
+            chat_memory.list_messages,
+            conversation_id,
+            limit=max(1, min(100, limit)),
+            before_seq_no=before_seq_no,
+        )
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    seq_values = [int(item["seq_no"]) for item in items]
+    return ChatMessagePageResponse(
+        items=[ChatMessageRecord(**item) for item in items],
+        conversation_id=conversation_id,
+        limit=max(1, min(100, limit)),
+        has_more=has_more,
+        oldest_seq_no=min(seq_values) if seq_values else None,
+        newest_seq_no=max(seq_values) if seq_values else None,
     )
 
 

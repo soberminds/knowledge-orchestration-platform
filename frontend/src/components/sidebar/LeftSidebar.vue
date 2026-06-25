@@ -14,10 +14,11 @@ const props = defineProps<{
   indexedChunks: number;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   (event: "new-chat"): void;
   (event: "select-tab", tab: WorkspaceTab): void;
   (event: "select-session", sessionId: string): void;
+  (event: "load-more-sessions"): void;
 }>();
 
 const { locale, localeOptions, setLocale, t } = useI18n();
@@ -25,6 +26,17 @@ const localeValue = computed<LocaleCode>({
   get: () => locale.value,
   set: (value) => setLocale(value),
 });
+
+function onRecentScroll(event: Event) {
+  const target = event.currentTarget as HTMLElement | null;
+  if (!target) {
+    return;
+  }
+  const distanceToBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+  if (distanceToBottom <= 24) {
+    emit("load-more-sessions");
+  }
+}
 </script>
 
 <template>
@@ -70,7 +82,7 @@ const localeValue = computed<LocaleCode>({
         <span class="recent-count">{{ recentSessions.length }}</span>
       </div>
 
-      <div class="recent-list">
+      <div class="recent-list" @scroll="onRecentScroll">
         <button
           v-for="session in recentSessions"
           :key="session.id"

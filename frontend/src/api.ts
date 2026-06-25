@@ -73,6 +73,46 @@ export interface ChatOptionsResponse {
   thinking_modes: ThinkingMode[];
 }
 
+export interface ChatConversationSummary {
+  id: number;
+  title: string;
+  model?: string | null;
+  message_count: number;
+  preview: string;
+  last_message_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatConversationListResponse {
+  items: ChatConversationSummary[];
+  page: number;
+  page_size: number;
+  has_more: boolean;
+}
+
+export interface ChatMessageRecord {
+  id: number;
+  conversation_id: number;
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  seq_no: number;
+  created_at: string;
+  model?: string | null;
+  citations: CitationRef[];
+  sources: SourceHit[];
+  usage?: TokenUsage | null;
+}
+
+export interface ChatMessagePageResponse {
+  items: ChatMessageRecord[];
+  conversation_id: number;
+  limit: number;
+  has_more: boolean;
+  oldest_seq_no?: number | null;
+  newest_seq_no?: number | null;
+}
+
 export interface ChatRequestPayload {
   question: string;
   conversation_id?: number | null;
@@ -386,6 +426,37 @@ export async function chatStream(
 
 export async function getChatOptions(): Promise<ChatOptionsResponse> {
   return requestJson<ChatOptionsResponse>("/api/chat/options");
+}
+
+export async function listChatConversations(
+  params: { page?: number; page_size?: number } = {},
+): Promise<ChatConversationListResponse> {
+  const query = new URLSearchParams();
+  if (params.page !== undefined) {
+    query.set("page", String(params.page));
+  }
+  if (params.page_size !== undefined) {
+    query.set("page_size", String(params.page_size));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson<ChatConversationListResponse>(`/api/chat/conversations${suffix}`);
+}
+
+export async function listChatMessages(
+  conversationId: number,
+  params: { limit?: number; before_seq_no?: number | null } = {},
+): Promise<ChatMessagePageResponse> {
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.before_seq_no !== undefined && params.before_seq_no !== null) {
+    query.set("before_seq_no", String(params.before_seq_no));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return requestJson<ChatMessagePageResponse>(
+    `/api/chat/conversations/${conversationId}/messages${suffix}`,
+  );
 }
 
 export async function search(payload: { query: string; top_k?: number }): Promise<SearchResponse> {

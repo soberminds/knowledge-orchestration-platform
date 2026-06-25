@@ -37,6 +37,7 @@ const emit = defineEmits<{
   (event: "send"): void;
   (event: "pick-starter", prompt: string): void;
   (event: "viewport-ready", element: HTMLElement | null): void;
+  (event: "load-older"): void;
 }>();
 
 const showStarters = computed(() => props.messages.length <= 1);
@@ -142,7 +143,11 @@ const modelGroups = computed<ModelGroup[]>(() => {
       @refresh="emit('refresh-model-options')"
     />
 
-    <MessageList :messages="messages" @viewport-ready="emit('viewport-ready', $event)" />
+    <MessageList
+      :messages="messages"
+      @viewport-ready="emit('viewport-ready', $event)"
+      @load-older="emit('load-older')"
+    />
 
     <ChatComposer
       :model-value="composer"

@@ -65,7 +65,7 @@ function switchTab(tab: WorkspaceTab) {
 }
 
 function openSession(sessionId: string) {
-  chatWorkspace.switchSession(sessionId);
+  void chatWorkspace.switchSession(sessionId);
   activeTab.value = "chat";
 }
 
@@ -205,6 +205,7 @@ onMounted(async () => {
       @new-chat="createNewChat"
       @select-tab="switchTab"
       @select-session="openSession"
+      @load-more-sessions="chatWorkspace.loadMoreConversations"
     />
 
     <section class="main-workspace">
@@ -240,6 +241,7 @@ onMounted(async () => {
         @send="chatWorkspace.sendChat"
         @pick-starter="chatWorkspace.useStarterPrompt"
         @viewport-ready="chatWorkspace.setViewport"
+        @load-older="chatWorkspace.loadOlderMessages"
       />
 
       <DocumentsWorkspace

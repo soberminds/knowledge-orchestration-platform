@@ -10,6 +10,8 @@ export interface NavTab {
 
 export interface UiMessage {
   id: string;
+  backendMessageId?: number;
+  seqNo?: number;
   role: "user" | "assistant";
   content: string;
   createdAt: number;
@@ -28,4 +30,9 @@ export interface ChatSession {
   title: string;
   updatedAt: number;
   messages: UiMessage[];
+  messagesLoaded?: boolean;
+  messagesLoading?: boolean;
+  olderMessagesLoading?: boolean;
+  hasMoreMessages?: boolean;
+  oldestSeqNo?: number | null;
 }

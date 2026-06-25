@@ -9,6 +9,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: "viewport-ready", element: HTMLElement | null): void;
+  (event: "load-older"): void;
 }>();
 
 const viewportRef = ref<HTMLElement | null>(null);
@@ -20,10 +21,20 @@ onMounted(() => {
 watch(viewportRef, (value) => {
   emit("viewport-ready", value);
 });
+
+function onScroll() {
+  const viewport = viewportRef.value;
+  if (!viewport) {
+    return;
+  }
+  if (viewport.scrollTop <= 24) {
+    emit("load-older");
+  }
+}
 </script>
 
 <template>
-  <section ref="viewportRef" class="messages-scroll">
+  <section ref="viewportRef" class="messages-scroll" @scroll="onScroll">
     <MessageItem
       v-for="message in props.messages"
       :key="message.id"

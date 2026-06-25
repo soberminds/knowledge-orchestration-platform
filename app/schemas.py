@@ -113,6 +113,54 @@ class CostEstimate(BaseModel):
     estimated: bool = True
 
 
+class ChatConversationSummary(BaseModel):
+    """One persisted conversation shown in the recent-session list."""
+
+    id: int
+    title: str
+    model: str | None = None
+    message_count: int = 0
+    preview: str = ""
+    last_message_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class ChatConversationListResponse(BaseModel):
+    """Paged conversation list for the current local user."""
+
+    items: list[ChatConversationSummary]
+    page: int
+    page_size: int
+    has_more: bool = False
+
+
+class ChatMessageRecord(BaseModel):
+    """One persisted chat message record."""
+
+    id: int
+    conversation_id: int
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str
+    seq_no: int
+    created_at: str
+    model: str | None = None
+    citations: list[CitationRef] = Field(default_factory=list)
+    sources: list[SourceHit] = Field(default_factory=list)
+    usage: TokenUsage | None = None
+
+
+class ChatMessagePageResponse(BaseModel):
+    """Paged messages for one conversation."""
+
+    items: list[ChatMessageRecord]
+    conversation_id: int
+    limit: int
+    has_more: bool = False
+    oldest_seq_no: int | None = None
+    newest_seq_no: int | None = None
+
+
 class SearchRequest(BaseModel):
     """Request payload for /api/search."""
 

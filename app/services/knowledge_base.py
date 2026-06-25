@@ -413,6 +413,37 @@ class KnowledgeBaseService:
             self._vector_store = self._build_vector_store()
         return self._vector_store
 
+    def _is_missing_chroma_collection_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "collection" in message and (
+            "does not exist" in message
+            or "not found" in message
+        )
+
+    def _similarity_search_with_recovery(self, *, query: str, k: int):
+        try:
+            return self.vector_store.similarity_search_with_relevance_scores(query=query, k=k)
+        except Exception as exc:
+            if not self._is_missing_chroma_collection_error(exc):
+                raise
+
+        # Chroma can keep an in-memory collection handle whose id was removed
+        # after a rebuild/reload. Drop that handle and try to reopen by name.
+        self._vector_store = None
+        try:
+            return self.vector_store.similarity_search_with_relevance_scores(query=query, k=k)
+        except Exception as retry_exc:
+            if not self._is_missing_chroma_collection_error(retry_exc):
+                raise
+
+        # If reopening by name still points to a broken collection, rebuild the
+        # index from source files once and retry. The RLock in rebuild_index
+        # keeps this safe when multiple requests arrive together.
+        stats = self.rebuild_index()
+        if stats.chunks_indexed <= 0:
+            return []
+        return self.vector_store.similarity_search_with_relevance_scores(query=query, k=k)
+
     def resolve_available_models(self) -> list[str]:
         models = list(self.settings.available_models)
         if not models:
@@ -596,8 +627,10 @@ class KnowledgeBaseService:
         self.settings.preview_pdf_dir.mkdir(parents=True, exist_ok=True)
 
     def reset_collection(self) -> None:
+        self._vector_store = None
+        client = self._build_chroma_client()
         try:
-            self.vector_store.delete_collection()
+            client.delete_collection(name=self.settings.collection_name)
         except Exception:
             # Normal on first launch or missing collection.
             pass
@@ -672,7 +705,13 @@ class KnowledgeBaseService:
                 metadata = self._normalize_metadata(chunk.metadata)
                 ids.append(self._hash_chunk(chunk.page_content, metadata))
                 normalized_docs.append(Document(page_content=chunk.page_content, metadata=metadata))
-            self.vector_store.add_documents(documents=normalized_docs, ids=ids)
+            try:
+                self.vector_store.add_documents(documents=normalized_docs, ids=ids)
+            except Exception as exc:
+                if not self._is_missing_chroma_collection_error(exc):
+                    raise
+                self._vector_store = self._build_vector_store()
+                self.vector_store.add_documents(documents=normalized_docs, ids=ids)
 
     def _delete_chunks_by_source(self, source_path: str) -> None:
         client = self._build_chroma_client()
@@ -944,7 +983,7 @@ class KnowledgeBaseService:
         best_scores: dict[tuple[str, int | None, int], float] = {}
 
         for query in queries:
-            results = self.vector_store.similarity_search_with_relevance_scores(query=query, k=per_query_limit)
+            results = self._similarity_search_with_recovery(query=query, k=per_query_limit)
             for doc, relevance in results:
                 metadata = doc.metadata or {}
                 page = int(metadata["page"]) if metadata.get("page") is not None else None
@@ -1085,7 +1124,7 @@ class KnowledgeBaseService:
             return []
 
         limit = top_k or self.settings.top_k
-        results = self.vector_store.similarity_search_with_relevance_scores(query=query, k=limit)
+        results = self._similarity_search_with_recovery(query=query, k=limit)
 
         hits: list[SearchHit] = []
         for doc, relevance in results:

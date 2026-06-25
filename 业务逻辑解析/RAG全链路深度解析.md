@@ -3245,3 +3245,71 @@ chat_memory_fact          -> kop_chat_memory_fact
 - **聊天记录最好落 MySQL，并提前预留 `user_id` / `conversation_id`**
 - **长期记忆如果后面要做，再考虑摘要表和向量化检索**
 - **当前项目已经把第一阶段落地成：MySQL 存原始消息，Redis 缓存最近窗口，前端用 `conversation_id` 续接会话**
+
+### 17.12 现在已经补上的会话回显链路
+
+当前项目已经不只是“发送时保存 `conversation_id`”，还补上了刷新后的回读链路。
+
+相关代码位置：
+
+```text
+后端
+├─ app/services/chat_memory.py
+│  ├─ list_conversations()
+│  └─ list_messages()
+├─ app/api/routes.py
+│  ├─ GET /api/chat/conversations
+│  └─ GET /api/chat/conversations/{conversation_id}/messages
+└─ app/schemas.py
+   ├─ ChatConversationSummary
+   ├─ ChatConversationListResponse
+   ├─ ChatMessageRecord
+   └─ ChatMessagePageResponse
+
+前端
+├─ frontend/src/api.ts
+│  ├─ listChatConversations()
+│  └─ listChatMessages()
+├─ frontend/src/composables/useChatWorkspace.ts
+│  ├─ initialize()
+│  ├─ loadConversations()
+│  ├─ loadSessionMessages()
+│  └─ loadOlderMessages()
+├─ frontend/src/components/sidebar/LeftSidebar.vue
+│  └─ 最近会话列表滚到底部加载下一页会话
+└─ frontend/src/components/chat/MessageList.vue
+   └─ 消息列表滚到顶部加载更早消息
+```
+
+刷新页面时的流程是：
+
+```text
+页面初始化
+├─ 前端调用 GET /api/chat/conversations
+├─ 后端按默认本地用户 local-user 查询 kop_chat_conversation
+├─ 前端把数据库会话映射成 ChatSession
+├─ 默认选中最近一条会话
+├─ 前端调用 GET /api/chat/conversations/{id}/messages
+├─ 后端查询 kop_chat_message
+├─ 前端把数据库消息映射成 UiMessage
+└─ 聊天窗口完成回显
+```
+
+这里要特别区分两种“读取历史”：
+
+1. 聊天界面回显历史
+   - 查 MySQL
+   - 走 `list_messages()`
+   - 用于把聊天窗口显示出来
+2. 下一轮问答拿最近上下文
+   - 优先读 Redis 最近窗口
+   - Redis 没有时再查 MySQL
+   - 走 `load_recent_history()`
+   - 用于给 RAG 问答链路拼最近对话上下文
+
+所以：
+
+- **MySQL 是完整聊天历史主库**
+- **Redis 是最近 12 条左右的热缓存**
+- **前端刷新回显主要依赖 MySQL**
+- **模型回答时的最近上下文优先用 Redis 加速**

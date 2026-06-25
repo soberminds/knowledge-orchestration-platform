@@ -148,6 +148,242 @@ class ChatMemoryService:
             return "Chat"
         return text_value[:32] if len(text_value) > 32 else text_value
 
+    def _to_iso(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.isoformat(timespec="seconds")
+        return str(value)
+
+    def _parse_json_value(self, value: Any, fallback: Any) -> Any:
+        if value is None:
+            return fallback
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="ignore")
+        if not isinstance(value, str) or not value.strip():
+            return fallback
+        try:
+            return json.loads(value)
+        except Exception:
+            return fallback
+
+    def _normalize_citation(self, citation: dict[str, Any], index: int) -> dict[str, Any]:
+        chunk_indices = citation.get("chunk_indices") or []
+        if not isinstance(chunk_indices, list):
+            chunk_indices = []
+        normalized_chunk_indices: list[int] = []
+        for value in chunk_indices:
+            try:
+                normalized_chunk_indices.append(int(value))
+            except Exception:
+                continue
+
+        page = citation.get("page")
+        try:
+            page = int(page) if page is not None else None
+        except Exception:
+            page = None
+
+        score = citation.get("score")
+        try:
+            score = float(score) if score is not None else None
+        except Exception:
+            score = None
+
+        return {
+            "label": str(citation.get("label") or f"S{index + 1}"),
+            "source": str(citation.get("source") or "unknown"),
+            "page": page,
+            "chunk_indices": normalized_chunk_indices,
+            "score": score,
+            "preview": str(citation.get("preview") or ""),
+        }
+
+    def _citation_to_source(self, citation: dict[str, Any]) -> dict[str, Any]:
+        chunk_indices = citation.get("chunk_indices") or []
+        chunk_index = 0
+        if isinstance(chunk_indices, list) and chunk_indices:
+            try:
+                chunk_index = int(chunk_indices[0])
+            except Exception:
+                chunk_index = 0
+        return {
+            "source": str(citation.get("source") or "unknown"),
+            "chunk_index": chunk_index,
+            "page": citation.get("page"),
+            "score": citation.get("score"),
+            "preview": str(citation.get("preview") or ""),
+        }
+
+    def list_conversations(self, *, page: int = 1, page_size: int = 20) -> tuple[list[dict[str, Any]], bool]:
+        if text is None:
+            raise DatabaseUnavailableError("SQLAlchemy is not installed.")
+
+        page_value = max(1, int(page or 1))
+        page_size_value = max(1, min(50, int(page_size or 20)))
+        offset = (page_value - 1) * page_size_value
+
+        with session_scope() as session:
+            user_id = self._get_or_create_default_user_id(session)
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        c.id,
+                        c.title,
+                        c.model_name,
+                        c.last_message_at,
+                        c.created_at,
+                        c.updated_at,
+                        (
+                            SELECT COUNT(*)
+                            FROM kop_chat_message m
+                            WHERE m.conversation_id = c.id
+                        ) AS message_count,
+                        (
+                            SELECT m.content
+                            FROM kop_chat_message m
+                            WHERE m.conversation_id = c.id
+                            ORDER BY m.seq_no DESC
+                            LIMIT 1
+                        ) AS preview
+                    FROM kop_chat_conversation c
+                    WHERE c.user_id = :user_id
+                      AND c.status = 1
+                    ORDER BY COALESCE(c.last_message_at, c.updated_at, c.created_at) DESC, c.id DESC
+                    LIMIT :limit_value
+                    OFFSET :offset_value
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "limit_value": page_size_value + 1,
+                    "offset_value": offset,
+                },
+            ).all()
+
+        has_more = len(rows) > page_size_value
+        items: list[dict[str, Any]] = []
+        for row in rows[:page_size_value]:
+            preview = " ".join(str(row[7] or "").split())
+            items.append(
+                {
+                    "id": int(row[0]),
+                    "title": str(row[1] or "") or self._build_title(preview or "Chat"),
+                    "model": str(row[2]) if row[2] is not None else None,
+                    "last_message_at": self._to_iso(row[3]),
+                    "created_at": self._to_iso(row[4]) or "",
+                    "updated_at": self._to_iso(row[5]) or "",
+                    "message_count": int(row[6] or 0),
+                    "preview": preview[:160],
+                }
+            )
+        return items, has_more
+
+    def list_messages(
+        self,
+        conversation_id: int,
+        *,
+        limit: int = 30,
+        before_seq_no: int | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        if text is None:
+            raise DatabaseUnavailableError("SQLAlchemy is not installed.")
+
+        limit_value = max(1, min(100, int(limit or 30)))
+        with session_scope() as session:
+            user_id = self._get_or_create_default_user_id(session)
+            conversation_row = session.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM kop_chat_conversation
+                    WHERE id = :conversation_id
+                      AND user_id = :user_id
+                      AND status = 1
+                    LIMIT 1
+                    """
+                ),
+                {"conversation_id": conversation_id, "user_id": user_id},
+            ).first()
+            if not conversation_row:
+                raise DatabaseUnavailableError(f"Conversation {conversation_id} does not exist for current user.")
+
+            params: dict[str, Any] = {
+                "conversation_id": conversation_id,
+                "limit_value": limit_value + 1,
+            }
+            where_extra = ""
+            if before_seq_no is not None:
+                where_extra = "AND seq_no < :before_seq_no"
+                params["before_seq_no"] = int(before_seq_no)
+
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT
+                        id,
+                        conversation_id,
+                        role,
+                        content,
+                        seq_no,
+                        created_at,
+                        model_name,
+                        citations_json,
+                        meta_json
+                    FROM kop_chat_message
+                    WHERE conversation_id = :conversation_id
+                      AND role IN ('system', 'user', 'assistant', 'tool')
+                      {where_extra}
+                    ORDER BY seq_no DESC
+                    LIMIT :limit_value
+                    """
+                ),
+                params,
+            ).all()
+
+        has_more = len(rows) > limit_value
+        display_rows = list(reversed(rows[:limit_value]))
+        items: list[dict[str, Any]] = []
+        for row in display_rows:
+            citations = self._parse_json_value(row[7], [])
+            if not isinstance(citations, list):
+                citations = []
+            normalized_citations = [
+                self._normalize_citation(item, index)
+                for index, item in enumerate(citations)
+                if isinstance(item, dict)
+            ]
+
+            meta = self._parse_json_value(row[8], {})
+            if not isinstance(meta, dict):
+                meta = {}
+            usage = meta.get("usage")
+            if not isinstance(usage, dict):
+                usage = None
+
+            sources = [
+                self._citation_to_source(citation)
+                for citation in normalized_citations
+            ]
+            items.append(
+                {
+                    "id": int(row[0]),
+                    "conversation_id": int(row[1]),
+                    "role": str(row[2]),
+                    "content": str(row[3] or ""),
+                    "seq_no": int(row[4]),
+                    "created_at": self._to_iso(row[5]) or "",
+                    "model": str(row[6]) if row[6] is not None else None,
+                    "citations": normalized_citations,
+                    "sources": sources,
+                    "usage": usage,
+                }
+            )
+        return items, has_more
+
     def _cache_recent_history(self, conversation_id: int, history: list[ChatHistoryItem]) -> None:
         client = self._safe_redis()
         if client is None:
