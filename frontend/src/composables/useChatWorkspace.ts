@@ -39,6 +39,7 @@ function createWelcomeMessage(welcomeText: string): UiMessage {
 function createSession(seedTitle: string, welcomeText: string): ChatSession {
   return {
     id: createId(),
+    backendConversationId: null,
     title: seedTitle,
     updatedAt: Date.now(),
     messages: [createWelcomeMessage(welcomeText)],
@@ -235,6 +236,7 @@ export function useChatWorkspace(topK: Ref<number>) {
       await chatStream(
         {
           question,
+          conversation_id: session.backendConversationId ?? undefined,
           history,
           top_k: topK.value,
           model: selectedModel.value || undefined,
@@ -248,6 +250,9 @@ export function useChatWorkspace(topK: Ref<number>) {
             await appendDeltaSmoothly(assistantMessage, delta);
           },
           onDone: async (donePayload) => {
+            if (donePayload.conversation_id) {
+              session.backendConversationId = donePayload.conversation_id;
+            }
             applyDonePayload(assistantMessage, donePayload);
             await scrollToBottom();
           },

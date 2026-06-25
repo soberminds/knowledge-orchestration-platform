@@ -129,6 +129,25 @@ class Settings:
     hf_endpoint: str = os.getenv("HF_ENDPOINT", "https://huggingface.co").strip().rstrip("/")
     hf_fallback_endpoint: str = os.getenv("HF_FALLBACK_ENDPOINT", "https://hf-mirror.com").strip().rstrip("/")
 
+    # Chat persistence settings.
+    mysql_url: str = os.getenv("MYSQL_URL", "").strip()
+    mysql_host: str = os.getenv("MYSQL_HOST", "127.0.0.1").strip()
+    mysql_port: int = _env_int("MYSQL_PORT", 3306)
+    mysql_database: str = os.getenv("MYSQL_DATABASE", "KOP").strip()
+    mysql_user: str = os.getenv("MYSQL_USER", "root").strip()
+    mysql_password: str = os.getenv("MYSQL_PASSWORD", "").strip()
+    mysql_charset: str = os.getenv("MYSQL_CHARSET", "utf8mb4").strip()
+    redis_url: str = os.getenv("REDIS_URL", "").strip()
+    redis_host: str = os.getenv("REDIS_HOST", "127.0.0.1").strip()
+    redis_port: int = _env_int("REDIS_PORT", 6379)
+    redis_password: str = os.getenv("REDIS_PASSWORD", "").strip()
+    redis_db: int = _env_int("REDIS_DB", 0)
+    chat_default_username: str = os.getenv("CHAT_DEFAULT_USERNAME", "local-user").strip()
+    chat_recent_message_limit: int = _env_int("CHAT_RECENT_MESSAGE_LIMIT", 12)
+    chat_cache_ttl_sec: int = _env_int("CHAT_CACHE_TTL_SEC", 86400)
+    chat_summary_trigger_message_count: int = _env_int("CHAT_SUMMARY_TRIGGER_MESSAGE_COUNT", 20)
+    chat_summary_target_tokens: int = _env_int("CHAT_SUMMARY_TARGET_TOKENS", 800)
+
     # RAG tuning.
     top_k: int = _env_int("TOP_K", 4)
     chunk_size: int = _env_int("CHUNK_SIZE", 800)

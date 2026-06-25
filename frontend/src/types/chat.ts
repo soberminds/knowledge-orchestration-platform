@@ -24,6 +24,7 @@ export interface UiMessage {
 
 export interface ChatSession {
   id: string;
+  backendConversationId?: number | null;
   title: string;
   updatedAt: number;
   messages: UiMessage[];

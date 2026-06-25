@@ -22,6 +22,7 @@ export interface CitationRef {
 
 export interface ChatResponse {
   answer: string;
+  conversation_id?: number | null;
   rewritten_question: string;
   sources: SourceHit[];
   citations: CitationRef[];
@@ -74,6 +75,7 @@ export interface ChatOptionsResponse {
 
 export interface ChatRequestPayload {
   question: string;
+  conversation_id?: number | null;
   history: HistoryItem[];
   top_k?: number;
   model?: string;
@@ -194,6 +196,7 @@ interface ChatStreamDeltaEvent {
 export interface ChatStreamDoneEvent {
   type: "done";
   answer: string;
+  conversation_id?: number | null;
   rewritten_question: string;
   sources: SourceHit[];
   citations: CitationRef[];

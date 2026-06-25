@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.core.settings import settings
-from app.dependencies import get_knowledge_base_service
+from app.dependencies import get_chat_memory_service, get_knowledge_base_service
 from app.schemas import (
     CitationRef,
     CostEstimate,
@@ -45,6 +45,7 @@ from app.schemas import (
     TokenUsage,
 )
 from app.services.files import TEXT_FILE_EXTENSIONS, read_file_page_text
+from app.services.chat_memory import ChatMemoryService
 from app.services.knowledge_base import KnowledgeBaseService, ModelUnavailableError, SearchHit
 from app.services.onlyoffice import (
     OFFICE_EDITOR_EXTENSIONS,
@@ -127,6 +128,54 @@ def _to_cost_estimate(payload: dict | None) -> CostEstimate | None:
         )
     except Exception:
         return None
+
+
+def _source_hits_payload(hits: list[SearchHit]) -> list[dict[str, Any]]:
+    return [_to_source_hit(hit).model_dump() for hit in hits]
+
+
+def _citation_refs_payload(citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_to_citation_ref(item).model_dump() for item in citations]
+
+
+def _resolve_chat_memory_context(
+    chat_memory: ChatMemoryService,
+    request: ChatRequest,
+) -> tuple[int | None, list]:
+    try:
+        conversation = chat_memory.resolve_conversation(
+            request.conversation_id,
+            title_seed=request.question,
+        )
+        history = chat_memory.resolve_history(conversation.conversation_id, request.history)
+        return conversation.conversation_id, history
+    except Exception as exc:
+        logger.warning("Chat memory is unavailable; falling back to request history: %s", exc)
+        return request.conversation_id, list(request.history)
+
+
+def _save_chat_memory_turn(
+    chat_memory: ChatMemoryService,
+    *,
+    conversation_id: int | None,
+    request: ChatRequest,
+    result: dict[str, Any],
+) -> None:
+    if conversation_id is None:
+        return
+    try:
+        chat_memory.save_turn(
+            conversation_id=conversation_id,
+            question=request.question,
+            answer=str(result.get("answer") or ""),
+            model_name=str(result.get("model") or request.model or "") or None,
+            citations=_citation_refs_payload(result.get("citations", [])),
+            usage=result.get("usage"),
+            rewritten_question=str(result.get("rewritten_question") or ""),
+            question_mode=str(result.get("question_mode") or "") or None,
+        )
+    except Exception as exc:
+        logger.warning("Failed to save chat memory turn: %s", exc)
 
 
 def _resolve_file_path(path_value: str) -> Path:
@@ -861,12 +910,18 @@ async def search(
 async def chat(
     request: ChatRequest,
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+    chat_memory: ChatMemoryService = Depends(get_chat_memory_service),
 ) -> ChatResponse:
+    conversation_id, effective_history = await run_in_threadpool(
+        _resolve_chat_memory_context,
+        chat_memory,
+        request,
+    )
     try:
         result = await run_in_threadpool(
             service.answer,
             request.question,
-            request.history,
+            effective_history,
             request.top_k,
             request.model,
             request.thinking_mode,
@@ -878,8 +933,17 @@ async def chat(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    await run_in_threadpool(
+        _save_chat_memory_turn,
+        chat_memory,
+        conversation_id=conversation_id,
+        request=request,
+        result=result,
+    )
     return ChatResponse(
         answer=result["answer"],
+        conversation_id=conversation_id,
         rewritten_question=result["rewritten_question"],
         sources=[_to_source_hit(hit) for hit in result["hits"]],
         citations=[_to_citation_ref(item) for item in result.get("citations", [])],
@@ -893,12 +957,19 @@ async def chat(
 async def chat_stream(
     request: ChatRequest,
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+    chat_memory: ChatMemoryService = Depends(get_chat_memory_service),
 ) -> StreamingResponse:
+    conversation_id, effective_history = await run_in_threadpool(
+        _resolve_chat_memory_context,
+        chat_memory,
+        request,
+    )
+
     def event_stream() -> Iterator[str]:
         try:
             for event in service.stream_answer(
                 request.question,
-                request.history,
+                effective_history,
                 request.top_k,
                 request.model,
                 request.thinking_mode,
@@ -912,13 +983,26 @@ async def chat_stream(
                     payload = {
                         "type": "done",
                         "answer": event.get("answer", ""),
+                        "conversation_id": conversation_id,
                         "rewritten_question": event.get("rewritten_question", ""),
-                        "sources": [_to_source_hit(hit).model_dump() for hit in event.get("hits", [])],
-                        "citations": [_to_citation_ref(item).model_dump() for item in event.get("citations", [])],
+                        "sources": _source_hits_payload(event.get("hits", [])),
+                        "citations": _citation_refs_payload(event.get("citations", [])),
                         "model": event.get("model", request.model or service.settings.deepseek_model),
                         "usage": usage.model_dump() if usage else None,
                         "cost_estimate": cost_estimate.model_dump() if cost_estimate else None,
                     }
+                    _save_chat_memory_turn(
+                        chat_memory,
+                        conversation_id=conversation_id,
+                        request=request,
+                        result={
+                            "answer": payload["answer"],
+                            "rewritten_question": payload["rewritten_question"],
+                            "citations": event.get("citations", []),
+                            "model": payload["model"],
+                            "usage": event.get("usage"),
+                        },
+                    )
                     yield _sse_payload(payload)
                     continue
                 yield _sse_payload(event)

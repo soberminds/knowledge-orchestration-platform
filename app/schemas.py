@@ -18,6 +18,7 @@ class ChatRequest(BaseModel):
     """Request payload for /api/chat and /api/chat/stream."""
 
     question: str = Field(min_length=1, max_length=4000)
+    conversation_id: int | None = Field(default=None, ge=1)
     history: list[ChatHistoryItem] = Field(default_factory=list)
     top_k: int | None = Field(default=None, ge=1, le=20)
     model: str | None = Field(default=None, min_length=1, max_length=128)
@@ -55,6 +56,7 @@ class ChatResponse(BaseModel):
     """Response payload for /api/chat."""
 
     answer: str
+    conversation_id: int | None = None
     rewritten_question: str
     sources: list[SourceHit]
     citations: list[CitationRef] = Field(default_factory=list)

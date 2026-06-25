@@ -176,6 +176,60 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 
 - 给建索引接口、增量重建接口返回统计信息
 
+#### G. `ChatHistoryItem`
+这是聊天历史里单条消息的标准结构。
+
+位置：
+
+- `app/schemas.py`
+
+它主要包含：
+
+- `role`
+  - 消息角色，只允许 `system` / `user` / `assistant`
+- `content`
+  - 消息正文
+
+它的用途是：
+
+- 前端把最近聊天历史传给后端时使用
+- 后端从 MySQL / Redis 回读最近窗口后，也会重新包装成这个结构
+- `KnowledgeBaseService.answer(...)` 和 `stream_answer(...)` 接收的 `history` 就是 `list[ChatHistoryItem]`
+
+所以你可以把它理解成：
+
+- “进入 RAG 问答链路前，聊天历史的统一消息格式”
+
+#### H. `conversation_id`
+这是新增的“后端会话 ID”。
+
+位置：
+
+- 后端请求 / 响应：`app/schemas.py::ChatRequest`、`ChatResponse`
+- 前端 API 类型：`frontend/src/api.ts`
+- 前端会话状态：`frontend/src/types/chat.ts::ChatSession.backendConversationId`
+
+它解决的问题是：
+
+- 前端本地会话 `id` 只是浏览器里的临时 ID
+- 后端 MySQL 里的会话需要一个真正的数据库主键
+- 同一个前端聊天窗口后续继续提问时，要能告诉后端“我还是这条会话”
+
+当前流程是：
+
+```text
+第一次提问
+├─ 前端没有 conversation_id
+├─ 后端创建 kop_chat_conversation
+├─ 后端返回 conversation_id
+└─ 前端保存为 ChatSession.backendConversationId
+
+后续继续提问
+├─ 前端带上 conversation_id
+├─ 后端按 conversation_id 回读最近消息
+└─ 回答结束后继续把本轮消息写入同一条会话
+```
+
 ### 1.2 再记住这几个核心对象 / 服务
 
 #### A. `KnowledgeBaseService`
@@ -382,6 +436,60 @@ chunk Document
 你可以把它理解成：
 
 - 当前项目里 RAG 主链路的“总导演”
+
+#### 补充：`ChatMemoryService`
+位置：
+
+- `app/services/chat_memory.py`
+
+这是最近新增的“聊天记忆 / 会话持久化”服务。
+
+它不负责文件解析、切片、向量化、Chroma 检索，也不负责调用 LLM。
+
+它负责的是：
+
+- 创建 / 读取默认本地用户
+- 创建 / 读取聊天会话
+- 从 Redis 或 MySQL 回读最近消息窗口
+- 把本轮用户消息写入 MySQL
+- 把本轮助手回复写入 MySQL
+- 保存后刷新 Redis 最近消息缓存
+
+它和 `KnowledgeBaseService` 的关系是：
+
+```text
+ChatMemoryService
+├─ 负责“这是谁的哪条会话、最近聊了什么”
+└─ 输出最近 history
+
+KnowledgeBaseService
+├─ 负责“拿 history + 当前问题 + 知识库证据去生成回答”
+└─ 输出 answer / sources / citations / usage
+```
+
+所以它们的边界很清楚：
+
+- `ChatMemoryService` 管“对话状态”
+- `KnowledgeBaseService` 管“RAG 问答链路”
+
+#### 补充：`database.py` 和 `redis_client.py`
+新增位置：
+
+- `app/core/database.py`
+- `app/core/redis_client.py`
+
+`database.py` 负责：
+
+- 根据 `.env` 拼 MySQL 连接地址
+- 创建 SQLAlchemy engine
+- 提供 `session_scope()` 管理事务提交和回滚
+
+`redis_client.py` 负责：
+
+- 根据 `.env` 创建 Redis 客户端
+- 给 `ChatMemoryService` 做最近消息缓存
+
+这两个文件属于基础设施层，不直接参与 RAG 检索。
 
 #### B. `LocalSentenceTransformerEmbeddings`
 位置：
@@ -688,6 +796,34 @@ vectors = embedder.embed_documents(texts)
 作用：
 
 - 走完整的“检索 + 生成回答”链路
+
+#### K. `_resolve_chat_memory_context(...)`
+位置：
+
+- `app/api/routes.py`
+
+作用：
+
+- 在真正调用 RAG 问答之前，先处理聊天记忆
+- 如果请求里没有 `conversation_id`，就自动创建一条后端会话
+- 如果请求里带了 `conversation_id`，就读取这条会话的最近消息
+- 如果 MySQL / Redis 不可用，就降级使用前端传来的 `history`
+
+它是新增聊天记忆链路的“前置入口”。
+
+#### L. `_save_chat_memory_turn(...)`
+位置：
+
+- `app/api/routes.py`
+
+作用：
+
+- 在模型回答完成以后，把本轮对话写回 MySQL
+- 写入一条 `user` 消息
+- 写入一条 `assistant` 消息
+- 保存引用、usage、改写问题等元信息
+
+它是新增聊天记忆链路的“后置落库入口”。
 
 ### 1.4 这些功能在业务上分别是什么意思？
 
@@ -1122,6 +1258,36 @@ vectors = embedder.embed_documents(texts)
 - 聊天
 - ONLYOFFICE 保存回调后的索引更新
 
+### 2.7 聊天记忆层
+
+负责把“聊天窗口”变成“可持续的后端会话”。
+
+对应代码：
+
+- `app/services/chat_memory.py`
+- `app/core/database.py`
+- `app/core/redis_client.py`
+- `app/api/routes.py`
+
+底层中间件：
+
+- MySQL
+- Redis
+
+当前已经落地的职责：
+
+- MySQL 保存原始聊天记录
+- Redis 缓存最近消息窗口
+- 前端通过 `conversation_id` 关联后端会话
+- 后端回答前回读最近消息
+- 后端回答后保存本轮消息
+
+它和 Chroma 的分工是：
+
+- Chroma 保存“知识库文件切片”
+- MySQL 保存“聊天原始记录”
+- Redis 保存“最近聊天窗口缓存”
+
 ---
 
 ## 3. 完整主流程图
@@ -1197,6 +1363,59 @@ vectors = embedder.embed_documents(texts)
       ├─ 把检索命中的 chunk 组装成上下文
       ├─ 传给 DeepSeek / Qwen / OpenAI 等 LLM
       └─ 由大模型负责最终回答生成
+```
+
+### 补充：当前聊天问答入口新增的会话记忆链路
+
+上面的主流程图主要描述“知识库 RAG 主链路”。
+
+但最近项目又新增了一层“聊天记忆链路”，它包在 RAG 问答链路的前后：
+
+```text
+用户在前端发送问题
+├─ frontend/src/composables/useChatWorkspace.ts
+│  ├─ 如果当前 ChatSession 有 backendConversationId
+│  │  └─ 请求里带 conversation_id
+│  └─ 如果没有
+│     └─ 先不带 conversation_id，让后端创建
+├─ app/api/routes.py::chat() / chat_stream()
+│  ├─ _resolve_chat_memory_context(...)
+│  │  ├─ 调用 ChatMemoryService.resolve_conversation(...)
+│  │  ├─ 新会话：创建 kop_chat_conversation
+│  │  ├─ 老会话：读取已有 kop_chat_conversation
+│  │  └─ 调用 ChatMemoryService.resolve_history(...)
+│  │     ├─ 优先从 Redis 读最近消息窗口
+│  │     ├─ Redis 没有时从 MySQL 读 kop_chat_message
+│  │     └─ 都不可用时降级使用前端传来的 history
+│  ├─ 把 effective_history 交给 KnowledgeBaseService
+│  │  └─ 继续走原来的 RAG 检索 + 生成回答链路
+│  ├─ 模型回答完成
+│  ├─ _save_chat_memory_turn(...)
+│  │  ├─ 写入 user 消息到 kop_chat_message
+│  │  ├─ 写入 assistant 消息到 kop_chat_message
+│  │  ├─ 更新 kop_chat_conversation.last_message_at
+│  │  └─ 刷新 Redis 最近消息缓存
+│  └─ 返回 conversation_id 给前端
+└─ 前端保存 conversation_id
+   └─ session.backendConversationId = donePayload.conversation_id
+```
+
+所以现在一次聊天请求可以拆成三层：
+
+```text
+聊天记忆前置层
+├─ 解析 / 创建会话
+└─ 回读最近消息窗口
+
+RAG 问答层
+├─ 用历史改写检索问题
+├─ 检索 Chroma
+├─ 整理上下文
+└─ 调用 LLM 生成回答
+
+聊天记忆后置层
+├─ 保存本轮 user / assistant 消息
+└─ 刷新 Redis 最近窗口缓存
 ```
 
 ### 3.1 这条链路里，每一步到底是谁在做什么？
@@ -2453,6 +2672,28 @@ DeepSeek 负责的是：
 - 更容易调试
 - 更适合工程扩展
 
+### 10.4 最近新增：回答完成后还要保存聊天记录
+
+以前这里讲到“大模型生成最终回答”基本就结束了。
+
+现在要再补一层：
+
+```text
+LLM 生成回答
+├─ routes.py 收到 answer / citations / usage
+├─ _save_chat_memory_turn(...)
+│  ├─ 把当前用户问题写成一条 user 消息
+│  ├─ 把模型回答写成一条 assistant 消息
+│  ├─ citations_json 保存引用片段
+│  ├─ meta_json 保存 rewritten_question / usage 等信息
+│  └─ 更新 conversation 的 last_message_at
+└─ ChatMemoryService 刷新 Redis 最近消息缓存
+```
+
+所以现在“最终回答生成”之后，还有一个**会话状态持久化**动作。
+
+这个动作不属于 RAG 检索本身，但属于完整聊天产品链路。
+
 ---
 
 ## 11. 这条链路里有哪些“中间件”和“模型”？
@@ -2489,6 +2730,14 @@ DeepSeek 负责的是：
    - 老 Office 格式兼容和转换辅助
    - 不是知识库向量检索核心中间件
 
+7. MySQL
+   - 保存聊天用户、会话、消息、摘要和长期记忆
+   - 当前已经实际使用 `kop_user`、`kop_chat_conversation`、`kop_chat_message`
+
+8. Redis
+   - 缓存最近聊天窗口
+   - 当前用于减少每次聊天都从 MySQL 回读最近消息的成本
+
 ---
 
 ## 12. 当前项目已经有的优化与暂时还没有的优化
@@ -2504,6 +2753,10 @@ DeepSeek 负责的是：
 - 检索结果去重
 - 上下文分组与引用标签生成
 - 简单 code-heavy 片段识别
+- 聊天会话持久化
+- MySQL 原始聊天记录保存
+- Redis 最近消息窗口缓存
+- `conversation_id` 前后端对齐
 
 ### 12.2 暂时还没有明显看到的
 
@@ -2515,6 +2768,10 @@ DeepSeek 负责的是：
 - 标题树 / 章节树切片
 - 查询改写模型
 - 结果摘要缓存
+- 自动会话摘要生成
+- 长期记忆事实抽取
+- 多用户登录鉴权
+- 会话列表 / 重命名 / 删除接口
 
 所以当前项目已经不是“最原始 demo”，
 但也还没走到“高级检索架构”的阶段。
@@ -2574,6 +2831,28 @@ DeepSeek 负责的是：
 - `DEEPSEEK_BASE_URL`
 - 供应商路由配置
 
+### 13.5 MySQL / Redis 聊天记忆失败
+
+影响：
+
+- 聊天记录无法落库
+- 后端无法从数据库回读最近消息窗口
+- Redis 缓存失效时会退回 MySQL
+
+当前代码的兜底策略是：
+
+- MySQL / Redis 不可用时，聊天接口不会直接崩掉
+- `routes.py::_resolve_chat_memory_context(...)` 会降级使用前端传来的 `history`
+- `_save_chat_memory_turn(...)` 保存失败时只记录 warning，不影响本次回答返回
+
+排查：
+
+- `.env` 里的 `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_PASSWORD`
+- `.env` 里的 `REDIS_HOST` / `REDIS_PORT`
+- Docker 中间件是否启动
+- `requirements.txt` 里的 `SQLAlchemy` / `PyMySQL` / `redis` 是否安装到 `.venv311`
+- `KOP` 数据库里是否已经执行 `业务逻辑解析/KOP聊天记忆建表.sql`
+
 ---
 
 ## 14. 一句话记忆版
@@ -2588,6 +2867,12 @@ DeepSeek 负责的是：
 6. Chroma 按向量相似度找最相关 chunk
 7. `knowledge_base.py` 再把命中结果整理成上下文
 8. DeepSeek 最后根据上下文生成回答
+
+如果把最近新增的聊天记忆也一起放进去，可以继续记成：
+
+9. `ChatMemoryService` 先回读最近会话窗口
+10. `routes.py` 把最近窗口交给 `KnowledgeBaseService`
+11. 回答结束后，把本轮 user / assistant 消息写回 MySQL，并刷新 Redis 缓存
 
 ---
 
@@ -2611,6 +2896,13 @@ DeepSeek 负责的是：
 ### 第四层：再看 API 怎么触发这些链路
 
 - `app/api/routes.py`
+
+### 第五层：再看聊天记忆怎么接入
+
+- `app/services/chat_memory.py`
+- `app/core/database.py`
+- `app/core/redis_client.py`
+- `frontend/src/composables/useChatWorkspace.ts`
 
 ---
 
@@ -2636,6 +2928,11 @@ ONLYOFFICE 和 LibreOffice 都只是“文档生态配套能力”，
 - 向量检索
 - 大模型生成
 
+如果从完整聊天产品链路看，现在还额外包括：
+
+- MySQL 聊天记录持久化
+- Redis 最近消息窗口缓存
+- 前后端 `conversation_id` 会话续接
 
 
 
@@ -2647,3 +2944,304 @@ ONLYOFFICE 和 LibreOffice 都只是“文档生态配套能力”，
 
 
 
+
+
+---
+
+## 17. 上下文长度、聊天记录存储、用户关联，怎么设计更合理？
+
+这个问题非常重要，因为它直接决定后面项目能不能“越聊越像个产品”，而不是只会一次性问答。
+
+### 17.1 先说上下文长度：为什么它总是不够？
+
+LLM 的上下文长度有限，意思是：
+
+- 你不能把无限长的历史消息都塞进去
+- 也不能把整个知识库全文都塞进去
+- 更不能一直把所有轮次聊天原封不动发给模型
+
+所以在工程上，必须做“上下文预算分配”。
+
+这个预算通常要分给三部分：
+
+1. 用户当前问题
+2. 对话历史里真正有用的几轮
+3. 检索回来的知识库证据
+
+如果这三块都无限堆，最后就会出现：
+
+- 模型输入超长
+- 费用上涨
+- 检索噪声变大
+- 关键问题反而被淹没
+
+### 17.2 当前项目里已经做了什么？
+
+当前项目已经有一部分“短期上下文压缩”思路了：
+
+- `_compose_search_query(question, history)` 只取最近几轮历史去改写检索问题
+- `_prepare_answer(...)` 里会把历史消息拼进提示词，但不是无限拼
+- `_build_context(...)` 会对检索命中的 chunk 再做分组、裁剪和引用整理
+- `ChatMemoryService.resolve_history(...)` 会优先读取后端最近会话窗口
+- `routes.py` 会在真正回答前先处理 `conversation_id`
+- 回答完成后，后端会把 user / assistant 两条消息写入 MySQL
+- Redis 会缓存最近消息窗口，减少重复读库
+
+也就是说，项目不是“全量历史直塞”，而是已经开始做：
+
+- 取最近的、相关的、能帮助回答的内容
+
+### 17.3 想尽可能提升上下文“记忆感”，通常怎么做？
+
+这里要先分清两种“记忆”：
+
+#### A. 短期记忆
+指的是：
+
+- 最近几轮对话还能被模型看见
+
+做法一般是：
+
+- 只保留最近 N 轮
+- 或者只保留最近几轮的 user/assistant 消息
+- 再配合一段“会话摘要”
+
+#### B. 长期记忆
+指的是：
+
+- 历史上很久之前的内容也能被再次找回来
+
+做法一般是：
+
+- 把对话记录落库
+- 再做摘要表 / 主题索引 / 向量索引
+- 需要时按用户、会话、主题检索回来
+
+### 17.4 对当前项目来说，最实用的上下文策略是什么？
+
+我建议你把上下文分成三层：
+
+#### 第一层：当前轮问题
+- 一定保留
+- 这是最核心的输入
+
+#### 第二层：最近几轮对话
+- 保留最近 3 ~ 8 轮，具体看长度
+- 如果历史很长，先做摘要，再放进 prompt
+
+#### 第三层：知识库证据
+- 只放检索命中的少量高质量 chunk
+- 不要把所有命中文本都原封不动塞进去
+
+这样做的好处是：
+
+- 模型不会被长历史压垮
+- 关键上下文不会被淹没
+- 成本可控
+- 回答也更稳定
+
+### 17.5 聊天记录要怎么存，后面才好和用户关联？
+
+这个我建议你提前分三张表思考，而不是只做一张大表。
+
+当前项目已经实际落地的表名是：
+
+- `kop_user`
+- `kop_chat_conversation`
+- `kop_chat_message`
+
+当前项目已经预留但还没有正式启用完整业务逻辑的是：
+
+- `kop_chat_conversation_summary`
+- `kop_chat_memory_fact`
+
+对应建表脚本是：
+
+- `业务逻辑解析/KOP聊天记忆建表.sql`
+
+#### 表 1：`chat_conversation`
+保存“会话本身”。
+
+适合放：
+
+- 会话 id
+- 用户 id
+- 会话标题
+- 创建时间
+- 最后更新时间
+- 是否归档 / 是否删除
+
+它解决的问题是：
+
+- 这一串消息属于哪个会话
+- 这个会话属于哪个用户
+
+#### 表 2：`chat_message`
+保存“每一条消息”。
+
+适合放：
+
+- 消息 id
+- 会话 id
+- 用户 id
+- 角色（user / assistant / system）
+- 消息内容
+- 消息顺序
+- token 数
+- 创建时间
+
+它解决的问题是：
+
+- 一段会话里每一轮具体说了什么
+- 方便回放、导出、追踪上下文
+
+#### 表 3：`chat_conversation_summary` 或 `conversation_memory`
+保存“摘要记忆”。
+
+适合放：
+
+- 会话 id
+- 摘要内容
+- 摘要版本
+- 最近总结时间
+- 是否最新
+
+它解决的问题是：
+
+- 长会话不可能把所有历史都塞进 prompt
+- 但又希望保留前文脉络
+
+所以摘要是很有用的中间层。
+
+### 17.6 一个比较稳的 MySQL 建表方向
+
+下面是一个偏实用的结构思路，你后面如果准备上 Docker 里的 MySQL，可以按这个方向预留：
+
+这段现在可以分成两层看：
+
+1. 下面是通用设计思路
+2. 当前项目实际落地时，把表名前缀统一成了 `kop_`
+
+```text
+通用设计名                  当前项目实际表名
+sys_user                  -> kop_user
+chat_conversation         -> kop_chat_conversation
+chat_message              -> kop_chat_message
+chat_conversation_summary -> kop_chat_conversation_summary
+chat_memory_fact          -> kop_chat_memory_fact
+```
+
+#### `sys_user`
+如果你后面有登录系统，建议先有用户表。
+
+字段大致包括：
+
+- `id`
+- `username`
+- `password_hash`
+- `nickname`
+- `status`
+- `created_at`
+- `updated_at`
+
+#### `chat_conversation`
+
+字段建议：
+
+- `id`
+- `user_id`
+- `title`
+- `scene`
+- `created_at`
+- `updated_at`
+- `last_message_at`
+- `is_archived`
+
+#### `chat_message`
+
+字段建议：
+
+- `id`
+- `conversation_id`
+- `user_id`
+- `role`
+- `content`
+- `token_count`
+- `model`
+- `created_at`
+- `parent_message_id`（可选，预留多分支对话）
+
+#### `chat_conversation_summary`
+
+字段建议：
+
+- `id`
+- `conversation_id`
+- `summary_text`
+- `summary_version`
+- `last_summary_at`
+- `created_at`
+- `updated_at`
+
+### 17.7 为什么我建议你预留 `user_id` 和 `conversation_id`？
+
+因为后面你大概率会遇到这些需求：
+
+- 按用户查历史
+- 按会话继续问
+- 按用户做权限隔离
+- 按用户统计使用量
+- 按会话做导出 / 删除 / 归档
+
+如果一开始不预留，后面再补会很痛。
+
+### 17.8 向量库要不要也存聊天记录？
+
+一般建议分开看：
+
+- **聊天原文**：放 MySQL 这种关系库
+- **聊天摘要 / 长期记忆**：可以考虑再做一份向量索引
+- **知识库内容**：继续放现在的 Chroma
+
+也就是说：
+
+- MySQL 更适合做“真相记录”
+- 向量库更适合做“语义记忆检索”
+
+### 17.9 对当前项目最推荐的落地顺序
+
+如果你现在还在开发期，我建议这样来：
+
+1. 先把 `chat_conversation` 和 `chat_message` 跑通
+2. 再加 Redis 最近消息缓存
+3. 再做 `chat_conversation_summary`
+4. 最后再考虑把“长期记忆”单独向量化
+
+当前项目已经完成了前两步：
+
+- `kop_chat_conversation`
+- `kop_chat_message`
+- Redis 最近消息窗口缓存
+- 前后端 `conversation_id` 对齐
+- `.env` / `.env.example` 已加入 MySQL、Redis、聊天窗口配置
+
+这样比较稳，不会一开始就把架构做得太重。
+
+### 17.10 结合你现在的 Docker 中间件环境，最适合的后续方向
+
+你已经把中间件集中到 `C:\Users\30372\Desktop\docker-middleware` 这一类公共目录了，那后面数据库设计上也建议保持这种思路：
+
+- MySQL 负责结构化存储
+- Redis 负责短期缓存 / 会话状态 / 限流
+- Chroma 负责知识库向量检索
+- 对话历史先进 MySQL
+- 热门会话状态再进 Redis
+
+这样后面迁移到云服务器时，边界会很清楚。
+
+### 17.11 最后给你一句最好记的话
+
+- **上下文长度靠“分层 + 截断 + 摘要 + 检索”来控制，不是靠把所有历史都塞进 prompt**
+- **聊天记录最好落 MySQL，并提前预留 `user_id` / `conversation_id`**
+- **长期记忆如果后面要做，再考虑摘要表和向量化检索**
+- **当前项目已经把第一阶段落地成：MySQL 存原始消息，Redis 缓存最近窗口，前端用 `conversation_id` 续接会话**
