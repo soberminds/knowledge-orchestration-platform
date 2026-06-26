@@ -255,13 +255,12 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 #### 扫描文件是干什么？
 意思是：
 
-- 去看 `data/docs` 和 `data/uploads` 里现在有哪些受支持的源文件
+- 去看 `data/user_docs` 里现在有哪些受支持的源文件
 - 也就是先确定“这次知识库里有哪些文件要参与建索引”
 
 对应动作主要是：
 
 - `iter_source_files()`
-- `source_file_infos()`
 - `load_corpus()`
 
 所以“扫描文件”还不是读文件正文，它更像是：
@@ -729,7 +728,7 @@ vectors = embedder.embed_documents(texts)
 
 作用：
 
-- 扫描 `data/docs` 和 `data/uploads`
+- 扫描 `data/user_docs`
 - 返回受支持的文件路径列表
 
 #### B. `load_documents_from_file(path)`
@@ -1297,8 +1296,7 @@ vectors = embedder.embed_documents(texts)
 ```text
 原始文件
 ├─ 文件来源
-│  ├─ 本地文档目录：data/docs
-│  └─ 上传目录：data/uploads
+│  └─ 新文档库存储目录：data/user_docs
 ├─ 文件扫描器
 │  └─ app/services/files.py::iter_source_files()
 │     └─ 找到受支持的扩展名，交给后面的解析器
@@ -1421,7 +1419,7 @@ RAG 问答层
 ### 3.1 这条链路里，每一步到底是谁在做什么？
 
 #### 1）文件扫描是谁做的？
-- `iter_source_files()` 负责扫描 `settings.docs_dir` 和 `settings.uploads_dir`
+- `iter_source_files()` 负责扫描 `settings.user_docs_dir`
 - 它只负责“找文件”，不负责读内容，不负责分块
 
 #### 2）文件内容是谁读出来的？
@@ -1555,17 +1553,15 @@ DeepSeek 不负责找 chunk。
 
 ### 4.1 文件先放在哪里？
 
-当前主要有两个来源：
+当前主要来源是：
 
-1. `data/docs`
-   - 本地已有文档目录
-2. `data/uploads`
-   - 用户上传后的文件目录
+1. `data/user_docs`
+   - 新文档库的真实文件存储目录
+   - 文件由 `DocumentLibraryService` 上传并记录到 `kop_doc_file`
 
 对应代码：
 
-- `settings.docs_dir`
-- `settings.uploads_dir`
+- `settings.user_docs_dir`
 - `iter_source_files()`
 
 这里先做的事情只是：
@@ -1648,7 +1644,7 @@ DeepSeek 不负责找 chunk。
 Document(
     page_content='这是文档正文...',
     metadata={
-        'source': 'data/docs/demo.md',
+        'source': 'data/user_docs/1/root/demo.md',
         'file_name': 'demo.md',
         'extension': '.md',
     },
@@ -1661,7 +1657,7 @@ Document(
 Document(
     page_content='这是第 3 页抽出来的文本...',
     metadata={
-        'source': 'data/uploads/report.pdf',
+        'source': 'data/user_docs/1/12/report.pdf',
         'file_name': 'report.pdf',
         'extension': '.pdf',
         'page': 3,

@@ -7,6 +7,7 @@ const props = defineProps<{
   health: OfficeHealthResponse | null;
   loading: boolean;
   error?: string;
+  compact?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -35,7 +36,7 @@ function boolLabel(value: boolean | null | undefined) {
 </script>
 
 <template>
-  <section class="office-health-panel">
+  <section class="office-health-panel" :class="{ 'is-compact': compact }">
     <header class="panel-head">
       <div>
         <h3>{{ t("documents.office_health_title") }}</h3>
@@ -140,6 +141,11 @@ function boolLabel(value: boolean | null | undefined) {
   background: linear-gradient(180deg, #f7fbff 0%, #ffffff 58%);
   display: grid;
   gap: 9px;
+}
+
+.office-health-panel.is-compact {
+  margin: 0;
+  border-radius: 12px;
 }
 
 .panel-head {

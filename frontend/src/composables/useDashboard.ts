@@ -1,7 +1,9 @@
 import { computed, ref } from "vue";
 import { useI18n } from "./useI18n";
 import {
+  createDocumentFolder as createDocumentFolderApi,
   deleteDocument as deleteDocumentApi,
+  deleteDocumentFolder as deleteDocumentFolderApi,
   getHealth,
   getOfficeHealth,
   listDocuments,
@@ -37,6 +39,7 @@ export function useDashboard() {
 
   const statusText = computed(() => health.value?.status ?? t("status.loading"));
   const indexedChunks = computed(() => health.value?.indexed_chunks ?? 0);
+  const documentCount = computed(() => documents.value.filter((item) => !item.is_directory).length);
 
   function setSelectedFiles(files: File[]) {
     selectedFiles.value = files;
@@ -92,7 +95,7 @@ export function useDashboard() {
     }
   }
 
-  async function uploadAndBuild() {
+  async function uploadAndBuild(folderPath = "", parentId?: number | null) {
     if (!selectedFiles.value.length) {
       errorMessage.value = t("error.select_files_first");
       return;
@@ -101,7 +104,7 @@ export function useDashboard() {
     uploading.value = true;
     clearError();
     try {
-      await uploadDocuments(selectedFiles.value);
+      await uploadDocuments(selectedFiles.value, folderPath, parentId);
       selectedFiles.value = [];
       await refreshDashboard();
     } catch (error) {
@@ -112,11 +115,36 @@ export function useDashboard() {
     }
   }
 
+  async function createDocumentFolder(parentPath: string, name: string, parentId?: number | null) {
+    clearError();
+    try {
+      await createDocumentFolderApi(parentPath, name, parentId);
+      await refreshDashboard();
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : t("error.create_folder_failed");
+      throw error;
+    }
+  }
+
   async function deleteDocument(path: string) {
     deletingPath.value = path;
     clearError();
     try {
       await deleteDocumentApi(path);
+      await refreshDashboard();
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : t("error.delete_document_failed");
+      throw error;
+    } finally {
+      deletingPath.value = "";
+    }
+  }
+
+  async function deleteDocumentFolder(path: string) {
+    deletingPath.value = path;
+    clearError();
+    try {
+      await deleteDocumentFolderApi(path);
       await refreshDashboard();
     } catch (error) {
       errorMessage.value = error instanceof Error ? error.message : t("error.delete_document_failed");
@@ -167,11 +195,14 @@ export function useDashboard() {
     officeHealthError,
     statusText,
     indexedChunks,
+    documentCount,
     setSelectedFiles,
     refreshDashboard,
     refreshOfficeHealth,
     uploadAndBuild,
+    createDocumentFolder,
     deleteDocument,
+    deleteDocumentFolder,
     runIngest,
     clearError,
   };

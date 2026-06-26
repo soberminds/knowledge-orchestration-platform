@@ -81,8 +81,7 @@ class Settings:
 
     root_dir: Path = ROOT_DIR
     data_dir: Path = ROOT_DIR / "data"
-    docs_dir: Path = ROOT_DIR / "data" / "docs"
-    uploads_dir: Path = ROOT_DIR / "data" / "uploads"
+    user_docs_dir: Path = ROOT_DIR / "data" / "user_docs"
     chroma_dir: Path = ROOT_DIR / "data" / "chroma_db"
     preview_pdf_dir: Path = ROOT_DIR / "data" / "preview_pdf"
     collection_name: str = os.getenv("CHROMA_COLLECTION", "rga_knowledge_base")

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import os
 from pathlib import Path
 import csv
@@ -62,27 +61,20 @@ TABLE_VIEW_MAX_ROWS = 600
 TABLE_VIEW_MAX_COLUMNS = 50
 
 
+def _source_roots() -> tuple[Path, ...]:
+    return (settings.user_docs_dir,)
+
+
 def iter_source_files() -> list[Path]:
-    """Scan data/docs and data/uploads for supported files."""
+    """Scan controlled document roots for supported files."""
     files: list[Path] = []
-    for base_dir in (settings.docs_dir, settings.uploads_dir):
+    for base_dir in _source_roots():
         if not base_dir.exists():
             continue
         for path in sorted(base_dir.rglob("*")):
             if path.is_file() and path.suffix.lower() in settings.supported_extensions:
                 files.append(path)
     return files
-
-
-def file_info(path: Path) -> dict[str, str | int]:
-    """Build metadata for frontend file list."""
-    stat = path.stat()
-    return {
-        "path": str(path.relative_to(settings.root_dir)).replace("\\", "/"),
-        "size_bytes": stat.st_size,
-        "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-        "extension": path.suffix.lower(),
-    }
 
 
 def _relative_source(path: Path) -> str:

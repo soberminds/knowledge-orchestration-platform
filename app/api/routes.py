@@ -18,13 +18,13 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse, urlunparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.core.database import DatabaseUnavailableError
 from app.core.settings import settings
-from app.dependencies import get_chat_memory_service, get_knowledge_base_service
+from app.dependencies import get_chat_memory_service, get_document_library_service, get_knowledge_base_service
 from app.schemas import (
     CitationRef,
     CostEstimate,
@@ -33,6 +33,8 @@ from app.schemas import (
     ChatMessagePageResponse,
     ChatMessageRecord,
     ChatRequest,
+    CreateDocumentFolderRequest,
+    CreateDocumentFolderResponse,
     ModelDiagnostics,
     ChatOptionsResponse,
     ChatResponse,
@@ -52,6 +54,7 @@ from app.schemas import (
 )
 from app.services.files import TEXT_FILE_EXTENSIONS, read_file_page_text
 from app.services.chat_memory import ChatMemoryService
+from app.services.document_library import DocumentLibraryService
 from app.services.knowledge_base import KnowledgeBaseService, ModelUnavailableError, SearchHit
 from app.services.onlyoffice import (
     OFFICE_EDITOR_EXTENSIONS,
@@ -208,7 +211,9 @@ def _resolve_file_path(path_value: str) -> Path:
         raise HTTPException(status_code=400, detail="path is required")
 
     candidate = (settings.root_dir / path_value).resolve()
-    allowed_roots = [settings.docs_dir.resolve(), settings.uploads_dir.resolve()]
+    allowed_roots = [
+        settings.user_docs_dir.resolve(),
+    ]
     if not any(root == candidate or root in candidate.parents for root in allowed_roots):
         raise HTTPException(status_code=403, detail="File path is not allowed.")
     if not candidate.exists() or not candidate.is_file():
@@ -525,7 +530,7 @@ def _probe_onlyoffice_health() -> OfficeHealthResponse:
         else:
             notes.append("CommandService endpoint is unreachable from backend.")
 
-    sample_token = build_path_token("data/uploads/healthcheck.docx", _onlyoffice_callback_secret(), settings.onlyoffice_callback_ttl_sec)
+    sample_token = build_path_token("data/user_docs/healthcheck.docx", _onlyoffice_callback_secret(), settings.onlyoffice_callback_ttl_sec)
     callback_base = backend_internal_url
     if not callback_base:
         parsed_backend = urlparse(backend_url)
@@ -584,43 +589,115 @@ async def health(service: KnowledgeBaseService = Depends(get_knowledge_base_serv
     )
 
 
+def _document_info_from_payload(item: dict[str, Any]) -> DocumentInfo:
+    return DocumentInfo(
+        id=int(item["id"]) if item.get("id") is not None else None,
+        path=str(item.get("path") or ""),
+        display_path=str(item.get("display_path") or "") or None,
+        size_bytes=int(item.get("size_bytes", 0) or 0),
+        modified_at=str(item.get("modified_at") or ""),
+        extension=str(item.get("extension") or ""),
+        is_directory=bool(item.get("is_directory", False)),
+        parent_id=int(item["parent_id"]) if item.get("parent_id") is not None else None,
+        folder_id=int(item["folder_id"]) if item.get("folder_id") is not None else None,
+        name=str(item.get("name") or "") or None,
+        source_type=str(item.get("source_type") or "db"),
+    )
+
+
 @router.get("/documents", response_model=list[DocumentInfo])
-async def list_documents(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> list[DocumentInfo]:
+async def list_documents(
+    library: DocumentLibraryService = Depends(get_document_library_service),
+) -> list[DocumentInfo]:
     try:
-        infos: list[DocumentInfo] = []
-        for item in service.source_file_infos():
-            infos.append(
-                DocumentInfo(
-                    path=str(item["path"]),
-                    size_bytes=int(item["size_bytes"]),
-                    modified_at=str(item["modified_at"]),
-                    extension=str(item["extension"]),
-                )
-            )
-        return infos
+        raw_items = await run_in_threadpool(library.list_documents)
+        infos_by_path: dict[str, DocumentInfo] = {}
+        for item in raw_items:
+            info = _document_info_from_payload(item)
+            key = f"{info.source_type}:{info.path}"
+            infos_by_path[key] = info
+
+        return sorted(
+            infos_by_path.values(),
+            key=lambda item: (
+                (item.display_path or item.path).lower(),
+                not item.is_directory,
+            ),
+        )
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        logger.warning("List documents failed, returning empty list: %s", exc)
-        return []
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.delete("/documents", response_model=IngestResponse)
-async def delete_document(
+@router.post("/document-folders", response_model=CreateDocumentFolderResponse)
+async def create_document_folder(
+    payload: CreateDocumentFolderRequest,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+) -> CreateDocumentFolderResponse:
+    try:
+        created = await run_in_threadpool(library.create_folder, payload.parent_path, payload.parent_id, payload.name)
+        path = str(created.get("path") or "")
+        return CreateDocumentFolderResponse(
+            path=path,
+            id=int(created["id"]) if created.get("id") is not None else None,
+            parent_id=int(created["parent_id"]) if created.get("parent_id") is not None else None,
+            created=True,
+        )
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.delete("/document-folders", response_model=IngestResponse)
+async def delete_document_folder(
     path: str,
+    library: DocumentLibraryService = Depends(get_document_library_service),
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
 ) -> IngestResponse:
-    file_path = _resolve_file_path(path)
     try:
-        stats = await run_in_threadpool(service.delete_source_file_and_rebuild, file_path)
+        result = await run_in_threadpool(library.delete_folder, path)
+        deleted_sources = [str(item) for item in result.get("source_files", []) if item]
+        stats = await run_in_threadpool(service.rebuild_index)
+        return IngestResponse(
+            documents_loaded=stats.documents_loaded,
+            chunks_indexed=stats.chunks_indexed,
+            source_files=stats.source_files + deleted_sources,
+        )
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return IngestResponse(
-        documents_loaded=stats.documents_loaded,
-        chunks_indexed=stats.chunks_indexed,
-        source_files=stats.source_files,
-    )
+
+@router.delete("/documents", response_model=IngestResponse)
+async def delete_document(
+    path: str,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+) -> IngestResponse:
+    try:
+        result = await run_in_threadpool(library.delete_document, path)
+        deleted_path = str(result.get("path") or path)
+        stats = await run_in_threadpool(service.rebuild_index)
+        return IngestResponse(
+            documents_loaded=stats.documents_loaded,
+            chunks_indexed=stats.chunks_indexed,
+            source_files=stats.source_files + [deleted_path],
+        )
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/file")
@@ -896,13 +973,23 @@ async def ingest(service: KnowledgeBaseService = Depends(get_knowledge_base_serv
 @router.post("/upload", response_model=IngestResponse)
 async def upload_files(
     files: list[UploadFile] = File(...),
+    folder_path: str = Form(default=""),
+    parent_id: int | None = Form(default=None),
+    library: DocumentLibraryService = Depends(get_document_library_service),
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
 ) -> IngestResponse:
     if not files:
         raise HTTPException(status_code=400, detail="Please upload at least one file.")
 
     try:
-        await service.save_uploaded_files(files)
+        await library.save_uploaded_files(files, folder_path=folder_path, parent_id=parent_id)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    try:
         stats = await run_in_threadpool(service.rebuild_index)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

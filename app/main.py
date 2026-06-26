@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """应用启动时做一次索引重建。
 
-    这样你把文档放进 data/docs 后，后端启动就能自动可用。
+    这样你通过文档库上传或编辑文件后，后端启动就能自动重建可用索引。
     """
     service = get_knowledge_base_service()
     try:

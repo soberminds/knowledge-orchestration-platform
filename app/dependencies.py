@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from app.services.chat_memory import ChatMemoryService
+from app.services.document_library import DocumentLibraryService
 from app.services.knowledge_base import KnowledgeBaseService
 
 
@@ -18,3 +19,9 @@ def get_knowledge_base_service() -> KnowledgeBaseService:
 def get_chat_memory_service() -> ChatMemoryService:
     """Create one chat-memory service for the backend process."""
     return ChatMemoryService()
+
+
+@lru_cache(maxsize=1)
+def get_document_library_service() -> DocumentLibraryService:
+    """Create one document-library service for the backend process."""
+    return DocumentLibraryService()

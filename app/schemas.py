@@ -201,10 +201,34 @@ class IngestResponse(BaseModel):
 class DocumentInfo(BaseModel):
     """Document metadata for UI list."""
 
+    id: int | None = None
     path: str
+    display_path: str | None = None
     size_bytes: int
     modified_at: str
     extension: str
+    is_directory: bool = False
+    parent_id: int | None = None
+    folder_id: int | None = None
+    name: str | None = None
+    source_type: str = "db"
+
+
+class CreateDocumentFolderRequest(BaseModel):
+    """Request payload for creating a document folder."""
+
+    parent_path: str = ""
+    parent_id: int | None = None
+    name: str = Field(min_length=1, max_length=128)
+
+
+class CreateDocumentFolderResponse(BaseModel):
+    """Created document folder metadata."""
+
+    path: str
+    id: int | None = None
+    parent_id: int | None = None
+    created: bool = True
 
 
 class FileEditTextResponse(BaseModel):

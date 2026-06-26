@@ -53,6 +53,13 @@ const officeEditorHostStyle = computed(() => ({
   height: officeEditorFullscreen.value ? "calc(100vh - 74px)" : "82vh",
 }));
 
+function pathMatchesOrIsChild(targetPath: string, parentPath: string) {
+  if (!parentPath) {
+    return true;
+  }
+  return targetPath === parentPath || targetPath.startsWith(`${parentPath}/`);
+}
+
 const officeDialogTitle = computed(() => {
   if (officeEditorPath.value) {
     return officeEditorPath.value;
@@ -138,6 +145,21 @@ async function deleteDocumentFromWorkspace(path: string) {
   }
 }
 
+async function deleteFolderFromWorkspace(path: string) {
+  try {
+    await dashboard.deleteDocumentFolder(path);
+    if (documentViewerVisible.value && pathMatchesOrIsChild(documentViewerPath.value, path)) {
+      closeDocumentViewerState();
+    }
+    if (officeEditorVisible.value && pathMatchesOrIsChild(officeEditorPath.value, path)) {
+      officeEditorVisible.value = false;
+      resetOfficeEditorState();
+    }
+  } catch {
+    // The composable already stores the error message for display.
+  }
+}
+
 async function onDocumentSaved() {
   try {
     await dashboard.refreshDashboard();
@@ -200,7 +222,7 @@ onMounted(async () => {
       :recent-sessions="chatWorkspace.recentSessions.value"
       :active-session-id="chatWorkspace.activeSessionId.value"
       :status-text="dashboard.statusText.value"
-      :document-count="dashboard.documents.value.length"
+        :document-count="dashboard.documentCount.value"
       :indexed-chunks="dashboard.indexedChunks.value"
       @new-chat="createNewChat"
       @select-tab="switchTab"
@@ -255,10 +277,12 @@ onMounted(async () => {
         :deleting-path="dashboard.deletingPath.value"
         @files-change="dashboard.setSelectedFiles"
         @upload="dashboard.uploadAndBuild"
+        @create-folder="dashboard.createDocumentFolder"
         @refresh-office-health="dashboard.refreshOfficeHealth"
         @open-document="openDocumentFromWorkspace"
         @open-office-editor="openOfficeEditorFromWorkspace"
         @delete-document="deleteDocumentFromWorkspace"
+        @delete-folder="deleteFolderFromWorkspace"
         @document-saved="onDocumentSaved"
       />
 

@@ -25,7 +25,7 @@ from openai import OpenAI
 
 from app.schemas import ChatHistoryItem
 from app.services.embeddings import get_embedding_model
-from app.services.files import file_info, iter_source_files, load_documents_from_file
+from app.services.files import iter_source_files, load_documents_from_file
 from app.services.llm_provider_mapping import (
     CapabilityRegistry,
     CanonicalCompletionOptions,
@@ -623,8 +623,7 @@ class KnowledgeBaseService:
 
     def ensure_directories(self) -> None:
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
-        self.settings.docs_dir.mkdir(parents=True, exist_ok=True)
-        self.settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+        self.settings.user_docs_dir.mkdir(parents=True, exist_ok=True)
         self.settings.chroma_dir.mkdir(parents=True, exist_ok=True)
         self.settings.preview_pdf_dir.mkdir(parents=True, exist_ok=True)
 
@@ -637,9 +636,6 @@ class KnowledgeBaseService:
             # Normal on first launch or missing collection.
             pass
         self._vector_store = self._build_vector_store()
-
-    def source_file_infos(self) -> list[dict[str, str | int]]:
-        return [file_info(path) for path in iter_source_files()]
 
     def load_corpus(self) -> tuple[list[Document], list[str]]:
         documents: list[Document] = []
@@ -787,40 +783,6 @@ class KnowledgeBaseService:
                 preview_cache_path.unlink(missing_ok=True)
 
             return self.rebuild_index()
-
-    async def save_uploaded_files(self, uploads) -> list[str]:
-        self.ensure_directories()
-        saved_paths: list[str] = []
-
-        for upload in uploads:
-            filename = Path(upload.filename or "upload").name
-            suffix = Path(filename).suffix.lower()
-            if suffix not in self.settings.supported_extensions:
-                raise ValueError(f"Unsupported file type: {suffix or '[no extension]'}")
-
-            content = await upload.read()
-            max_bytes = self.settings.max_upload_mb * 1024 * 1024
-            if len(content) > max_bytes:
-                raise ValueError(f"File too large. Limit: {self.settings.max_upload_mb} MB")
-
-            target = self._unique_upload_path(filename)
-            target.write_bytes(content)
-            saved_paths.append(str(target.relative_to(self.settings.root_dir)).replace("\\", "/"))
-
-        return saved_paths
-
-    def _unique_upload_path(self, filename: str) -> Path:
-        base = self.settings.uploads_dir / Path(filename).name
-        if not base.exists():
-            return base
-
-        stem = base.stem
-        suffix = base.suffix
-        for index in range(1, 1000):
-            candidate = self.settings.uploads_dir / f"{stem}_{index}{suffix}"
-            if not candidate.exists():
-                return candidate
-        raise RuntimeError("Could not generate a unique filename for upload")
 
     def count_chunks(self) -> int:
         self.ensure_directories()

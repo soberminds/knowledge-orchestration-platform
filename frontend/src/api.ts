@@ -150,10 +150,24 @@ export interface IngestResponse {
 }
 
 export interface DocumentInfo {
+  id?: number | null;
   path: string;
+  display_path?: string | null;
   size_bytes: number;
   modified_at: string;
   extension: string;
+  is_directory?: boolean;
+  parent_id?: number | null;
+  folder_id?: number | null;
+  name?: string | null;
+  source_type?: string;
+}
+
+export interface CreateDocumentFolderResponse {
+  path: string;
+  id?: number | null;
+  parent_id?: number | null;
+  created: boolean;
 }
 
 export interface HealthResponse {
@@ -344,6 +358,27 @@ export async function deleteDocument(path: string): Promise<IngestResponse> {
   });
 }
 
+export async function deleteDocumentFolder(path: string): Promise<IngestResponse> {
+  return requestJson<IngestResponse>(`/api/document-folders?path=${encodeURIComponent(path)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function createDocumentFolder(
+  parentPath: string,
+  name: string,
+  parentId?: number | null,
+): Promise<CreateDocumentFolderResponse> {
+  return requestJson<CreateDocumentFolderResponse>("/api/document-folders", {
+    method: "POST",
+    body: JSON.stringify({
+      parent_path: parentPath,
+      parent_id: parentId ?? null,
+      name,
+    }),
+  });
+}
+
 export async function rebuildIndex(): Promise<IngestResponse> {
   return requestJson<IngestResponse>("/api/ingest", {
     method: "POST",
@@ -480,9 +515,19 @@ export async function search(payload: { query: string; top_k?: number }): Promis
   });
 }
 
-export async function uploadDocuments(files: FileList | File[]): Promise<IngestResponse> {
+export async function uploadDocuments(
+  files: FileList | File[],
+  folderPath = "",
+  parentId?: number | null,
+): Promise<IngestResponse> {
   const form = new FormData();
   Array.from(files).forEach((file) => form.append("files", file));
+  if (folderPath) {
+    form.append("folder_path", folderPath);
+  }
+  if (parentId !== undefined && parentId !== null) {
+    form.append("parent_id", String(parentId));
+  }
 
   const response = await fetch(`${API_BASE}/api/upload`, {
     method: "POST",
