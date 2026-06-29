@@ -3,16 +3,24 @@ import { useI18n } from "./useI18n";
 import {
   createDocumentFolder as createDocumentFolderApi,
   deleteDocument as deleteDocumentApi,
+  deleteDocumentById as deleteDocumentByIdApi,
   deleteDocumentFolder as deleteDocumentFolderApi,
   getHealth,
   getOfficeHealth,
   listDocuments,
+  moveDocument as moveDocumentApi,
+  moveDocumentById as moveDocumentByIdApi,
+  moveDocumentFolder as moveDocumentFolderApi,
   rebuildIndex,
+  renameDocument as renameDocumentApi,
+  renameDocumentById as renameDocumentByIdApi,
+  renameDocumentFolder as renameDocumentFolderApi,
   uploadDocuments,
   type DocumentInfo,
   type HealthResponse,
   type OfficeHealthResponse,
 } from "../api";
+import { buildFolderScopeTree, type FolderScopeNode } from "../utils/documentTree";
 
 const RETRY_DELAYS_MS = [0, 600, 1200];
 
@@ -34,12 +42,14 @@ export function useDashboard() {
   const uploading = ref(false);
   const ingesting = ref(false);
   const deletingPath = ref("");
+  const mutatingPath = ref("");
   const errorMessage = ref("");
   const officeHealthError = ref("");
 
   const statusText = computed(() => health.value?.status ?? t("status.loading"));
   const indexedChunks = computed(() => health.value?.indexed_chunks ?? 0);
   const documentCount = computed(() => documents.value.filter((item) => !item.is_directory).length);
+  const folderScopeTree = computed<FolderScopeNode[]>(() => buildFolderScopeTree(documents.value));
 
   function setSelectedFiles(files: File[]) {
     selectedFiles.value = files;
@@ -47,6 +57,21 @@ export function useDashboard() {
 
   function clearError() {
     errorMessage.value = "";
+  }
+
+  function resetForUserChange() {
+    health.value = null;
+    officeHealth.value = null;
+    documents.value = [];
+    selectedFiles.value = [];
+    refreshing.value = false;
+    officeHealthLoading.value = false;
+    uploading.value = false;
+    ingesting.value = false;
+    deletingPath.value = "";
+    mutatingPath.value = "";
+    errorMessage.value = "";
+    officeHealthError.value = "";
   }
 
   async function refreshDashboard(options?: { retries?: number }) {
@@ -126,11 +151,15 @@ export function useDashboard() {
     }
   }
 
-  async function deleteDocument(path: string) {
+  async function deleteDocument(path: string, fileId?: number | null) {
     deletingPath.value = path;
     clearError();
     try {
-      await deleteDocumentApi(path);
+      if (fileId != null) {
+        await deleteDocumentByIdApi(fileId);
+      } else {
+        await deleteDocumentApi(path);
+      }
       await refreshDashboard();
     } catch (error) {
       errorMessage.value = error instanceof Error ? error.message : t("error.delete_document_failed");
@@ -151,6 +180,70 @@ export function useDashboard() {
       throw error;
     } finally {
       deletingPath.value = "";
+    }
+  }
+
+  async function renameDocument(path: string, newName: string, fileId?: number | null) {
+    mutatingPath.value = path;
+    clearError();
+    try {
+      const result = fileId != null
+        ? await renameDocumentByIdApi(fileId, newName)
+        : await renameDocumentApi(path, newName);
+      await refreshDashboard();
+      return result;
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : t("error.refresh_dashboard_failed");
+      throw error;
+    } finally {
+      mutatingPath.value = "";
+    }
+  }
+
+  async function moveDocument(path: string, parentPath: string, parentId?: number | null, fileId?: number | null) {
+    mutatingPath.value = path;
+    clearError();
+    try {
+      const result = fileId != null
+        ? await moveDocumentByIdApi(fileId, parentPath, parentId)
+        : await moveDocumentApi(path, parentPath, parentId);
+      await refreshDashboard();
+      return result;
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : t("error.refresh_dashboard_failed");
+      throw error;
+    } finally {
+      mutatingPath.value = "";
+    }
+  }
+
+  async function renameDocumentFolder(path: string, newName: string) {
+    mutatingPath.value = path;
+    clearError();
+    try {
+      const result = await renameDocumentFolderApi(path, newName);
+      await refreshDashboard();
+      return result;
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : t("error.refresh_dashboard_failed");
+      throw error;
+    } finally {
+      mutatingPath.value = "";
+    }
+  }
+
+  async function moveDocumentFolder(path: string, parentPath: string, parentId?: number | null) {
+    mutatingPath.value = path;
+    clearError();
+    try {
+      const result = await moveDocumentFolderApi(path, parentPath, parentId);
+      await refreshDashboard();
+      return result;
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : t("error.refresh_dashboard_failed");
+      throw error;
+    } finally {
+      mutatingPath.value = "";
     }
   }
 
@@ -191,11 +284,13 @@ export function useDashboard() {
     uploading,
     ingesting,
     deletingPath,
+    mutatingPath,
     errorMessage,
     officeHealthError,
     statusText,
     indexedChunks,
     documentCount,
+    folderScopeTree,
     setSelectedFiles,
     refreshDashboard,
     refreshOfficeHealth,
@@ -203,7 +298,12 @@ export function useDashboard() {
     createDocumentFolder,
     deleteDocument,
     deleteDocumentFolder,
+    renameDocument,
+    moveDocument,
+    renameDocumentFolder,
+    moveDocumentFolder,
     runIngest,
     clearError,
+    resetForUserChange,
   };
 }

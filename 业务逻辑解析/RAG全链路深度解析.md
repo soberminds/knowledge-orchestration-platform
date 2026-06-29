@@ -1,4 +1,4 @@
-﻿# RAG 全链路深度解析
+# RAG 全链路深度解析
 
 这份文档的目标不是只告诉你“切片 -> 向量化 -> 向量检索”这三个词，
 而是把当前项目里真正发生的完整业务流程全部摊开，让你知道：
@@ -220,15 +220,40 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 ```text
 第一次提问
 ├─ 前端没有 conversation_id
+├─ 后端先解析当前有效用户
+│  ├─ 已登录：用 session 对应的 user_id
+│  └─ 未登录：回落到默认游客用户 local-user
 ├─ 后端创建 kop_chat_conversation
+│  ├─ 绑定 user_id
+│  ├─ 绑定 scope_type / scope_id / workspace_key
+│  └─ 计算 scope_name 供前端展示
 ├─ 后端返回 conversation_id
 └─ 前端保存为 ChatSession.backendConversationId
 
 后续继续提问
 ├─ 前端带上 conversation_id
 ├─ 后端按 conversation_id 回读最近消息
+├─ 如果会话范围发生变化，后端会同步更新对应 scope 字段
 └─ 回答结束后继续把本轮消息写入同一条会话
 ```
+
+#### I. `scope_type` / `scope_id` / `workspace_key` / `scope_name`
+这几个字段是现在会话“作用域”的核心补充。
+
+- `scope_type`
+  - 这条会话当前绑定的是 `all` / `folder` / `kb` / `workspace`
+- `scope_id`
+  - 当作用域是文件夹或知识库时，对应的目标 ID
+- `workspace_key`
+  - 当前工作区的稳定标识，常用于“工作区级会话”
+- `scope_name`
+  - 给前端展示用的可读名称，例如“全部知识库 / 某个文件夹 / 某个工作区”
+
+它解决的问题是：
+
+- 让同一个 `conversation_id` 不只是“某次聊天”
+- 还明确这次聊天到底是在全量知识库里问，还是在某个文件夹 / 知识库 / 工作区里问
+- 前端会话列表现在也能直接把范围标签显示出来
 
 ### 1.2 再记住这几个核心对象 / 服务
 
@@ -249,6 +274,14 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 - 检索
 - 组织上下文
 - 调大模型生成回答
+
+它现在还会顺手把“当前有效用户 + 当前作用域”一起带进检索：
+
+- 先按当前用户过滤
+- 再按 `scope_type` / `scope_id` / `workspace_key` 限定范围
+- `folder` 作用域会自动包含子文件夹
+- 最终在回答结果里回传 `model_diagnostics`
+- 如果供应商扩展参数失败，会退回一次再试，但会保留 warning，不会静默换模型
 
 这里面几个词可以再翻译成更具体的动作：
 
@@ -447,23 +480,26 @@ chunk Document
 
 它负责的是：
 
-- 创建 / 读取默认本地用户
-- 创建 / 读取聊天会话
+- 创建 / 读取当前有效用户；未登录时默认回落到游客用户 `local-user`
+- 创建 / 读取聊天会话，并绑定 `scope_type` / `scope_id` / `workspace_key`
+- 列出会话列表，支持分页回显和范围标签
+- 列出消息列表，支持按页回读
 - 从 Redis 或 MySQL 回读最近消息窗口
 - 把本轮用户消息写入 MySQL
 - 把本轮助手回复写入 MySQL
+- 保存 `usage` / `citations` / `model_diagnostics`
 - 保存后刷新 Redis 最近消息缓存
 
 它和 `KnowledgeBaseService` 的关系是：
 
 ```text
 ChatMemoryService
-├─ 负责“这是谁的哪条会话、最近聊了什么”
-└─ 输出最近 history
+├─ 负责“这是谁的哪条会话、最近聊了什么、这次会话属于哪个范围”
+└─ 输出最近 history / 会话列表 / 消息列表
 
 KnowledgeBaseService
 ├─ 负责“拿 history + 当前问题 + 知识库证据去生成回答”
-└─ 输出 answer / sources / citations / usage
+└─ 输出 answer / sources / citations / usage / model_diagnostics
 ```
 
 所以它们的边界很清楚：
@@ -471,7 +507,7 @@ KnowledgeBaseService
 - `ChatMemoryService` 管“对话状态”
 - `KnowledgeBaseService` 管“RAG 问答链路”
 
-#### 补充：`database.py` 和 `redis_client.py`
+#### 补充：`database.py` 和 `redis_client.py`#### 补充：`database.py` 和 `redis_client.py`
 新增位置：
 
 - `app/core/database.py`
@@ -1275,17 +1311,28 @@ vectors = embedder.embed_documents(texts)
 
 当前已经落地的职责：
 
+- 未登录时默认使用游客用户 `local-user`
+- 登录后按 session / token 对应的真实用户继续使用同一个会话体系
 - MySQL 保存原始聊天记录
 - Redis 缓存最近消息窗口
 - 前端通过 `conversation_id` 关联后端会话
+- 会话列表接口支持分页回显，并带 `scope_name` / `scope_type` / `scope_id` / `workspace_key`
+- 消息列表接口支持分页读取和上拉补历史
 - 后端回答前回读最近消息
-- 后端回答后保存本轮消息
+- 后端回答后保存本轮消息，并把 `usage` / `citations` / `model_diagnostics` 一起落库
 
 它和 Chroma 的分工是：
 
 - Chroma 保存“知识库文件切片”
 - MySQL 保存“聊天原始记录”
 - Redis 保存“最近聊天窗口缓存”
+
+所以现在它已经不只是简单“缓存一下历史”，而是完整承担了：
+
+- 用户身份回落
+- 会话持久化
+- 会话回显
+- 最近上下文缓存
 
 ---
 
@@ -1372,13 +1419,20 @@ vectors = embedder.embed_documents(texts)
 ```text
 用户在前端发送问题
 ├─ frontend/src/composables/useChatWorkspace.ts
+│  ├─ 当前会话会同时携带 `scope_type` / `scope_id` / `workspace_key`
 │  ├─ 如果当前 ChatSession 有 backendConversationId
 │  │  └─ 请求里带 conversation_id
 │  └─ 如果没有
 │     └─ 先不带 conversation_id，让后端创建
+├─ app/main.py::CurrentUserContextMiddleware
+│  └─ 先解析当前有效用户
+│     ├─ 已登录：用 session 对应的 user_id
+│     └─ 未登录：回落到游客用户 `local-user`
 ├─ app/api/routes.py::chat() / chat_stream()
 │  ├─ _resolve_chat_memory_context(...)
 │  │  ├─ 调用 ChatMemoryService.resolve_conversation(...)
+│  │  ├─ 绑定当前有效用户
+│  │  ├─ 绑定 `scope_type` / `scope_id` / `workspace_key`
 │  │  ├─ 新会话：创建 kop_chat_conversation
 │  │  ├─ 老会话：读取已有 kop_chat_conversation
 │  │  └─ 调用 ChatMemoryService.resolve_history(...)
@@ -1391,6 +1445,7 @@ vectors = embedder.embed_documents(texts)
 │  ├─ _save_chat_memory_turn(...)
 │  │  ├─ 写入 user 消息到 kop_chat_message
 │  │  ├─ 写入 assistant 消息到 kop_chat_message
+│  │  ├─ citations_json / meta_json 保存引用、usage、model_diagnostics 等信息
 │  │  ├─ 更新 kop_chat_conversation.last_message_at
 │  │  └─ 刷新 Redis 最近消息缓存
 │  └─ 返回 conversation_id 给前端
@@ -1416,7 +1471,7 @@ RAG 问答层
 └─ 刷新 Redis 最近窗口缓存
 ```
 
-### 3.1 这条链路里，每一步到底是谁在做什么？
+### 3.1 这条链路里，每一步到底是谁在做什么？### 3.1 这条链路里，每一步到底是谁在做什么？
 
 #### 1）文件扫描是谁做的？
 - `iter_source_files()` 负责扫描 `settings.user_docs_dir`
@@ -2676,23 +2731,23 @@ DeepSeek 负责的是：
 
 ```text
 LLM 生成回答
-├─ routes.py 收到 answer / citations / usage
+├─ routes.py 收到 answer / citations / usage / model_diagnostics
 ├─ _save_chat_memory_turn(...)
 │  ├─ 把当前用户问题写成一条 user 消息
 │  ├─ 把模型回答写成一条 assistant 消息
 │  ├─ citations_json 保存引用片段
-│  ├─ meta_json 保存 rewritten_question / usage 等信息
+│  ├─ meta_json 保存 rewritten_question / usage / model_diagnostics 等信息
 │  └─ 更新 conversation 的 last_message_at
 └─ ChatMemoryService 刷新 Redis 最近消息缓存
 ```
 
-所以现在“最终回答生成”之后，还有一个**会话状态持久化**动作。
+所以现在“最终回答生成”之后，还有一个会话状态持久化动作。
 
 这个动作不属于 RAG 检索本身，但属于完整聊天产品链路。
 
 ---
 
-## 11. 这条链路里有哪些“中间件”和“模型”？
+## 11. 这条链路里有哪些“中间件”和“模型”？## 11. 这条链路里有哪些“中间件”和“模型”？
 
 ### 11.1 主要模型
 
@@ -2746,35 +2801,39 @@ LLM 生成回答
 - 中文 + 英文分隔符
 - 按 source 增量删除与重建
 - 保存后增量索引
-- 检索结果去重
-- 上下文分组与引用标签生成
-- 简单 code-heavy 片段识别
-- 聊天会话持久化
-- MySQL 原始聊天记录保存
-- Redis 最近消息窗口缓存
+- file_id 优先的文档 mutation
+- 会话作用域 `scope_type` / `scope_id` / `workspace_key`
+- 会话列表分页回显
+- 消息列表分页回显
 - `conversation_id` 前后端对齐
+- 默认游客用户 `local-user`
+- `model_diagnostics` 随回答返回
+- 检索时按当前用户过滤
+- 检索时按 scope 限定范围
+- folder scope 会自动包含子文件夹
 
 ### 12.2 暂时还没有明显看到的
 
 - rerank 重排模型
 - hybrid search（关键词 + 向量混检）
 - BM25 融合召回
-- metadata filter 检索策略增强
+- 更细的 metadata filter 检索策略增强
 - 多向量索引
 - 标题树 / 章节树切片
 - 查询改写模型
 - 结果摘要缓存
 - 自动会话摘要生成
 - 长期记忆事实抽取
-- 多用户登录鉴权
-- 会话列表 / 重命名 / 删除接口
+- 更完整的权限模型 / 多租户隔离
+- 会话重命名 / 删除 / 归档接口
+- 文件移动 / 重命名后的索引 metadata 自动同步还可以继续收口
 
 所以当前项目已经不是“最原始 demo”，
 但也还没走到“高级检索架构”的阶段。
 
 ---
 
-## 13. 失败点和排查思路
+## 13. 失败点和排查思路## 13. 失败点和排查思路
 
 ### 13.1 文件抽取失败
 
@@ -2978,10 +3037,13 @@ LLM 的上下文长度有限，意思是：
 - `_compose_search_query(question, history)` 只取最近几轮历史去改写检索问题
 - `_prepare_answer(...)` 里会把历史消息拼进提示词，但不是无限拼
 - `_build_context(...)` 会对检索命中的 chunk 再做分组、裁剪和引用整理
+- `ChatMemoryService.resolve_conversation(...)` 会把会话和当前有效用户、`scope_type` / `scope_id` / `workspace_key` 一起对齐
 - `ChatMemoryService.resolve_history(...)` 会优先读取后端最近会话窗口
 - `routes.py` 会在真正回答前先处理 `conversation_id`
+- `routes.py` 还会把 `model_diagnostics` 一并回传前端和落库
 - 回答完成后，后端会把 user / assistant 两条消息写入 MySQL
 - Redis 会缓存最近消息窗口，减少重复读库
+- 前端刷新会先回读会话列表和消息列表，确保聊天能回显
 
 也就是说，项目不是“全量历史直塞”，而是已经开始做：
 
@@ -3046,6 +3108,13 @@ LLM 的上下文长度有限，意思是：
 - `kop_chat_conversation`
 - `kop_chat_message`
 
+这里要特别注意一下：
+
+- `kop_user` 现在既承担正式注册用户，也承担默认游客用户 `local-user`
+- `kop_chat_conversation` 现在已经把 `scope_type` / `scope_id` / `workspace_key` 作为会话范围字段落下来了
+- 会话列表接口会补一个 `scope_name`，前端就能直接显示“全部 / 文件夹 / 知识库 / 工作区”
+- `kop_chat_message` 会把原始消息、引用和诊断信息都保留下来，方便回显和排查
+
 当前项目已经预留但还没有正式启用完整业务逻辑的是：
 
 - `kop_chat_conversation_summary`
@@ -3063,14 +3132,19 @@ LLM 的上下文长度有限，意思是：
 - 会话 id
 - 用户 id
 - 会话标题
+- `workspace_key`
+- `scope_type`
+- `scope_id`
 - 创建时间
 - 最后更新时间
+- 最后消息时间
 - 是否归档 / 是否删除
 
 它解决的问题是：
 
 - 这一串消息属于哪个会话
 - 这个会话属于哪个用户
+- 这个会话现在属于哪个范围
 
 #### 表 2：`chat_message`
 保存“每一条消息”。
@@ -3083,6 +3157,8 @@ LLM 的上下文长度有限，意思是：
 - 角色（user / assistant / system）
 - 消息内容
 - 消息顺序
+- `meta_json`
+- `citations_json`
 - token 数
 - 创建时间
 
@@ -3272,7 +3348,7 @@ chat_memory_fact          -> kop_chat_memory_fact
 │  ├─ loadSessionMessages()
 │  └─ loadOlderMessages()
 ├─ frontend/src/components/sidebar/LeftSidebar.vue
-│  └─ 最近会话列表滚到底部加载下一页会话
+│  └─ 最近会话列表滚到底部加载下一页会话，并展示范围标签
 └─ frontend/src/components/chat/MessageList.vue
    └─ 消息列表滚到顶部加载更早消息
 ```
@@ -3282,7 +3358,8 @@ chat_memory_fact          -> kop_chat_memory_fact
 ```text
 页面初始化
 ├─ 前端调用 GET /api/chat/conversations
-├─ 后端按默认本地用户 local-user 查询 kop_chat_conversation
+├─ 后端按当前有效用户查询 kop_chat_conversation
+├─ 当前未登录时会回落到游客用户 local-user
 ├─ 前端把数据库会话映射成 ChatSession
 ├─ 默认选中最近一条会话
 ├─ 前端调用 GET /api/chat/conversations/{id}/messages
@@ -3300,7 +3377,7 @@ chat_memory_fact          -> kop_chat_memory_fact
 2. 下一轮问答拿最近上下文
    - 优先读 Redis 最近窗口
    - Redis 没有时再查 MySQL
-   - 走 `load_recent_history()`
+   - 走 `resolve_history()`
    - 用于给 RAG 问答链路拼最近对话上下文
 
 所以：
@@ -3309,3 +3386,5 @@ chat_memory_fact          -> kop_chat_memory_fact
 - **Redis 是最近 12 条左右的热缓存**
 - **前端刷新回显主要依赖 MySQL**
 - **模型回答时的最近上下文优先用 Redis 加速**
+
+会话卡片上的 `scope_name` / `scope_type` / `scope_id` / `workspace_key` 现在也都能跟着回显出来，所以用户刷新后不会只看到一串标题，而是能看到这条会话到底属于“全部 / 文件夹 / 知识库 / 工作区”中的哪一类。

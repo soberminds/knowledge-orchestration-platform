@@ -8,6 +8,7 @@ type OfficeEditorMode = "edit" | "view";
 const props = defineProps<{
   visible: boolean;
   sourcePath: string;
+  sourceFileId?: number | null;
   mode?: OfficeEditorMode;
 }>();
 
@@ -26,6 +27,7 @@ const resizeTimers = ref<number[]>([]);
 const callbackStatus = ref<OfficeCallbackStatusResponse | null>(null);
 const callbackStatusTimer = ref<number | null>(null);
 const isDocumentDirty = ref(false);
+const docsApiScriptState = ref<"idle" | "loading" | "loaded" | "failed">("idle");
 
 const callbackStatusTagType = computed(() => {
   const payload = callbackStatus.value;
@@ -182,13 +184,14 @@ function requestEditorResize() {
 
 async function refreshCallbackStatus() {
   const sourcePath = props.sourcePath?.trim();
-  if (!sourcePath) {
+  const sourceFileId = props.sourceFileId ?? null;
+  if (!sourcePath && sourceFileId == null) {
     clearCallbackStatus();
     return;
   }
 
   try {
-    callbackStatus.value = await getOfficeCallbackStatus(sourcePath);
+    callbackStatus.value = await getOfficeCallbackStatus(sourcePath, sourceFileId);
   } catch {
     // Callback status is a best-effort UX hint.
   }
@@ -196,7 +199,7 @@ async function refreshCallbackStatus() {
 
 function startCallbackStatusPolling() {
   stopCallbackStatusPolling();
-  if (!props.visible || !props.sourcePath?.trim()) {
+  if (!props.visible || (!props.sourcePath?.trim() && props.sourceFileId == null)) {
     clearCallbackStatus();
     return;
   }
@@ -243,7 +246,11 @@ function loadDocsApiScript(documentServerUrl: string): Promise<void> {
 
   const existingScript = document.querySelector<HTMLScriptElement>("script[data-onlyoffice-api='1']");
   if (existingScript) {
-    if (existingScript.src === scriptSrc) {
+    if (existingScript.src === scriptSrc && docsApiScriptState.value === "loaded") {
+      activeScriptSrc.value = scriptSrc;
+      return Promise.resolve();
+    }
+    if (existingScript.src === scriptSrc && docsApiScriptState.value === "loading") {
       return new Promise((resolve, reject) => {
         existingScript.addEventListener("load", () => resolve(), { once: true });
         existingScript.addEventListener("error", () => reject(new Error("Failed to load ONLYOFFICE API script.")), { once: true });
@@ -259,17 +266,23 @@ function loadDocsApiScript(documentServerUrl: string): Promise<void> {
     script.defer = true;
     script.setAttribute("data-onlyoffice-api", "1");
     script.onload = () => {
+      docsApiScriptState.value = "loaded";
       activeScriptSrc.value = scriptSrc;
       resolve();
     };
-    script.onerror = () => reject(new Error("Failed to load ONLYOFFICE API script."));
+    script.onerror = () => {
+      docsApiScriptState.value = "failed";
+      script.remove();
+      reject(new Error("Failed to load ONLYOFFICE API script."));
+    };
+    docsApiScriptState.value = "loading";
     document.head.appendChild(script);
   });
 }
 
 async function openOnlyOfficeEditor() {
   const sourcePath = props.sourcePath?.trim();
-  if (!props.visible || !sourcePath) {
+  if (!props.visible || (!sourcePath && props.sourceFileId == null)) {
     return;
   }
 
@@ -282,6 +295,7 @@ async function openOnlyOfficeEditor() {
     const payload = await getOfficeEditorConfig(sourcePath, {
       mode,
       lang: locale.value,
+      fileId: props.sourceFileId ?? null,
     });
 
     await loadDocsApiScript(payload.document_server_url);
@@ -321,7 +335,7 @@ async function openOnlyOfficeEditor() {
 }
 
 watch(
-  () => [props.visible, props.sourcePath, props.mode, locale.value] as const,
+  () => [props.visible, props.sourcePath, props.sourceFileId, props.mode, locale.value] as const,
   async () => {
     if (!props.visible) {
       clearResizeTimers();
@@ -402,40 +416,40 @@ defineExpose({
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: #f8fafc;
-  color: #334155;
+  background: var(--surface-subtle);
+  color: var(--text);
   font-size: 12px;
 }
 
 .onlyoffice-callback-label {
   font-weight: 600;
-  color: #0f172a;
+  color: var(--text);
 }
 
 .onlyoffice-callback-time {
-  color: #475569;
+  color: var(--text-muted);
 }
 
 .onlyoffice-callback-message {
-  color: #64748b;
+  color: var(--text-muted);
 }
 
 .onlyoffice-divider {
   width: 1px;
   height: 14px;
-  background: #cbd5e1;
+  background: var(--border-strong);
   margin: 0 2px;
 }
 
 .onlyoffice-stage {
   height: 100%;
   min-height: 0;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
-  background: #fff;
+  background: var(--surface-solid);
 }
 
 .onlyoffice-host {

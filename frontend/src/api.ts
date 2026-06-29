@@ -3,12 +3,43 @@ export interface HistoryItem {
   content: string;
 }
 
+export interface UserProfile {
+  id: number;
+  username: string;
+  nickname?: string | null;
+  avatar_url?: string | null;
+  user_type: string;
+  is_default: boolean;
+  status: number;
+  last_login_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  authenticated: boolean;
+  is_guest: boolean;
+}
+
+export interface AuthRequestPayload {
+  username: string;
+  password: string;
+  nickname?: string | null;
+}
+
+export interface AuthResponse {
+  user: UserProfile;
+  session_token: string;
+}
+
 export interface SourceHit {
   source: string;
   chunk_index: number;
   page?: number | null;
   score?: number | null;
   preview: string;
+  file_id?: number | null;
+  folder_id?: number | null;
+  display_name?: string | null;
+  display_path?: string | null;
+  folder_path?: string | null;
 }
 
 export interface CitationRef {
@@ -18,6 +49,11 @@ export interface CitationRef {
   chunk_indices: number[];
   score?: number | null;
   preview: string;
+  file_id?: number | null;
+  folder_id?: number | null;
+  display_name?: string | null;
+  display_path?: string | null;
+  folder_path?: string | null;
 }
 
 export interface ChatResponse {
@@ -80,15 +116,37 @@ export interface ChatOptionsResponse {
   default_model: string;
   models: string[];
   model_options: ChatModelOption[];
+  knowledge_bases: KnowledgeBaseScopeOption[];
+  workspaces: WorkspaceScopeOption[];
   web_search_available: boolean;
   external_web_search_available: boolean;
   thinking_modes: ThinkingMode[];
+}
+
+export interface KnowledgeBaseScopeOption {
+  id: number;
+  label: string;
+  workspace_id?: number | null;
+  workspace_key?: string | null;
+  workspace_name?: string | null;
+  folder_id?: number | null;
+}
+
+export interface WorkspaceScopeOption {
+  id: number;
+  key: string;
+  label: string;
+  workspace_name?: string | null;
 }
 
 export interface ChatConversationSummary {
   id: number;
   title: string;
   model?: string | null;
+  workspace_key?: string | null;
+  scope_type?: "all" | "folder" | "kb" | "workspace";
+  scope_id?: number;
+  scope_name?: string | null;
   message_count: number;
   preview: string;
   last_message_at?: string | null;
@@ -106,6 +164,7 @@ export interface ChatConversationListResponse {
 export interface ChatMessageRecord {
   id: number;
   conversation_id: number;
+  sender_user_id?: number | null;
   role: "system" | "user" | "assistant" | "tool";
   content: string;
   seq_no: number;
@@ -132,6 +191,9 @@ export interface ChatRequestPayload {
   history: HistoryItem[];
   top_k?: number;
   model?: string;
+  scope_type?: "all" | "folder" | "kb" | "workspace";
+  scope_id?: number | null;
+  workspace_key?: string | null;
   web_search?: boolean;
   native_web_search?: boolean;
   external_web_search?: boolean;
@@ -168,6 +230,17 @@ export interface CreateDocumentFolderResponse {
   id?: number | null;
   parent_id?: number | null;
   created: boolean;
+}
+
+export interface DocumentMutationResponse {
+  previous_path: string;
+  path: string;
+  id?: number | null;
+  file_id?: number | null;
+  folder_id?: number | null;
+  documents_loaded: number;
+  chunks_indexed: number;
+  source_files: string[];
 }
 
 export interface HealthResponse {
@@ -291,6 +364,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...(init.headers ?? {}),
@@ -344,6 +418,16 @@ function findSseBoundary(buffer: string): { index: number; length: number } | nu
   return { index: lfBoundary, length: 2 };
 }
 
+function appendFileIdentity(params: URLSearchParams, path: string, fileId?: number | null) {
+  if (fileId !== undefined && fileId !== null) {
+    params.set("file_id", String(fileId));
+    return;
+  }
+  if (path) {
+    params.set("path", path);
+  }
+}
+
 export async function getHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/api/health");
 }
@@ -354,6 +438,12 @@ export async function listDocuments(): Promise<DocumentInfo[]> {
 
 export async function deleteDocument(path: string): Promise<IngestResponse> {
   return requestJson<IngestResponse>(`/api/documents?path=${encodeURIComponent(path)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function deleteDocumentById(fileId: number): Promise<IngestResponse> {
+  return requestJson<IngestResponse>(`/api/documents?file_id=${encodeURIComponent(String(fileId))}`, {
     method: "DELETE",
   });
 }
@@ -379,6 +469,75 @@ export async function createDocumentFolder(
   });
 }
 
+export async function renameDocument(path: string, newName: string): Promise<DocumentMutationResponse> {
+  return requestJson<DocumentMutationResponse>("/api/documents/rename", {
+    method: "PUT",
+    body: JSON.stringify({ path, new_name: newName }),
+  });
+}
+
+export async function renameDocumentById(
+  fileId: number,
+  newName: string,
+): Promise<DocumentMutationResponse> {
+  return requestJson<DocumentMutationResponse>("/api/documents/rename", {
+    method: "PUT",
+    body: JSON.stringify({ file_id: fileId, new_name: newName }),
+  });
+}
+
+export async function moveDocument(
+  path: string,
+  parentPath: string,
+  parentId?: number | null,
+): Promise<DocumentMutationResponse> {
+  return requestJson<DocumentMutationResponse>("/api/documents/move", {
+    method: "PUT",
+    body: JSON.stringify({
+      path,
+      parent_path: parentPath,
+      parent_id: parentId ?? null,
+    }),
+  });
+}
+
+export async function moveDocumentById(
+  fileId: number,
+  parentPath: string,
+  parentId?: number | null,
+): Promise<DocumentMutationResponse> {
+  return requestJson<DocumentMutationResponse>("/api/documents/move", {
+    method: "PUT",
+    body: JSON.stringify({
+      file_id: fileId,
+      parent_path: parentPath,
+      parent_id: parentId ?? null,
+    }),
+  });
+}
+
+export async function renameDocumentFolder(path: string, newName: string): Promise<DocumentMutationResponse> {
+  return requestJson<DocumentMutationResponse>("/api/document-folders/rename", {
+    method: "PUT",
+    body: JSON.stringify({ path, new_name: newName }),
+  });
+}
+
+export async function moveDocumentFolder(
+  path: string,
+  parentPath: string,
+  parentId?: number | null,
+): Promise<DocumentMutationResponse> {
+  return requestJson<DocumentMutationResponse>("/api/document-folders/move", {
+    method: "PUT",
+    body: JSON.stringify({
+      path,
+      parent_path: parentPath,
+      parent_id: parentId ?? null,
+    }),
+  });
+}
+
 export async function rebuildIndex(): Promise<IngestResponse> {
   return requestJson<IngestResponse>("/api/ingest", {
     method: "POST",
@@ -398,6 +557,7 @@ export async function chatStream(
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/api/chat/stream`, {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
     },
@@ -531,6 +691,7 @@ export async function uploadDocuments(
 
   const response = await fetch(`${API_BASE}/api/upload`, {
     method: "POST",
+    credentials: "include",
     body: form,
   });
 
@@ -545,40 +706,55 @@ export async function uploadDocuments(
   return payload as IngestResponse;
 }
 
-export function buildFileUrl(path: string): string {
-  return `${API_BASE}/api/file?path=${encodeURIComponent(path)}`;
-}
-
-export function buildPreviewPdfUrl(path: string): string {
-  return `${API_BASE}/api/file/preview-pdf?path=${encodeURIComponent(path)}`;
-}
-
-export async function getFilePageText(path: string, page?: number): Promise<FilePageTextResponse> {
+export function buildFileUrl(path: string, fileId?: number | null): string {
   const params = new URLSearchParams();
-  params.set("path", path);
+  appendFileIdentity(params, path, fileId);
+  return `${API_BASE}/api/file?${params.toString()}`;
+}
+
+export function buildPreviewPdfUrl(path: string, fileId?: number | null): string {
+  const params = new URLSearchParams();
+  appendFileIdentity(params, path, fileId);
+  return `${API_BASE}/api/file/preview-pdf?${params.toString()}`;
+}
+
+export async function getFilePageText(
+  path: string,
+  page?: number,
+  fileId?: number | null,
+): Promise<FilePageTextResponse> {
+  const params = new URLSearchParams();
+  appendFileIdentity(params, path, fileId);
   if (page !== undefined && page !== null) {
     params.set("page", String(page));
   }
   return requestJson<FilePageTextResponse>(`/api/file/page-text?${params.toString()}`);
 }
 
-export async function getFileEditableText(path: string): Promise<FileEditableTextResponse> {
-  return requestJson<FileEditableTextResponse>(`/api/file/edit-text?path=${encodeURIComponent(path)}`);
+export async function getFileEditableText(path: string, fileId?: number | null): Promise<FileEditableTextResponse> {
+  const params = new URLSearchParams();
+  appendFileIdentity(params, path, fileId);
+  return requestJson<FileEditableTextResponse>(`/api/file/edit-text?${params.toString()}`);
 }
 
-export async function saveFileEditableText(path: string, content: string): Promise<FileEditableTextSaveResponse> {
+export async function saveFileEditableText(
+  path: string,
+  content: string,
+  fileId?: number | null,
+): Promise<FileEditableTextSaveResponse> {
+  const payload = fileId !== undefined && fileId !== null ? { file_id: fileId, content } : { path, content };
   return requestJson<FileEditableTextSaveResponse>("/api/file/edit-text", {
     method: "PUT",
-    body: JSON.stringify({ path, content }),
+    body: JSON.stringify(payload),
   });
 }
 
 export async function getOfficeEditorConfig(
   path: string,
-  options: { mode?: "edit" | "view"; lang?: string } = {},
+  options: { mode?: "edit" | "view"; lang?: string; fileId?: number | null } = {},
 ): Promise<OfficeEditorConfigResponse> {
   const params = new URLSearchParams();
-  params.set("path", path);
+  appendFileIdentity(params, path, options.fileId ?? null);
   if (options.mode) {
     params.set("mode", options.mode);
   }
@@ -592,6 +768,32 @@ export async function getOfficeHealth(): Promise<OfficeHealthResponse> {
   return requestJson<OfficeHealthResponse>("/api/office/health");
 }
 
-export async function getOfficeCallbackStatus(path: string): Promise<OfficeCallbackStatusResponse> {
-  return requestJson<OfficeCallbackStatusResponse>(`/api/office/callback-status?path=${encodeURIComponent(path)}`);
+export async function getOfficeCallbackStatus(path: string, fileId?: number | null): Promise<OfficeCallbackStatusResponse> {
+  const params = new URLSearchParams();
+  appendFileIdentity(params, path, fileId);
+  return requestJson<OfficeCallbackStatusResponse>(`/api/office/callback-status?${params.toString()}`);
+}
+
+export async function getCurrentUser(): Promise<UserProfile> {
+  return requestJson<UserProfile>("/api/auth/me");
+}
+
+export async function login(payload: AuthRequestPayload): Promise<AuthResponse> {
+  return requestJson<AuthResponse>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function register(payload: AuthRequestPayload): Promise<AuthResponse> {
+  return requestJson<AuthResponse>("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function logout(): Promise<{ ok: boolean }> {
+  return requestJson<{ ok: boolean }>("/api/auth/logout", {
+    method: "POST",
+  });
 }

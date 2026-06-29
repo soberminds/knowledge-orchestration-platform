@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from app.core.database import DatabaseUnavailableError, session_scope
+from app.core.request_context import get_current_user_id
 from app.core.redis_client import RedisUnavailableError, get_redis_client
 from app.core.settings import settings
 from app.schemas import ChatHistoryItem
@@ -23,6 +24,9 @@ class ConversationState:
     conversation_id: int
     user_id: int
     title: str
+    workspace_key: str | None
+    scope_type: str
+    scope_id: int
     created: bool = False
 
 
@@ -51,49 +55,264 @@ class ChatMemoryService:
         return f"chat:conversation:{conversation_id}:summary"
 
     def _get_or_create_default_user_id(self, session) -> int:
+        current_user_id = get_current_user_id()
+        if current_user_id is not None:
+            row = session.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM kop_user
+                    WHERE id = :user_id
+                      AND status = 1
+                    LIMIT 1
+                    """
+                ),
+                {"user_id": int(current_user_id)},
+            ).first()
+            if row:
+                return int(row[0])
+
         row = session.execute(
             text(
-                "SELECT id FROM kop_user WHERE username = :username LIMIT 1"
+                """
+                SELECT id
+                FROM kop_user
+                WHERE username = :username
+                LIMIT 1
+                """
             ),
             {"username": settings.chat_default_username},
         ).first()
         if row:
-            return int(row[0])
+            user_id = int(row[0])
+            session.execute(
+                text(
+                    """
+                    UPDATE kop_user
+                    SET user_type = 'local',
+                        is_default = 1,
+                        status = 1,
+                        updated_at = :updated_at
+                    WHERE id = :user_id
+                    """
+                ),
+                {"user_id": user_id, "updated_at": self._now()},
+            )
+            return user_id
 
         result = session.execute(
             text(
                 """
-                INSERT INTO kop_user (username, status)
-                VALUES (:username, 1)
+                INSERT INTO kop_user
+                    (username, password_hash, nickname, avatar_url, user_type, is_default, status, last_login_at, created_at, updated_at)
+                VALUES
+                    (:username, NULL, 'Local User', NULL, 'local', 1, 1, NULL, :created_at, :updated_at)
                 """
             ),
-            {"username": settings.chat_default_username},
+            {
+                "username": settings.chat_default_username,
+                "created_at": self._now(),
+                "updated_at": self._now(),
+            },
         )
         return int(result.lastrowid)
 
+    def _normalize_scope_type(self, scope_type: str | None) -> str:
+        token = str(scope_type or "all").strip().lower()
+        if token not in {"all", "folder", "kb", "workspace"}:
+            return "all"
+        return token
+
+    def _normalize_scope_id(self, scope_id: int | None) -> int:
+        try:
+            value = int(scope_id or 0)
+        except Exception:
+            return 0
+        return max(0, value)
+
+    def _normalize_workspace_key(self, workspace_key: str | None) -> str | None:
+        value = str(workspace_key or "").strip()
+        return value or None
+
+    def _resolve_scope_name(
+        self,
+        session,
+        *,
+        scope_type: str,
+        scope_id: int,
+        workspace_key: str | None,
+    ) -> str | None:
+        normalized_scope_type = self._normalize_scope_type(scope_type)
+        normalized_scope_id = self._normalize_scope_id(scope_id)
+        normalized_workspace_key = self._normalize_workspace_key(workspace_key)
+
+        if normalized_scope_type == "all":
+            return "全部范围"
+
+        if normalized_scope_type == "workspace":
+            if normalized_workspace_key:
+                row = session.execute(
+                    text(
+                        """
+                        SELECT workspace_name
+                        FROM kop_workspace
+                        WHERE workspace_key = :workspace_key
+                          AND status = 1
+                        LIMIT 1
+                        """
+                    ),
+                    {"workspace_key": normalized_workspace_key},
+                ).first()
+                if row and row[0]:
+                    return "工作区 / " + str(row[0])
+            if normalized_workspace_key:
+                return "工作区 / " + normalized_workspace_key
+            return "工作区"
+
+        if normalized_scope_type == "kb" and normalized_scope_id:
+            row = session.execute(
+                text(
+                    """
+                    SELECT k.kb_name, w.workspace_name, w.workspace_key
+                    FROM kop_kb k
+                    LEFT JOIN kop_workspace w ON w.id = k.workspace_id
+                    WHERE k.id = :kb_id
+                      AND k.is_deleted = 0
+                    LIMIT 1
+                    """
+                ),
+                {"kb_id": normalized_scope_id},
+            ).first()
+            if row:
+                kb_name = str(row[0]) if row[0] is not None else ""
+                workspace_name = str(row[1]) if row[1] is not None else ""
+                workspace_key_value = str(row[2]) if row[2] is not None else ""
+                if workspace_name and kb_name:
+                    return workspace_name + " / " + kb_name
+                if workspace_name:
+                    return workspace_name
+                if kb_name:
+                    return kb_name
+                if workspace_key_value:
+                    return workspace_key_value
+            return "知识库 #" + str(normalized_scope_id)
+
+        if normalized_scope_type == "folder" and normalized_scope_id:
+            row = session.execute(
+                text(
+                    """
+                    WITH RECURSIVE folder_chain AS (
+                        SELECT
+                            id,
+                            parent_id,
+                            folder_name,
+                            CAST(folder_name AS CHAR(1024)) AS full_path
+                        FROM kop_document_folder
+                        WHERE id = :folder_id
+                          AND is_deleted = 0
+                        UNION ALL
+                        SELECT
+                            p.id,
+                            p.parent_id,
+                            p.folder_name,
+                            CONCAT(p.folder_name, '/', fc.full_path)
+                        FROM kop_document_folder p
+                        INNER JOIN folder_chain fc ON fc.parent_id = p.id
+                        WHERE p.is_deleted = 0
+                    )
+                    SELECT full_path
+                    FROM folder_chain
+                    WHERE id = :folder_id
+                    LIMIT 1
+                    """
+                ),
+                {"folder_id": normalized_scope_id},
+            ).first()
+            if row and row[0]:
+                return "文件夹 / " + str(row[0])
+            return "文件夹 #" + str(normalized_scope_id)
+
+        return None
+
     def _get_conversation_row(self, session, conversation_id: int):
+        current_user_id = get_current_user_id()
         row = session.execute(
             text(
                 """
-                SELECT id, user_id, title
+                SELECT id, user_id, title, workspace_key, scope_type, scope_id, status
                 FROM kop_chat_conversation
                 WHERE id = :conversation_id
+                  AND (:current_user_id IS NULL OR user_id = :current_user_id)
                 LIMIT 1
                 """
             ),
-            {"conversation_id": conversation_id},
+            {"conversation_id": conversation_id, "current_user_id": current_user_id},
         ).first()
         return row
 
-    def resolve_conversation(self, conversation_id: int | None, *, title_seed: str | None = None) -> ConversationState:
+    def _conversation_to_state(self, row, *, created: bool = False, fallback_title: str | None = None) -> ConversationState:
+        title = str(row[2] or "").strip() if row[2] is not None else ""
+        if not title:
+            title = self._build_title(fallback_title or "Chat")
+        return ConversationState(
+            conversation_id=int(row[0]),
+            user_id=int(row[1]),
+            title=title,
+            workspace_key=str(row[3]) if row[3] is not None else None,
+            scope_type=self._normalize_scope_type(row[4]),
+            scope_id=self._normalize_scope_id(row[5]),
+            created=created,
+        )
+
+    def resolve_conversation(
+        self,
+        conversation_id: int | None,
+        *,
+        title_seed: str | None = None,
+        scope_type: str | None = None,
+        scope_id: int | None = None,
+        workspace_key: str | None = None,
+    ) -> ConversationState:
         if text is None:
             raise DatabaseUnavailableError("SQLAlchemy is not installed.")
 
         with session_scope() as session:
             user_id = self._get_or_create_default_user_id(session)
+            normalized_scope_type = self._normalize_scope_type(scope_type)
+            normalized_scope_id = self._normalize_scope_id(scope_id)
+            normalized_workspace_key = self._normalize_workspace_key(workspace_key)
+
             if conversation_id is not None:
                 row = self._get_conversation_row(session, conversation_id)
                 if row:
+                    row_workspace_key = str(row[3]) if row[3] is not None else None
+                    row_scope_type = self._normalize_scope_type(row[4])
+                    row_scope_id = self._normalize_scope_id(row[5])
+                    if (
+                        row_workspace_key != normalized_workspace_key
+                        or row_scope_type != normalized_scope_type
+                        or row_scope_id != normalized_scope_id
+                    ):
+                        session.execute(
+                            text(
+                                """
+                                UPDATE kop_chat_conversation
+                                SET workspace_key = :workspace_key,
+                                    scope_type = :scope_type,
+                                    scope_id = :scope_id,
+                                    updated_at = :updated_at
+                                WHERE id = :conversation_id
+                                """
+                            ),
+                            {
+                                "workspace_key": normalized_workspace_key,
+                                "scope_type": normalized_scope_type,
+                                "scope_id": normalized_scope_id,
+                                "updated_at": self._now(),
+                                "conversation_id": conversation_id,
+                            },
+                        )
+                        row = self._get_conversation_row(session, conversation_id) or row
                     title = str(row[2] or "").strip()
                     if not title and title_seed:
                         title = self._build_title(title_seed)
@@ -101,7 +320,8 @@ class ChatMemoryService:
                             text(
                                 """
                                 UPDATE kop_chat_conversation
-                                SET title = :title, updated_at = :updated_at
+                                SET title = :title,
+                                    updated_at = :updated_at
                                 WHERE id = :conversation_id
                                 """
                             ),
@@ -111,36 +331,36 @@ class ChatMemoryService:
                                 "conversation_id": conversation_id,
                             },
                         )
-                    return ConversationState(
-                        conversation_id=int(row[0]),
-                        user_id=int(row[1]),
-                        title=title or self._build_title(title_seed or "Chat"),
-                        created=False,
-                    )
+                        row = self._get_conversation_row(session, conversation_id) or row
+                    return self._conversation_to_state(row, fallback_title=title_seed or "Chat")
 
             title = self._build_title(title_seed or "Chat")
+            now_value = self._now()
             result = session.execute(
                 text(
                     """
                     INSERT INTO kop_chat_conversation
-                        (user_id, title, model_name, status, last_message_at)
+                        (user_id, title, workspace_key, model_name, scope_type, scope_id, summary, summary_updated_at, status, last_message_at, created_at, updated_at)
                     VALUES
-                        (:user_id, :title, NULL, 1, :last_message_at)
+                        (:user_id, :title, :workspace_key, NULL, :scope_type, :scope_id, NULL, NULL, 1, :last_message_at, :created_at, :updated_at)
                     """
                 ),
                 {
                     "user_id": user_id,
                     "title": title,
-                    "last_message_at": self._now(),
+                    "workspace_key": normalized_workspace_key,
+                    "scope_type": normalized_scope_type,
+                    "scope_id": normalized_scope_id,
+                    "last_message_at": now_value,
+                    "created_at": now_value,
+                    "updated_at": now_value,
                 },
             )
             conversation_id = int(result.lastrowid)
-            return ConversationState(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                title=title,
-                created=True,
-            )
+            row = self._get_conversation_row(session, conversation_id)
+            if row is None:
+                raise RuntimeError("Conversation created but could not be reloaded.")
+            return self._conversation_to_state(row, created=True, fallback_title=title)
 
     def _build_title(self, text_value: str) -> str:
         text_value = " ".join((text_value or "").split()).strip()
@@ -199,6 +419,11 @@ class ChatMemoryService:
             "chunk_indices": normalized_chunk_indices,
             "score": score,
             "preview": str(citation.get("preview") or ""),
+            "file_id": citation.get("file_id"),
+            "folder_id": citation.get("folder_id"),
+            "display_name": citation.get("display_name"),
+            "display_path": citation.get("display_path"),
+            "folder_path": citation.get("folder_path"),
         }
 
     def _citation_to_source(self, citation: dict[str, Any]) -> dict[str, Any]:
@@ -215,9 +440,19 @@ class ChatMemoryService:
             "page": citation.get("page"),
             "score": citation.get("score"),
             "preview": str(citation.get("preview") or ""),
+            "file_id": citation.get("file_id"),
+            "folder_id": citation.get("folder_id"),
+            "display_name": citation.get("display_name"),
+            "display_path": citation.get("display_path"),
+            "folder_path": citation.get("folder_path"),
         }
 
-    def list_conversations(self, *, page: int = 1, page_size: int = 20) -> tuple[list[dict[str, Any]], bool]:
+    def list_conversations(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[dict[str, Any]], bool]:
         if text is None:
             raise DatabaseUnavailableError("SQLAlchemy is not installed.")
 
@@ -233,6 +468,9 @@ class ChatMemoryService:
                     SELECT
                         c.id,
                         c.title,
+                        c.workspace_key,
+                        c.scope_type,
+                        c.scope_id,
                         c.model_name,
                         c.last_message_at,
                         c.created_at,
@@ -264,24 +502,33 @@ class ChatMemoryService:
                 },
             ).all()
 
-        has_more = len(rows) > page_size_value
-        items: list[dict[str, Any]] = []
-        for row in rows[:page_size_value]:
-            preview = " ".join(str(row[7] or "").split())
-            items.append(
-                {
-                    "id": int(row[0]),
-                    "title": str(row[1] or "") or self._build_title(preview or "Chat"),
-                    "model": str(row[2]) if row[2] is not None else None,
-                    "last_message_at": self._to_iso(row[3]),
-                    "created_at": self._to_iso(row[4]) or "",
-                    "updated_at": self._to_iso(row[5]) or "",
-                    "message_count": int(row[6] or 0),
-                    "preview": preview[:160],
-                }
-            )
-        return items, has_more
-
+            has_more = len(rows) > page_size_value
+            items: list[dict[str, Any]] = []
+            for row in rows[:page_size_value]:
+                preview = " ".join(str(row[10] or "").split())
+                scope_name = self._resolve_scope_name(
+                    session,
+                    scope_type=str(row[3] or "all"),
+                    scope_id=int(row[4] or 0),
+                    workspace_key=str(row[2]) if row[2] is not None else None,
+                )
+                items.append(
+                    {
+                        "id": int(row[0]),
+                        "title": str(row[1] or "") or self._build_title(preview or "Chat"),
+                        "workspace_key": str(row[2]) if row[2] is not None else None,
+                        "scope_type": self._normalize_scope_type(row[3]),
+                        "scope_id": int(row[4] or 0),
+                        "scope_name": scope_name,
+                        "model": str(row[5]) if row[5] is not None else None,
+                        "last_message_at": self._to_iso(row[6]),
+                        "created_at": self._to_iso(row[7]) or "",
+                        "updated_at": self._to_iso(row[8]) or "",
+                        "message_count": int(row[9] or 0),
+                        "preview": preview[:160],
+                    }
+                )
+            return items, has_more
     def list_messages(
         self,
         conversation_id: int,
@@ -326,13 +573,14 @@ class ChatMemoryService:
                     SELECT
                         id,
                         conversation_id,
+                        sender_user_id,
                         role,
                         content,
                         seq_no,
                         created_at,
-                        model_name,
+                        meta_json,
                         citations_json,
-                        meta_json
+                        token_count
                     FROM kop_chat_message
                     WHERE conversation_id = :conversation_id
                       AND role IN ('system', 'user', 'assistant', 'tool')
@@ -348,7 +596,7 @@ class ChatMemoryService:
         display_rows = list(reversed(rows[:limit_value]))
         items: list[dict[str, Any]] = []
         for row in display_rows:
-            citations = self._parse_json_value(row[7], [])
+            citations = self._parse_json_value(row[8], [])
             if not isinstance(citations, list):
                 citations = []
             normalized_citations = [
@@ -357,7 +605,7 @@ class ChatMemoryService:
                 if isinstance(item, dict)
             ]
 
-            meta = self._parse_json_value(row[8], {})
+            meta = self._parse_json_value(row[7], {})
             if not isinstance(meta, dict):
                 meta = {}
             usage = meta.get("usage")
@@ -367,19 +615,17 @@ class ChatMemoryService:
             if not isinstance(model_diagnostics, dict):
                 model_diagnostics = None
 
-            sources = [
-                self._citation_to_source(citation)
-                for citation in normalized_citations
-            ]
+            sources = [self._citation_to_source(citation) for citation in normalized_citations]
             items.append(
                 {
                     "id": int(row[0]),
                     "conversation_id": int(row[1]),
-                    "role": str(row[2]),
-                    "content": str(row[3] or ""),
-                    "seq_no": int(row[4]),
-                    "created_at": self._to_iso(row[5]) or "",
-                    "model": str(row[6]) if row[6] is not None else None,
+                    "sender_user_id": int(row[2]) if row[2] is not None else None,
+                    "role": str(row[3]),
+                    "content": str(row[4] or ""),
+                    "seq_no": int(row[5]),
+                    "created_at": self._to_iso(row[6]) or "",
+                    "model": str(meta.get("model") or "") or None,
                     "citations": normalized_citations,
                     "sources": sources,
                     "usage": usage,
@@ -424,13 +670,7 @@ class ChatMemoryService:
                 continue
         return history or None
 
-    def load_recent_history(self, conversation_id: int, limit: int | None = None) -> list[ChatHistoryItem]:
-        limit_value = max(1, limit or settings.chat_recent_message_limit)
-
-        cached = self._read_recent_history_cache(conversation_id)
-        if cached is not None:
-            return cached[-limit_value:]
-
+    def _load_conversation_history_from_db(self, conversation_id: int, limit: int) -> list[ChatHistoryItem]:
         if text is None:
             raise DatabaseUnavailableError("SQLAlchemy is not installed.")
 
@@ -446,13 +686,20 @@ class ChatMemoryService:
                     LIMIT :limit_value
                     """
                 ),
-                {"conversation_id": conversation_id, "limit_value": limit_value},
+                {"conversation_id": conversation_id, "limit_value": limit},
             ).all()
 
         history = [ChatHistoryItem(role=str(row[0]), content=str(row[1])) for row in reversed(rows)]
         if history:
             self._cache_recent_history(conversation_id, history)
         return history
+
+    def load_recent_history(self, conversation_id: int, limit: int | None = None) -> list[ChatHistoryItem]:
+        limit_value = max(1, limit or settings.chat_recent_message_limit)
+        cached = self._read_recent_history_cache(conversation_id)
+        if cached is not None:
+            return cached[-limit_value:]
+        return self._load_conversation_history_from_db(conversation_id, limit_value)
 
     def resolve_history(
         self,
@@ -496,6 +743,7 @@ class ChatMemoryService:
             if not conversation_row:
                 raise DatabaseUnavailableError(f"Conversation {conversation_id} does not exist.")
 
+            user_id = self._get_or_create_default_user_id(session)
             next_seq_row = session.execute(
                 text(
                     """
@@ -514,16 +762,18 @@ class ChatMemoryService:
                 text(
                     """
                     INSERT INTO kop_chat_message
-                        (conversation_id, role, content, seq_no, content_type, meta_json, citations_json, token_count, model_name, created_at)
+                        (conversation_id, sender_user_id, role, content, seq_no, meta_json, citations_json, token_count, created_at, updated_at)
                     VALUES
-                        (:conversation_id, 'user', :content, :seq_no, 'text', NULL, NULL, NULL, NULL, :created_at)
+                        (:conversation_id, :sender_user_id, 'user', :content, :seq_no, NULL, NULL, NULL, :created_at, :updated_at)
                     """
                 ),
                 {
                     "conversation_id": conversation_id,
+                    "sender_user_id": user_id,
                     "content": question,
                     "seq_no": seq_no,
                     "created_at": now_value,
+                    "updated_at": now_value,
                 },
             )
 
@@ -533,25 +783,27 @@ class ChatMemoryService:
                 "question_mode": question_mode,
                 "usage": usage,
                 "model_diagnostics": model_diagnostics,
+                "model": model_name,
             }
             session.execute(
                 text(
                     """
                     INSERT INTO kop_chat_message
-                        (conversation_id, role, content, seq_no, content_type, meta_json, citations_json, token_count, model_name, created_at)
+                        (conversation_id, sender_user_id, role, content, seq_no, meta_json, citations_json, token_count, created_at, updated_at)
                     VALUES
-                        (:conversation_id, 'assistant', :content, :seq_no, 'text', :meta_json, :citations_json, :token_count, :model_name, :created_at)
+                        (:conversation_id, :sender_user_id, 'assistant', :content, :seq_no, :meta_json, :citations_json, :token_count, :created_at, :updated_at)
                     """
                 ),
                 {
                     "conversation_id": conversation_id,
+                    "sender_user_id": user_id,
                     "content": answer,
                     "seq_no": seq_no,
                     "meta_json": json.dumps(meta_json, ensure_ascii=False),
                     "citations_json": json.dumps(citations or [], ensure_ascii=False),
                     "token_count": int((usage or {}).get("total_tokens", 0) or 0) or None,
-                    "model_name": model_name,
                     "created_at": now_value,
+                    "updated_at": now_value,
                 },
             )
 
@@ -577,7 +829,6 @@ class ChatMemoryService:
         self._cache_recent_history(conversation_id, self.load_recent_history(conversation_id))
 
     def summarize_placeholder(self, conversation_id: int) -> None:
-        """Reserve future summary support without blocking the first-stage rollout."""
         client = self._safe_redis()
         if client is not None:
             client.set(self._conversation_summary_key(conversation_id), "", ex=settings.chat_cache_ttl_sec)

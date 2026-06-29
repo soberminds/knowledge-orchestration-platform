@@ -249,10 +249,10 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px 10px;
-  background: #f8fafc;
+  background: var(--surface-subtle);
 }
 
 .sheet-meta {
@@ -262,11 +262,11 @@ watch(
 
 .sheet-meta strong {
   font-size: 0.84rem;
-  color: #0f172a;
+  color: var(--text);
 }
 
 .sheet-meta small {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 0.75rem;
 }
 
@@ -280,17 +280,17 @@ watch(
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #475569;
+  color: var(--text-muted);
   font-size: 0.78rem;
 }
 
 .sheet-locator input {
   width: 84px;
   height: 28px;
-  border: 1px solid #cfd8e3;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #0f172a;
+  background: var(--surface-solid);
+  color: var(--text);
   padding: 0 8px;
 }
 
@@ -306,11 +306,11 @@ watch(
 }
 
 .sheet-grid-wrap {
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--border);
   border-radius: 12px;
   overflow: auto;
   max-height: 68vh;
-  background: #fff;
+  background: var(--surface-solid);
 }
 
 .sheet-grid {
@@ -323,11 +323,11 @@ watch(
 
 .sheet-grid th,
 .sheet-grid td {
-  border-right: 1px solid #e5edf7;
-  border-bottom: 1px solid #e5edf7;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   padding: 7px 9px;
   font-size: 0.82rem;
-  color: #0f172a;
+  color: var(--text);
   vertical-align: top;
   white-space: pre-wrap;
   min-width: 120px;
@@ -338,7 +338,7 @@ watch(
   position: sticky;
   top: 0;
   z-index: 4;
-  background: #f1f5f9;
+  background: var(--surface-muted);
 }
 
 .sheet-grid .row-head {
@@ -357,14 +357,14 @@ watch(
   min-width: 72px;
   max-width: 72px;
   text-align: center;
-  background: #f8fafc;
-  color: #475569;
+  background: var(--surface-muted);
+  color: var(--text-muted);
 }
 
 .col-name {
   display: block;
   font-size: 0.7rem;
-  color: #64748b;
+  color: var(--text-muted);
   line-height: 1.1;
 }
 

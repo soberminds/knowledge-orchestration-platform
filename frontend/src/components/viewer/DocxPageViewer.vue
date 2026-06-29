@@ -499,7 +499,7 @@ defineExpose({
   padding: 8px 10px;
   border: 1px solid #d9e2ef;
   border-radius: 12px;
-  background: #f8fafc;
+  background: var(--surface-subtle);
   margin-bottom: 10px;
 }
 
@@ -516,9 +516,9 @@ defineExpose({
   height: 28px;
   padding: 0 6px;
   border-radius: 8px;
-  border: 1px solid #cfd8e3;
-  background: #fff;
-  color: #334155;
+  border: 1px solid var(--border);
+  background: var(--surface-solid);
+  color: var(--text);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -539,7 +539,7 @@ defineExpose({
 }
 
 .tool-meta {
-  color: #334155;
+  color: var(--text);
   font-size: 0.82rem;
   min-width: 62px;
   text-align: center;
@@ -569,9 +569,9 @@ defineExpose({
 
 .docx-canvas {
   min-height: 360px;
-  border: 1px solid #d9e2ef;
+  border: 1px solid var(--border);
   border-radius: 14px;
-  background: linear-gradient(180deg, #f1f3f5, #eceff3);
+  background: var(--surface-muted);
   overflow: auto;
 }
 
@@ -583,7 +583,7 @@ defineExpose({
   bottom: 0;
   padding: 14px;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.82);
+  background: color-mix(in srgb, var(--surface-solid) 82%, transparent);
   pointer-events: none;
 }
 
@@ -596,7 +596,7 @@ defineExpose({
 .docx-canvas :deep(.docx-wrapper > section.docx) {
   margin: 0 auto 26px;
   box-shadow: 0 14px 28px rgba(15, 23, 42, 0.16);
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--border);
   background: #fff;
 }
 

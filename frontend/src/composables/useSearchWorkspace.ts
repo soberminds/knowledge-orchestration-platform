@@ -14,6 +14,13 @@ export function useSearchWorkspace(topK: Ref<number>) {
     errorMessage.value = "";
   }
 
+  function resetForUserChange() {
+    query.value = "";
+    hits.value = [];
+    searching.value = false;
+    errorMessage.value = "";
+  }
+
   async function runSearch() {
     const trimmed = query.value.trim();
     if (!trimmed) {
@@ -44,5 +51,6 @@ export function useSearchWorkspace(topK: Ref<number>) {
     errorMessage,
     runSearch,
     clearError,
+    resetForUserChange,
   };
 }

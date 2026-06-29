@@ -20,13 +20,6 @@ const { t } = useI18n();
 
 <template>
   <section class="workspace-standard">
-    <header class="workspace-head">
-      <div>
-        <h2>{{ t("index.title") }}</h2>
-        <p>{{ t("index.subtitle") }}</p>
-      </div>
-    </header>
-
     <section class="tool-card">
       <div class="status-grid">
         <article>
@@ -44,10 +37,10 @@ const { t } = useI18n();
       </div>
 
       <div class="index-actions">
-        <el-button type="primary" :loading="ingesting" @click="$emit('rebuild')">
+        <el-button class="action-btn action-btn--confirm" :loading="ingesting" @click="$emit('rebuild')">
           {{ t("index.rebuild") }}
         </el-button>
-        <el-button plain :loading="refreshing" @click="$emit('refresh')">
+        <el-button class="action-btn action-btn--ghost" plain :loading="refreshing" @click="$emit('refresh')">
           {{ t("index.refresh") }}
         </el-button>
       </div>
@@ -60,29 +53,15 @@ const { t } = useI18n();
   height: 100%;
   min-height: 0;
   overflow: auto;
-}
-
-.workspace-head {
-  padding: 18px 24px 12px;
-}
-
-.workspace-head h2 {
-  margin: 0;
-  font-size: 1.18rem;
-}
-
-.workspace-head p {
-  margin: 4px 0 0;
-  color: #6b7280;
-  font-size: 0.9rem;
+  padding: 18px 24px;
 }
 
 .tool-card {
-  margin: 0 24px 18px;
-  background: #fff;
-  border: 1px solid #e5e7eb;
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 16px;
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
   padding: 16px;
 }
 
@@ -93,20 +72,22 @@ const { t } = useI18n();
 }
 
 .status-grid article {
-  border: 1px solid #eef0f3;
+  border: 1px solid var(--border);
   border-radius: 12px;
   padding: 10px;
+  background: var(--surface-subtle);
 }
 
 .status-grid span {
   display: block;
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.82rem;
 }
 
 .status-grid strong {
   display: block;
   margin-top: 6px;
+  color: var(--text);
   font-size: 1rem;
 }
 
@@ -117,15 +98,33 @@ const { t } = useI18n();
   gap: 10px;
 }
 
-@media (max-width: 720px) {
-  .workspace-head {
-    padding-left: 12px;
-    padding-right: 12px;
-  }
+.action-btn--confirm {
+  --el-button-bg-color: #0f766e;
+  --el-button-border-color: #0f766e;
+  --el-button-hover-bg-color: #0d9488;
+  --el-button-hover-border-color: #0d9488;
+  --el-button-active-bg-color: #0b6f68;
+  --el-button-active-border-color: #0b6f68;
+  --el-button-text-color: #fff;
+  --el-button-hover-text-color: #fff;
+  --el-button-active-text-color: #fff;
+}
 
-  .tool-card {
-    margin-left: 12px;
-    margin-right: 12px;
+.action-btn--ghost {
+  --el-button-text-color: #0f766e;
+  --el-button-hover-text-color: #0f766e;
+  --el-button-active-text-color: #0f766e;
+  --el-button-bg-color: rgba(236, 253, 249, 0.94);
+  --el-button-border-color: rgba(20, 184, 166, 0.18);
+  --el-button-hover-bg-color: rgba(220, 252, 242, 0.96);
+  --el-button-hover-border-color: rgba(20, 184, 166, 0.28);
+  --el-button-active-bg-color: rgba(220, 252, 242, 0.98);
+  --el-button-active-border-color: rgba(20, 184, 166, 0.32);
+}
+
+@media (max-width: 720px) {
+  .workspace-standard {
+    padding: 12px;
   }
 
   .status-grid {

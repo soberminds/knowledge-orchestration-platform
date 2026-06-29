@@ -33,17 +33,23 @@ const props = defineProps<{
   selectedFiles: File[];
   uploading: boolean;
   deletingPath?: string;
+  mutatingPath?: string;
 }>();
 
 const emit = defineEmits<{
   (event: "files-change", files: File[]): void;
   (event: "upload", folderPath?: string, parentId?: number | null): void;
   (event: "create-folder", parentPath: string, name: string, parentId?: number | null): void;
-  (event: "open-document", path: string): void;
-  (event: "open-office-editor", path: string): void;
-  (event: "delete-document", path: string): void;
+  (event: "use-current-folder-in-chat", folderPath: string, folderId: number | null): void;
+  (event: "open-document", path: string, fileId?: number | null): void;
+  (event: "open-office-editor", path: string, fileId?: number | null): void;
+  (event: "delete-document", path: string, fileId?: number | null): void;
   (event: "delete-folder", path: string): void;
-  (event: "document-saved", path: string): void;
+  (event: "rename-document", path: string, newName: string, fileId?: number | null): void;
+  (event: "move-document", path: string, parentPath: string, parentId?: number | null, fileId?: number | null): void;
+  (event: "rename-folder", path: string, newName: string): void;
+  (event: "move-folder", path: string, parentPath: string, parentId?: number | null): void;
+  (event: "document-saved", path: string, fileId?: number | null): void;
   (event: "refresh-office-health"): void;
 }>();
 
@@ -66,6 +72,7 @@ type FileItem = DocumentInfo & {
 
 type BrowserListItem = {
   kind: "folder" | "file";
+  id: number | null;
   key: string;
   name: string;
   path: string;
@@ -93,11 +100,18 @@ const currentFolderPath = ref("");
 const officeHealthDialogVisible = ref(false);
 const createFolderDialogVisible = ref(false);
 const createFolderName = ref("");
+const renameDialogVisible = ref(false);
+const renameTarget = ref<BrowserListItem | null>(null);
+const renameName = ref("");
+const moveDialogVisible = ref(false);
+const moveTarget = ref<BrowserListItem | null>(null);
+const moveTargetFolderPath = ref("");
 const editDialogVisible = ref(false);
 const editLoading = ref(false);
 const editSaving = ref(false);
 const editError = ref("");
 const editPath = ref("");
+const editFileId = ref<number | null>(null);
 const editEncoding = ref("utf-8");
 const editContent = ref("");
 const editOriginalContent = ref("");
@@ -107,6 +121,9 @@ const selectedFileNames = computed(() => props.selectedFiles.map((file) => file.
 const canSaveEdit = computed(() => !editLoading.value && !editSaving.value);
 const editDirty = computed(() => editContent.value !== editOriginalContent.value);
 const deletingActive = computed(() => Boolean(props.deletingPath));
+const mutatingActive = computed(() => Boolean(props.mutatingPath));
+const busyActive = computed(() => deletingActive.value || mutatingActive.value);
+const mutatingPath = computed(() => props.mutatingPath || "");
 
 function normalizePath(path: string) {
   return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
@@ -276,6 +293,7 @@ const visibleFiles = computed<FileItem[]>(() =>
 const browserListItems = computed<BrowserListItem[]>(() => [
   ...visibleFolders.value.map((folder) => ({
     kind: "folder" as const,
+    id: folder.folder_id ?? folder.id ?? null,
     key: `folder:${folder.path}`,
     name: folder.name,
     path: folder.path,
@@ -287,6 +305,7 @@ const browserListItems = computed<BrowserListItem[]>(() => [
   })),
   ...visibleFiles.value.map((doc) => ({
     kind: "file" as const,
+    id: doc.id ?? null,
     key: `file:${doc.path}`,
     name: doc.name,
     path: doc.path,
@@ -306,8 +325,37 @@ const currentFolderItem = computed(() =>
   directoryItems.value.find((item) => item.path === currentFolder.value) ?? null,
 );
 const currentUploadFolderId = computed(() => currentFolderItem.value?.folder_id ?? null);
+const chatScopeActionHint = computed(() => {
+  if (!currentFolder.value) {
+    return "将全部文档设为当前聊天的检索范围";
+  }
+  return `将“${formatVisiblePath(currentFolder.value)}”设为当前聊天的检索范围`;
+});
 const uploadTargetLabel = computed(() => formatVisiblePath(currentUploadFolderPath.value));
 const hasCurrentItems = computed(() => browserListItems.value.length > 0);
+const moveTargetLabel = computed(() => moveTarget.value?.name || "");
+const moveDestinationOptions = computed(() => {
+  const target = moveTarget.value;
+  return [
+    {
+      label: "我的文档",
+      path: "",
+      folderId: null as number | null,
+      disabled: false,
+    },
+    ...directoryItems.value.map((folder) => {
+      const folderPath = normalizePath(folder.path);
+      const isSelf = Boolean(target?.kind === "folder" && folderPath === target.path);
+      const isDescendant = Boolean(target?.kind === "folder" && folderPath.startsWith(`${target.path}/`));
+      return {
+        label: folderPath,
+        path: folderPath,
+        folderId: folder.folder_id ?? null,
+        disabled: isSelf || isDescendant,
+      };
+    }),
+  ];
+});
 const officeHealthOk = computed(
   () =>
     !props.officeHealthError &&
@@ -387,8 +435,14 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function openDocument(path: string) {
-  emit("open-document", path);
+function openDocument(path: string, fileId?: number | null) {
+  emit("open-document", path, fileId ?? null);
+}
+
+function openDocumentByItem(item: BrowserListItem) {
+  if (item.doc) {
+    emit("open-document", item.doc.path, item.doc.id ?? null);
+  }
 }
 
 function openBrowserItem(item: BrowserListItem) {
@@ -397,7 +451,7 @@ function openBrowserItem(item: BrowserListItem) {
     return;
   }
   if (item.doc) {
-    openDocument(item.doc.path);
+    openDocumentByItem(item);
   }
 }
 
@@ -411,7 +465,7 @@ function browserItemCanEditText(item: BrowserListItem) {
 
 function openBrowserItemInOffice(item: BrowserListItem) {
   if (item.doc) {
-    openOfficeEditor(item.doc.path);
+    openOfficeEditor(item.doc.path, item.doc.id ?? null);
   }
 }
 
@@ -423,12 +477,59 @@ function openBrowserItemTextEditor(item: BrowserListItem) {
 
 function deleteBrowserItem(item: BrowserListItem) {
   if (item.doc) {
-    deleteDocument(item.doc.path);
+    deleteDocument(item.doc.path, item.doc.id ?? null);
     return;
   }
   if (item.folder) {
     deleteFolder(item.folder.path);
   }
+}
+
+function openRenameDialog(item: BrowserListItem) {
+  renameTarget.value = item;
+  renameName.value = item.name;
+  renameDialogVisible.value = true;
+}
+
+function submitRename() {
+  const target = renameTarget.value;
+  const name = renameName.value.trim();
+  if (!target || !name || name === target.name) {
+    renameDialogVisible.value = false;
+    return;
+  }
+  if (target.kind === "folder") {
+    emit("rename-folder", target.path, name);
+  } else {
+    emit("rename-document", target.path, name, target.id);
+  }
+  renameDialogVisible.value = false;
+}
+
+function openMoveDialog(item: BrowserListItem) {
+  moveTarget.value = item;
+  moveTargetFolderPath.value = item.parentPath;
+  moveDialogVisible.value = true;
+}
+
+function submitMove() {
+  const target = moveTarget.value;
+  if (!target) {
+    return;
+  }
+  const destinationPath = normalizePath(moveTargetFolderPath.value);
+  if (destinationPath === normalizePath(target.parentPath)) {
+    moveDialogVisible.value = false;
+    return;
+  }
+  const folder = directoryItems.value.find((item) => item.path === destinationPath) ?? null;
+  const parentId = destinationPath ? folder?.folder_id ?? null : null;
+  if (target.kind === "folder") {
+    emit("move-folder", target.path, destinationPath, parentId);
+  } else {
+    emit("move-document", target.path, destinationPath, parentId, target.id);
+  }
+  moveDialogVisible.value = false;
 }
 
 function handleBrowserFolderCommand(command: string, item: BrowserListItem) {
@@ -443,8 +544,8 @@ function handleBrowserFileCommand(command: string, item: BrowserListItem) {
   }
 }
 
-function deleteDocument(path: string) {
-  emit("delete-document", path);
+function deleteDocument(path: string, fileId?: number | null) {
+  emit("delete-document", path, fileId ?? null);
 }
 
 function deleteFolder(path: string) {
@@ -461,6 +562,10 @@ function goToFolder(path: string) {
 
 function uploadToCurrentFolder() {
   emit("upload", currentUploadFolderPath.value, currentUploadFolderId.value);
+}
+
+function useCurrentFolderInChat() {
+  emit("use-current-folder-in-chat", currentFolder.value, currentUploadFolderId.value);
 }
 
 function uploadToFolder(folderPath: string) {
@@ -505,8 +610,8 @@ function isOfficeProEditableDocument(doc: DocumentInfo): boolean {
   return isOnlyOfficeDocument(doc.extension || doc.path);
 }
 
-function openOfficeEditor(path: string) {
-  emit("open-office-editor", path);
+function openOfficeEditor(path: string, fileId?: number | null) {
+  emit("open-office-editor", path, fileId ?? null);
 }
 
 function handleFolderCommand(command: string, folder: FolderItem) {
@@ -522,6 +627,36 @@ function handleFolderCommand(command: string, folder: FolderItem) {
     openCreateFolderDialogAt(folder.path);
     return;
   }
+  if (command === "rename") {
+    openRenameDialog({
+      kind: "folder",
+      id: folder.folder_id ?? folder.id ?? null,
+      key: `folder:${folder.path}`,
+      name: folder.name,
+      path: folder.path,
+      parentPath: folder.parentPath,
+      modifiedAt: folder.modified_at,
+      typeLabel: "文件夹",
+      sizeLabel: "-",
+      folder,
+    });
+    return;
+  }
+  if (command === "move") {
+    openMoveDialog({
+      kind: "folder",
+      id: folder.folder_id ?? folder.id ?? null,
+      key: `folder:${folder.path}`,
+      name: folder.name,
+      path: folder.path,
+      parentPath: folder.parentPath,
+      modifiedAt: folder.modified_at,
+      typeLabel: "文件夹",
+      sizeLabel: "-",
+      folder,
+    });
+    return;
+  }
   if (command === "delete") {
     deleteFolder(folder.path);
   }
@@ -529,19 +664,49 @@ function handleFolderCommand(command: string, folder: FolderItem) {
 
 function handleFileCommand(command: string, doc: FileItem) {
   if (command === "open") {
-    openDocument(doc.path);
+    openDocument(doc.path, doc.id ?? null);
     return;
   }
   if (command === "office") {
-    openOfficeEditor(doc.path);
+    openOfficeEditor(doc.path, doc.id ?? null);
     return;
   }
   if (command === "edit") {
     void openEditDialog(doc);
     return;
   }
+  if (command === "rename") {
+    openRenameDialog({
+      kind: "file",
+      id: doc.id ?? null,
+      key: `file:${doc.path}`,
+      name: doc.name,
+      path: doc.path,
+      parentPath: doc.parentPath,
+      modifiedAt: doc.modified_at,
+      typeLabel: doc.extension || "文件",
+      sizeLabel: formatBytes(doc.size_bytes),
+      doc,
+    });
+    return;
+  }
+  if (command === "move") {
+    openMoveDialog({
+      kind: "file",
+      id: doc.id ?? null,
+      key: `file:${doc.path}`,
+      name: doc.name,
+      path: doc.path,
+      parentPath: doc.parentPath,
+      modifiedAt: doc.modified_at,
+      typeLabel: doc.extension || "文件",
+      sizeLabel: formatBytes(doc.size_bytes),
+      doc,
+    });
+    return;
+  }
   if (command === "delete") {
-    deleteDocument(doc.path);
+    deleteDocument(doc.path, doc.id ?? null);
   }
 }
 
@@ -556,12 +721,13 @@ async function openEditDialog(doc: DocumentInfo) {
   editSaving.value = false;
   editError.value = "";
   editPath.value = doc.path;
+  editFileId.value = doc.id ?? null;
   editContent.value = "";
   editOriginalContent.value = "";
   editEncoding.value = "utf-8";
 
   try {
-    const payload = await getFileEditableText(doc.path);
+    const payload = await getFileEditableText(doc.path, doc.id ?? null);
     editPath.value = payload.path;
     editEncoding.value = payload.encoding || "utf-8";
     editContent.value = payload.content || "";
@@ -580,6 +746,7 @@ function closeEditDialog() {
   editSaving.value = false;
   editError.value = "";
   editPath.value = "";
+  editFileId.value = null;
   editContent.value = "";
   editOriginalContent.value = "";
   editEncoding.value = "utf-8";
@@ -592,9 +759,9 @@ async function saveEditedDocument() {
   editSaving.value = true;
   editError.value = "";
   try {
-    await saveFileEditableText(editPath.value, editContent.value);
+    await saveFileEditableText(editPath.value, editContent.value, editFileId.value);
     editOriginalContent.value = editContent.value;
-    emit("document-saved", editPath.value);
+    emit("document-saved", editPath.value, editFileId.value);
   } catch (error) {
     editError.value = error instanceof Error ? error.message : t("documents.edit_save_failed");
   } finally {
@@ -609,7 +776,7 @@ function toggleEditDialogFullscreen() {
 
 <template>
   <section class="workspace-standard">
-    <header class="file-manager-head">
+    <header v-if="false" class="file-manager-head">
       <div class="head-title">
         <div class="title-row">
           <h2>{{ t("documents.title") }}</h2>
@@ -649,7 +816,7 @@ function toggleEditDialogFullscreen() {
           </label>
 
           <el-button
-            type="primary"
+            class="action-btn action-btn--confirm"
             :icon="Upload"
             :loading="uploading"
             :disabled="!selectedFiles.length"
@@ -668,8 +835,24 @@ function toggleEditDialogFullscreen() {
             <el-icon class="is-spinning"><Loading /></el-icon>
             删除中...
           </span>
+          <span v-else-if="mutatingActive" class="deleting-pill">
+            <el-icon class="is-spinning"><Loading /></el-icon>
+            更新中...
+          </span>
           <span>{{ visibleFolders.length }} 个文件夹</span>
           <span>{{ visibleFiles.length }} 个文件</span>
+          <el-tooltip :content="officeHealthLabel" placement="bottom">
+            <el-button
+              class="health-icon-button"
+              circle
+              :loading="officeHealthLoading"
+              @click="openOfficeHealthDialog"
+            >
+              <el-icon v-if="officeHealthOk"><CircleCheckFilled /></el-icon>
+              <el-icon v-else-if="officeHealthProblem"><CircleCloseFilled /></el-icon>
+              <el-icon v-else><Setting /></el-icon>
+            </el-button>
+          </el-tooltip>
         </div>
       </div>
 
@@ -716,11 +899,11 @@ function toggleEditDialogFullscreen() {
         </aside>
 
         <main class="browser-main">
-          <div class="browser-toolbar">
-            <div class="breadcrumb-row">
-              <button
-                v-for="(item, index) in breadcrumbs"
-                :key="item.path || 'root'"
+        <div class="browser-toolbar">
+          <div class="breadcrumb-row">
+            <button
+              v-for="(item, index) in breadcrumbs"
+              :key="item.path || 'root'"
                 class="breadcrumb-button"
                 type="button"
                 @click="goToFolder(item.path)"
@@ -729,8 +912,22 @@ function toggleEditDialogFullscreen() {
                 <span v-if="index < breadcrumbs.length - 1" class="breadcrumb-separator">/</span>
               </button>
             </div>
-            <div class="toolbar-summary">
-              {{ visibleFolders.length }} folders · {{ visibleFiles.length }} files
+            <div class="toolbar-side">
+              <div class="toolbar-summary">
+                {{ visibleFolders.length }} folders · {{ visibleFiles.length }} files
+              </div>
+              <el-tooltip :content="chatScopeActionHint" placement="top">
+                <el-button
+                  size="small"
+                  class="action-btn action-btn--ghost"
+                  plain
+                  :icon="FolderOpened"
+                  :disabled="busyActive"
+                  @click="useCurrentFolderInChat"
+                >
+                  在聊天中使用
+                </el-button>
+              </el-tooltip>
             </div>
           </div>
 
@@ -747,7 +944,7 @@ function toggleEditDialogFullscreen() {
               v-for="item in browserListItems"
               :key="item.key"
               class="explorer-row"
-              :class="{ 'is-folder': item.kind === 'folder', 'is-deleting': deletingPath === item.path }"
+              :class="{ 'is-folder': item.kind === 'folder', 'is-deleting': deletingPath === item.path || mutatingPath === item.path }"
               @dblclick="openBrowserItem(item)"
             >
               <div class="explorer-name-cell">
@@ -762,6 +959,10 @@ function toggleEditDialogFullscreen() {
                   <el-icon class="is-spinning"><Loading /></el-icon>
                   正在删除
                 </span>
+                <span v-else-if="mutatingPath === item.path" class="row-status">
+                  <el-icon class="is-spinning"><Loading /></el-icon>
+                  正在更新
+                </span>
               </div>
 
               <span class="explorer-date-cell">
@@ -775,7 +976,7 @@ function toggleEditDialogFullscreen() {
                   <button
                     class="icon-action"
                     type="button"
-                    :disabled="deletingActive"
+                    :disabled="busyActive"
                     @click="openBrowserItem(item)"
                   >
                     <el-icon><Open /></el-icon>
@@ -793,7 +994,7 @@ function toggleEditDialogFullscreen() {
                     <button
                       class="icon-action is-danger"
                       type="button"
-                      :disabled="deletingActive"
+                      :disabled="busyActive"
                     >
                       <el-icon :class="{ 'is-spinning': deletingPath === item.path }">
                         <Loading v-if="deletingPath === item.path" />
@@ -807,7 +1008,7 @@ function toggleEditDialogFullscreen() {
                   trigger="click"
                   @command="handleBrowserFolderCommand(String($event), item)"
                 >
-                  <button class="icon-action" type="button" :disabled="deletingActive" @click.stop>
+                  <button class="icon-action" type="button" :disabled="busyActive" @click.stop>
                     <el-icon><MoreFilled /></el-icon>
                   </button>
                   <template #dropdown>
@@ -817,6 +1018,8 @@ function toggleEditDialogFullscreen() {
                         上传到这里
                       </el-dropdown-item>
                       <el-dropdown-item command="create" :icon="FolderAdd">新建子文件夹</el-dropdown-item>
+                      <el-dropdown-item command="rename" :icon="EditPen">重命名</el-dropdown-item>
+                      <el-dropdown-item command="move" :icon="Folder">移动到...</el-dropdown-item>
                       <el-dropdown-item command="delete" :icon="Delete">删除文件夹</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
@@ -828,7 +1031,7 @@ function toggleEditDialogFullscreen() {
                   <button
                     class="icon-action"
                     type="button"
-                    :disabled="deletingActive"
+                    :disabled="busyActive"
                     @click="openBrowserItem(item)"
                   >
                     <el-icon><Open /></el-icon>
@@ -843,7 +1046,7 @@ function toggleEditDialogFullscreen() {
                   <button
                     class="icon-action is-warning"
                     type="button"
-                    :disabled="deletingActive"
+                    :disabled="busyActive"
                     @click="openBrowserItemInOffice(item)"
                   >
                     <el-icon><EditPen /></el-icon>
@@ -858,7 +1061,7 @@ function toggleEditDialogFullscreen() {
                   <button
                     class="icon-action is-success"
                     type="button"
-                    :disabled="deletingActive"
+                    :disabled="busyActive"
                     @click="openBrowserItemTextEditor(item)"
                   >
                     <el-icon><EditPen /></el-icon>
@@ -876,7 +1079,7 @@ function toggleEditDialogFullscreen() {
                     <button
                       class="icon-action is-danger"
                       type="button"
-                      :disabled="deletingActive"
+                      :disabled="busyActive"
                     >
                       <el-icon :class="{ 'is-spinning': deletingPath === item.path }">
                         <Loading v-if="deletingPath === item.path" />
@@ -890,7 +1093,7 @@ function toggleEditDialogFullscreen() {
                   trigger="click"
                   @command="handleBrowserFileCommand(String($event), item)"
                 >
-                  <button class="icon-action" type="button" :disabled="deletingActive" @click.stop>
+                  <button class="icon-action" type="button" :disabled="busyActive" @click.stop>
                     <el-icon><MoreFilled /></el-icon>
                   </button>
                   <template #dropdown>
@@ -910,6 +1113,9 @@ function toggleEditDialogFullscreen() {
                       >
                         {{ t("documents.edit") }}
                       </el-dropdown-item>
+                      <el-dropdown-item command="rename" :icon="EditPen">重命名</el-dropdown-item>
+                      <el-dropdown-item command="move" :icon="Folder">移动到...</el-dropdown-item>
+                      <el-dropdown-item command="delete" :icon="Delete">删除</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
@@ -962,11 +1168,77 @@ function toggleEditDialogFullscreen() {
         <span class="dialog-footer">
           <el-button @click="createFolderDialogVisible = false">{{ t("documents.cancel") }}</el-button>
           <el-button
-            type="primary"
+            class="action-btn action-btn--confirm"
             :disabled="!createFolderName.trim()"
             @click="submitCreateFolder"
           >
             创建
+          </el-button>
+        </span>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="renameDialogVisible"
+      title="重命名"
+      width="420px"
+      append-to-body
+    >
+      <div class="create-folder-body">
+        <p>当前名称：{{ renameTarget?.name || "-" }}</p>
+        <el-input
+          v-model="renameName"
+          placeholder="输入新名称"
+          maxlength="255"
+          show-word-limit
+          @keyup.enter="submitRename"
+        />
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="renameDialogVisible = false">{{ t("documents.cancel") }}</el-button>
+          <el-button
+            class="action-btn action-btn--confirm"
+            :loading="mutatingActive"
+            :disabled="!renameName.trim() || renameName.trim() === renameTarget?.name"
+            @click="submitRename"
+          >
+            保存
+          </el-button>
+        </span>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="moveDialogVisible"
+      title="移动到"
+      width="480px"
+      append-to-body
+    >
+      <div class="move-dialog-body">
+        <p>移动对象：{{ moveTargetLabel || "-" }}</p>
+        <el-radio-group v-model="moveTargetFolderPath" class="move-target-list">
+          <el-radio
+            v-for="option in moveDestinationOptions"
+            :key="option.path || 'root'"
+            :label="option.path"
+            :disabled="option.disabled"
+            border
+          >
+            {{ option.label }}
+          </el-radio>
+        </el-radio-group>
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="moveDialogVisible = false">{{ t("documents.cancel") }}</el-button>
+          <el-button
+            class="action-btn action-btn--confirm"
+            :loading="mutatingActive"
+            :disabled="moveTargetFolderPath === moveTarget?.parentPath"
+            @click="submitMove"
+          >
+            移动
           </el-button>
         </span>
       </template>
@@ -1046,7 +1318,7 @@ function toggleEditDialogFullscreen() {
         <span class="dialog-footer">
           <el-button @click="editDialogVisible = false">{{ t("documents.cancel") }}</el-button>
           <el-button
-            type="primary"
+            class="action-btn action-btn--confirm"
             :loading="editSaving"
             :disabled="!canSaveEdit || !editDirty"
             @click="saveEditedDocument"
@@ -1061,75 +1333,13 @@ function toggleEditDialogFullscreen() {
 
 <style scoped>
 .workspace-standard {
-  --surface: #ffffff;
-  --surface-subtle: #fbfbfc;
-  --surface-hover: #f4f4f5;
-  --border: #dedee3;
-  --border-subtle: #eeeef1;
-  --text: #111827;
-  --text-muted: #6b7280;
-  --text-soft: #9ca3af;
-  --accent: #2563eb;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  background: #f7f7f8;
-}
-
-.file-manager-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px 30px 10px;
-  flex-shrink: 0;
-}
-
-.head-title {
-  min-width: 0;
-}
-
-.title-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.head-kicker {
-  display: inline-flex;
-  align-items: center;
-  min-height: 20px;
-  padding: 0 8px;
-  border: 1px solid #dedee3;
-  border-radius: 999px;
-  background: #fff;
-  color: #6b7280;
-  font-size: 0.7rem;
-  font-weight: 650;
-  line-height: 1;
-}
-
-.file-manager-head h2 {
-  margin: 0;
-  color: #111827;
-  font-size: 1.2rem;
-  font-weight: 720;
-  letter-spacing: 0;
-}
-
-.file-manager-head p {
-  margin: 4px 0 0;
-  color: #6b7280;
-  font-size: 0.84rem;
-}
-
-.head-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
+  background: transparent;
+  padding: 18px 24px;
 }
 
 .health-icon-button :deep(.el-icon) {
@@ -1139,16 +1349,16 @@ function toggleEditDialogFullscreen() {
 .health-icon-button {
   width: 34px;
   height: 34px;
-  border-color: #d9d9de;
-  background: #fff;
-  color: #6b7280;
+  border-color: var(--border);
+  background: var(--surface-solid);
+  color: var(--text-muted);
   box-shadow: 0 1px 2px rgba(17, 24, 39, 0.04);
 }
 
 .health-icon-button:hover {
-  border-color: #b9bbc3;
-  background: #f9fafb;
-  color: #111827;
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
 .health-icon-button :deep(.el-icon svg) {
@@ -1158,11 +1368,11 @@ function toggleEditDialogFullscreen() {
 .file-manager-shell {
   display: flex;
   flex-direction: column;
-  margin: 0 30px 18px;
-  background: #fff;
-  border: 1px solid #dedee3;
-  border-radius: 8px;
-  box-shadow: 0 18px 40px rgba(17, 24, 39, 0.045);
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 44px rgba(17, 24, 39, 0.055);
   min-height: 0;
   flex: 1;
   overflow: hidden;
@@ -1174,8 +1384,8 @@ function toggleEditDialogFullscreen() {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  border-bottom: 1px solid #e8e8ed;
-  background: #fff;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
   flex-shrink: 0;
 }
 
@@ -1194,22 +1404,22 @@ function toggleEditDialogFullscreen() {
 .command-meta {
   justify-content: flex-end;
   gap: 10px;
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.81rem;
 }
 
 .command-meta > span {
-  color: #8a8f98;
+  color: var(--text-soft);
 }
 
 .deleting-pill {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  border: 1px solid #fed7aa;
+  border: 1px solid color-mix(in srgb, #fb923c 46%, transparent);
   border-radius: 999px;
   padding: 4px 9px;
-  background: #fff7ed;
+  background: var(--surface-warn);
   color: #c2410c !important;
   font-weight: 620;
 }
@@ -1222,9 +1432,9 @@ function toggleEditDialogFullscreen() {
   min-height: 34px;
   padding: 0 12px;
   border-radius: 8px;
-  border: 1px solid #d9d9de;
-  background: #fff;
-  color: #1f2937;
+  border: 1px solid var(--border);
+  background: var(--surface-solid);
+  color: var(--text);
   font-size: 0.86rem;
   font-weight: 520;
   cursor: pointer;
@@ -1232,18 +1442,33 @@ function toggleEditDialogFullscreen() {
 }
 
 .command-button:hover {
-  border-color: #b9bbc3;
-  background: #f9fafb;
-  color: #111827;
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
-.command-group :deep(.el-button--primary) {
-  --el-button-bg-color: #111827;
-  --el-button-border-color: #111827;
-  --el-button-hover-bg-color: #1f2937;
-  --el-button-hover-border-color: #1f2937;
-  --el-button-active-bg-color: #000;
-  --el-button-active-border-color: #000;
+.action-btn--confirm {
+  --el-button-bg-color: #0f766e;
+  --el-button-border-color: #0f766e;
+  --el-button-hover-bg-color: #0d9488;
+  --el-button-hover-border-color: #0d9488;
+  --el-button-active-bg-color: #0b6f68;
+  --el-button-active-border-color: #0b6f68;
+  --el-button-text-color: #fff;
+  --el-button-hover-text-color: #fff;
+  --el-button-active-text-color: #fff;
+}
+
+.action-btn--ghost {
+  --el-button-bg-color: rgba(236, 253, 249, 0.94);
+  --el-button-border-color: rgba(20, 184, 166, 0.18);
+  --el-button-hover-bg-color: rgba(220, 252, 242, 0.98);
+  --el-button-hover-border-color: rgba(20, 184, 166, 0.28);
+  --el-button-active-bg-color: rgba(220, 252, 242, 0.98);
+  --el-button-active-border-color: rgba(20, 184, 166, 0.32);
+  --el-button-text-color: #0f766e;
+  --el-button-hover-text-color: #0f766e;
+  --el-button-active-text-color: #0f766e;
 }
 
 .file-picker input {
@@ -1253,13 +1478,13 @@ function toggleEditDialogFullscreen() {
 .selected-file-strip {
   gap: 8px;
   padding: 9px 14px;
-  border-bottom: 1px solid #e8e8ed;
-  background: #fafafa;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
   flex-shrink: 0;
 }
 
 .selected-label {
-  color: #4b5563;
+  color: var(--text-muted);
   font-size: 0.8rem;
   font-weight: 650;
 }
@@ -1274,14 +1499,14 @@ function toggleEditDialogFullscreen() {
 .folder-rail {
   min-width: 0;
   min-height: 0;
-  border-right: 1px solid #e8e8ed;
-  background: #fbfbfc;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
   overflow: auto;
 }
 
 .rail-title {
   padding: 15px 16px 9px;
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.75rem;
   font-weight: 650;
 }
@@ -1302,7 +1527,7 @@ function toggleEditDialogFullscreen() {
   border-radius: 8px;
   padding: 0 10px;
   background: transparent;
-  color: #374151;
+  color: var(--text);
   text-align: left;
   cursor: pointer;
   transition: background 0.14s ease, color 0.14s ease;
@@ -1315,12 +1540,12 @@ function toggleEditDialogFullscreen() {
 }
 
 .tree-node:hover {
-  background: #f1f1f3;
+  background: var(--surface-hover);
 }
 
 .tree-node.is-active {
-  background: #ececef;
-  color: #111827;
+  background: var(--surface-active);
+  color: var(--text);
   font-weight: 650;
 }
 
@@ -1329,7 +1554,7 @@ function toggleEditDialogFullscreen() {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: #fff;
+  background: var(--surface);
   overflow: auto;
 }
 
@@ -1340,8 +1565,15 @@ function toggleEditDialogFullscreen() {
   gap: 14px;
   min-height: 44px;
   padding: 0 18px;
-  border-bottom: 1px solid #eeeef1;
-  background: #fff;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.toolbar-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   flex-shrink: 0;
 }
 
@@ -1359,24 +1591,30 @@ function toggleEditDialogFullscreen() {
   border: 0;
   padding: 4px 1px;
   background: transparent;
-  color: #374151;
+  color: var(--text);
   font-size: 0.85rem;
   font-weight: 520;
   cursor: pointer;
 }
 
 .breadcrumb-button:hover {
-  color: #111827;
+  color: var(--accent-strong);
 }
 
 .breadcrumb-separator {
-  color: #9ca3af;
+  color: var(--text-soft);
 }
 
 .toolbar-summary {
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.8rem;
   white-space: nowrap;
+}
+
+.toolbar-side :deep(.el-button) {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
 }
 
 .explorer-list {
@@ -1396,29 +1634,29 @@ function toggleEditDialogFullscreen() {
 
 .explorer-list-head {
   min-height: 34px;
-  border-top: 1px solid #eeeef1;
-  border-bottom: 1px solid #eeeef1;
-  background: #fbfbfc;
-  color: #6b7280;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
   font-size: 0.75rem;
   font-weight: 650;
 }
 
 .explorer-row {
   min-height: 48px;
-  border-bottom: 1px solid #f0f0f2;
-  color: #374151;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
   font-size: 0.86rem;
   transition: background 0.14s ease, box-shadow 0.14s ease;
 }
 
 .explorer-row:hover {
-  background: #f8fafc;
-  box-shadow: inset 3px 0 0 #dbeafe;
+  background: rgba(20, 184, 166, 0.045);
+  box-shadow: inset 3px 0 0 #14b8a6;
 }
 
 .explorer-row.is-deleting {
-  background: #fff7ed;
+  background: rgba(251, 146, 60, 0.08);
   box-shadow: inset 3px 0 0 #fb923c;
   color: #9a3412;
 }
@@ -1431,7 +1669,7 @@ function toggleEditDialogFullscreen() {
 }
 
 .explorer-row.is-folder .explorer-item-icon {
-  color: #2563eb;
+  color: #0f766e;
 }
 
 .explorer-name-cell {
@@ -1445,7 +1683,7 @@ function toggleEditDialogFullscreen() {
   border: 0;
   padding: 0;
   background: transparent;
-  color: #111827;
+  color: var(--text);
   font-size: 0.9rem;
   font-weight: 590;
   text-align: left;
@@ -1462,7 +1700,7 @@ function toggleEditDialogFullscreen() {
 }
 
 .explorer-name-button:hover {
-  color: #111827;
+  color: var(--accent-strong);
 }
 
 .row-status {
@@ -1475,7 +1713,7 @@ function toggleEditDialogFullscreen() {
 }
 
 .explorer-item-icon {
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 1.04rem;
   flex-shrink: 0;
 }
@@ -1484,7 +1722,7 @@ function toggleEditDialogFullscreen() {
 .explorer-size-cell,
 .explorer-date-cell {
   min-width: 0;
-  color: #6b7280;
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1503,7 +1741,7 @@ function toggleEditDialogFullscreen() {
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
-  color: #6b7280;
+  color: var(--text-muted);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -1512,27 +1750,27 @@ function toggleEditDialogFullscreen() {
 }
 
 .icon-action:hover {
-  border-color: #d9d9de;
-  background: #f4f4f5;
-  color: #111827;
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
 .icon-action.is-success:hover {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
-  color: #15803d;
+  border-color: color-mix(in srgb, #22c55e 42%, transparent);
+  background: color-mix(in srgb, #22c55e 12%, var(--surface-solid));
+  color: color-mix(in srgb, #22c55e 78%, var(--text));
 }
 
 .icon-action.is-warning:hover {
-  border-color: #fde68a;
-  background: #fffbeb;
-  color: #b45309;
+  border-color: color-mix(in srgb, #fbbf24 44%, transparent);
+  background: var(--surface-warn);
+  color: var(--warning);
 }
 
 .icon-action.is-danger:hover {
-  border-color: #fecaca;
-  background: #fff1f2;
-  color: #dc2626;
+  border-color: color-mix(in srgb, #fb7185 46%, transparent);
+  background: var(--surface-danger);
+  color: var(--danger);
 }
 
 .icon-action:disabled {
@@ -1552,14 +1790,14 @@ function toggleEditDialogFullscreen() {
 
 .document-empty {
   margin: 24px 20px 30px;
-  border: 1px dashed #d9d9de;
+  border: 1px dashed rgba(148, 163, 184, 0.28);
   border-radius: 8px;
-  background: #fbfbfc;
+  background: var(--surface);
   flex-shrink: 0;
 }
 
 .document-empty :deep(.el-empty__description p) {
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.88rem;
 }
 
@@ -1570,8 +1808,39 @@ function toggleEditDialogFullscreen() {
 
 .create-folder-body p {
   margin: 0;
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.88rem;
+}
+
+.move-dialog-body {
+  display: grid;
+  gap: 12px;
+}
+
+.move-dialog-body p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.move-target-list {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.move-target-list :deep(.el-radio) {
+  width: 100%;
+  margin-right: 0;
+}
+
+.move-target-list :deep(.el-radio__label) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .edit-dialog-body {
@@ -1594,7 +1863,7 @@ function toggleEditDialogFullscreen() {
   white-space: nowrap;
   font-size: 1rem;
   font-weight: 600;
-  color: #111827;
+  color: var(--text);
 }
 
 .dialog-tool-btn {
@@ -1602,9 +1871,9 @@ function toggleEditDialogFullscreen() {
   height: 28px;
   padding: 0 6px;
   border-radius: 7px;
-  border: 1px solid #cfd8e3;
-  background: #fff;
-  color: #374151;
+  border: 1px solid var(--border);
+  background: var(--surface-solid);
+  color: var(--text);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -1631,7 +1900,7 @@ function toggleEditDialogFullscreen() {
 .edit-tip {
   margin: 0;
   font-size: 0.9rem;
-  color: #475569;
+  color: var(--text-muted);
 }
 
 .edit-meta {
@@ -1643,7 +1912,7 @@ function toggleEditDialogFullscreen() {
 
 .edit-path {
   font-size: 0.86rem;
-  color: #374151;
+  color: var(--text);
   word-break: break-all;
 }
 
@@ -1696,20 +1965,12 @@ function toggleEditDialogFullscreen() {
 }
 
 @media (max-width: 860px) {
-  .file-manager-head {
-    padding-left: 12px;
-    padding-right: 12px;
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .head-actions {
-    justify-content: flex-end;
+  .workspace-standard {
+    padding: 12px;
   }
 
   .file-manager-shell {
-    margin-left: 12px;
-    margin-right: 12px;
+    margin: 0;
   }
 
   .command-bar {

@@ -12,6 +12,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const props = defineProps<{
   sourcePath: string;
+  sourceFileId?: number | null;
   page?: number | null;
   snippet?: string;
   active?: boolean;
@@ -50,8 +51,8 @@ const autoPagingText = ref("");
 const isFullscreen = ref(false);
 const fileVersionToken = ref(Date.now());
 
-const fileUrl = computed(() => `${buildFileUrl(props.sourcePath)}&v=${fileVersionToken.value}`);
-const previewPdfUrl = computed(() => `${buildPreviewPdfUrl(props.sourcePath)}&v=${fileVersionToken.value}`);
+const fileUrl = computed(() => `${buildFileUrl(props.sourcePath, props.sourceFileId ?? null)}&v=${fileVersionToken.value}`);
+const previewPdfUrl = computed(() => `${buildPreviewPdfUrl(props.sourcePath, props.sourceFileId ?? null)}&v=${fileVersionToken.value}`);
 const extension = computed(() => {
   const part = props.sourcePath.split("?")[0];
   const dot = part.lastIndexOf(".");
@@ -420,7 +421,7 @@ function resetTablePayload() {
 }
 
 async function renderTextDocument(localToken: number) {
-  const payload = await getFilePageText(props.sourcePath, currentPage.value);
+  const payload = await getFilePageText(props.sourcePath, currentPage.value, props.sourceFileId ?? null);
   if (localToken !== runToken) {
     return;
   }
@@ -943,7 +944,7 @@ function zoomOut() {
 }
 
 watch(
-  () => [props.sourcePath, props.page, props.snippet],
+  () => [props.sourcePath, props.sourceFileId, props.page, props.snippet],
   () => {
     if (props.page && props.page > 0) {
       currentPage.value = Math.floor(props.page);
@@ -1127,10 +1128,10 @@ defineExpose({
 <style scoped>
 .unified-viewer {
   position: relative;
-  border: 1px solid #dde3ea;
+  border: 1px solid var(--border);
   border-radius: 14px;
   overflow: hidden;
-  background: linear-gradient(180deg, #ffffff, #f8fafc);
+  background: var(--surface);
 }
 
 .unified-viewer.is-fullscreen {
@@ -1138,7 +1139,7 @@ defineExpose({
   border: none;
   width: 100vw;
   height: 100vh;
-  background: #eef2f7;
+  background: var(--bg);
 }
 
 .viewer-toolbar {
@@ -1147,8 +1148,8 @@ defineExpose({
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
-  border-bottom: 1px solid #e7ecf3;
-  background: #f4f8fc;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-subtle);
 }
 
 .file-name {
@@ -1157,7 +1158,7 @@ defineExpose({
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--text);
 }
 
 .toolbar-actions {
@@ -1172,9 +1173,9 @@ defineExpose({
   height: 28px;
   padding: 0 6px;
   border-radius: 7px;
-  border: 1px solid #cfd8e3;
-  background: #fff;
-  color: #334155;
+  border: 1px solid var(--border);
+  background: var(--surface-solid);
+  color: var(--text);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -1197,7 +1198,7 @@ defineExpose({
 
 .tool-meta {
   font-size: 0.82rem;
-  color: #475569;
+  color: var(--text-muted);
   min-width: 56px;
   text-align: center;
 }
@@ -1205,7 +1206,7 @@ defineExpose({
 .tool-sep {
   width: 1px;
   height: 16px;
-  background: #d6dee8;
+  background: var(--border-strong);
   margin: 0 2px;
 }
 
@@ -1245,10 +1246,10 @@ defineExpose({
   width: 38px;
   height: 38px;
   border-radius: 999px;
-  border: 1px solid #b6c5d7;
-  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
   box-shadow: 0 8px 16px rgba(15, 23, 42, 0.12);
-  color: #0f172a;
+  color: var(--text);
   font-size: 0.78rem;
   font-weight: 700;
   cursor: pointer;
@@ -1317,11 +1318,11 @@ defineExpose({
   position: relative;
   width: fit-content;
   margin: 0 auto;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(2, 12, 27, 0.08);
   overflow: hidden;
-  background: #fff;
+  background: var(--surface-solid);
 }
 
 .pdf-page.is-current {
@@ -1366,11 +1367,11 @@ defineExpose({
   max-width: 960px;
   margin: 0 auto;
   padding: 16px 20px;
-  border: 1px solid #dde6f2;
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--surface-solid);
   line-height: 1.85;
-  color: #111827;
+  color: var(--text);
 }
 
 .text-page :deep(mark.inline-hit) {
@@ -1390,7 +1391,7 @@ defineExpose({
 .markdown-body :deep(h4) {
   margin: 1rem 0 0.5rem;
   line-height: 1.35;
-  color: #0f172a;
+  color: var(--text);
 }
 
 .markdown-body :deep(ul),
@@ -1408,31 +1409,31 @@ defineExpose({
 
 .markdown-body :deep(th),
 .markdown-body :deep(td) {
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--border);
   padding: 0.42rem 0.5rem;
   text-align: left;
   vertical-align: top;
 }
 
 .markdown-body :deep(th) {
-  background: #f8fafc;
+  background: var(--surface-muted);
   font-weight: 700;
 }
 
 .markdown-body :deep(blockquote) {
   margin: 0.65rem 0;
   padding: 0.5rem 0.75rem;
-  border-left: 3px solid #cbd5e1;
-  background: #f8fafc;
-  color: #334155;
+  border-left: 3px solid var(--border-strong);
+  background: var(--surface-subtle);
+  color: var(--text);
 }
 
 .markdown-body :deep(pre) {
   margin: 0.65rem 0;
   padding: 0.75rem 0.8rem;
   border-radius: 10px;
-  border: 1px solid #e5e7eb;
-  background: #f3f4f6;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
   overflow-x: auto;
 }
 
@@ -1444,8 +1445,8 @@ defineExpose({
 .markdown-body :deep(:not(pre) > code) {
   padding: 0.08rem 0.35rem;
   border-radius: 7px;
-  border: 1px solid #e5e7eb;
-  background: #f3f4f6;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
 }
 
 @media (max-width: 980px) {

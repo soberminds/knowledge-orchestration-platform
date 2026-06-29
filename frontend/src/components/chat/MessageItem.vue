@@ -41,6 +41,11 @@ const citationItems = computed<CitationRef[]>(() => {
     chunk_indices: [source.chunk_index],
     score: source.score ?? null,
     preview: source.preview,
+    file_id: source.file_id ?? null,
+    folder_id: source.folder_id ?? null,
+    display_name: source.display_name ?? null,
+    display_path: source.display_path ?? null,
+    folder_path: source.folder_path ?? null,
   }));
 });
 
@@ -128,6 +133,14 @@ const diagnosticsWarnings = computed(() => {
 
 function citationElementId(label: string) {
   return `${props.message.id}-cite-${label}`;
+}
+
+function citationDisplayPath(citation: CitationRef) {
+  return citation.display_path || citation.source;
+}
+
+function sourceDisplayPath(source: { display_path?: string | null; source: string }) {
+  return source.display_path || source.source;
 }
 
 function resetTextViewerState() {
@@ -246,7 +259,7 @@ async function focusCitation(label: string) {
               <button class="citation-link" @click.prevent="openCitationViewer(citation)">
                 [{{ citation.label }}]
               </button>
-              <span class="citation-source">{{ citation.source }}</span>
+              <span class="citation-source">{{ citationDisplayPath(citation) }}</span>
               <span v-if="citation.page !== null && citation.page !== undefined">{{ t("message.page_prefix") }}{{ citation.page }}</span>
               <span v-if="citation.score !== null && citation.score !== undefined">{{ t("message.score_prefix") }} {{ citation.score }}</span>
               <span v-if="citation.chunk_indices.length">{{ t("message.chunks_prefix") }} {{ citation.chunk_indices.join(", ") }}</span>
@@ -257,7 +270,7 @@ async function focusCitation(label: string) {
         <ul>
           <li v-for="(source, index) in message.sources" :key="`${message.id}-${index}`">
             <div class="source-head">
-              <strong>[{{ index + 1 }}] {{ source.source }}</strong>
+              <strong>[{{ index + 1 }}] {{ sourceDisplayPath(source) }}</strong>
               <span>{{ t("message.chunk") }} {{ source.chunk_index }}</span>
               <span v-if="source.page !== null && source.page !== undefined">{{ t("message.page_prefix") }}{{ source.page }}</span>
               <span v-if="source.score !== null && source.score !== undefined">{{ t("message.score_prefix") }} {{ source.score }}</span>
@@ -334,35 +347,36 @@ async function focusCitation(label: string) {
   width: 100%;
   max-width: 100%;
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 10px;
 }
 
 .message-row.is-user {
   justify-self: end;
-  width: min(78%, 900px);
-  grid-template-columns: minmax(0, 1fr) 40px;
+  width: min(76%, 860px);
+  grid-template-columns: minmax(0, 1fr) 38px;
 }
 
 .message-row.is-user .avatar {
   order: 2;
-  background: #111827;
+  background: #0f766e;
   color: #fff;
 }
 
 .message-row.is-user .message-body {
   order: 1;
-  background: #eef2ff;
-  border: 1px solid #dbe2ff;
-  border-radius: 12px;
-  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 13px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
 }
 
 .avatar {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   border-radius: 11px;
-  background: #10a37f;
+  background: linear-gradient(135deg, #0f766e 0%, #14b8a6 100%);
   color: #fff;
   display: inline-flex;
   align-items: center;
@@ -399,7 +413,7 @@ async function focusCitation(label: string) {
 
 .usage-note {
   margin: 0.38rem 0 0;
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 0.8rem;
 }
 
@@ -413,23 +427,23 @@ async function focusCitation(label: string) {
 .source-details {
   margin-top: 10px;
   padding: 8px 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fafafa;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-subtle);
 }
 
 .source-details summary {
   cursor: pointer;
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.88rem;
 }
 
 .citation-index {
   margin-top: 10px;
   padding: 8px;
-  border: 1px solid #d7ebea;
-  border-radius: 8px;
-  background: #f0fbf9;
+  border: 1px solid rgba(20, 184, 166, 0.12);
+  border-radius: 10px;
+  background: rgba(236, 253, 249, 0.72);
 }
 
 .citation-index h4 {
@@ -452,18 +466,18 @@ async function focusCitation(label: string) {
   align-items: center;
   gap: 8px;
   font-size: 0.82rem;
-  color: #334155;
+  color: var(--text);
   border-radius: 8px;
   padding: 5px 6px;
 }
 
 .citation-row.is-active {
-  background: linear-gradient(90deg, rgba(16, 163, 127, 0.16), rgba(16, 163, 127, 0.05));
+  background: linear-gradient(90deg, rgba(20, 184, 166, 0.14), rgba(20, 184, 166, 0.04));
 }
 
 .citation-link {
-  border: 1px solid #9fd9d1;
-  background: #ecfdf8;
+  border: 1px solid rgba(20, 184, 166, 0.24);
+  background: rgba(236, 253, 249, 0.92);
   border-radius: 999px;
   color: #0f766e;
   font-weight: 700;
@@ -472,7 +486,7 @@ async function focusCitation(label: string) {
 }
 
 .citation-source {
-  color: #0f172a;
+  color: var(--text);
 }
 
 .source-details ul {
@@ -484,10 +498,10 @@ async function focusCitation(label: string) {
 }
 
 .source-details li {
-  border-top: 1px dashed #e5e7eb;
+  border-top: 1px dashed var(--border);
   padding-top: 8px;
   font-size: 0.86rem;
-  color: #374151;
+  color: var(--text);
 }
 
 .source-details li:first-child {
@@ -499,11 +513,11 @@ async function focusCitation(label: string) {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  color: #6b7280;
+  color: var(--text-muted);
 }
 
 .source-head strong {
-  color: #0f172a;
+  color: var(--text);
 }
 
 .source-details li p {

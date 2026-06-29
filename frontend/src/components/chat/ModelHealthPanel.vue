@@ -8,6 +8,8 @@ const props = defineProps<{
   selectedModel: string;
   loading: boolean;
   lastCheckedAt: number | null;
+  showTitle?: boolean;
+  dialogMode?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -53,10 +55,10 @@ function thinkingStyleLabel(style?: string | null) {
 </script>
 
 <template>
-  <section class="model-health-panel">
+  <section class="model-health-panel" :class="{ 'is-dialog-mode': dialogMode }">
     <header class="panel-head">
       <div>
-        <h3>{{ t("model_health.title") }}</h3>
+        <h3 v-if="showTitle !== false">{{ t("model_health.title") }}</h3>
         <p>{{ t("model_health.last_check", { time: formattedCheckedAt }) }}</p>
       </div>
       <el-button size="small" :loading="loading" @click="emit('refresh')">{{ t("chat.settings_refresh") }}</el-button>
@@ -147,9 +149,9 @@ function thinkingStyleLabel(style?: string | null) {
 <style scoped>
 .model-health-panel {
   margin: 0 24px 12px;
-  border: 1px solid #d7dee8;
+  border: 1px solid var(--border);
   border-radius: 14px;
-  background: linear-gradient(180deg, #f7fbff 0%, #ffffff 56%);
+  background: var(--surface);
   padding: 12px;
   display: grid;
   gap: 10px;
@@ -164,13 +166,14 @@ function thinkingStyleLabel(style?: string | null) {
 
 .panel-head h3 {
   margin: 0;
+  color: var(--text);
   font-size: 0.98rem;
   line-height: 1.3;
 }
 
 .panel-head p {
   margin: 2px 0 0;
-  color: #5f6b7a;
+  color: var(--text-muted);
   font-size: 0.8rem;
 }
 
@@ -181,20 +184,30 @@ function thinkingStyleLabel(style?: string | null) {
 }
 
 .summary-card {
-  border: 1px solid #d7dee8;
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px 10px;
   display: grid;
   gap: 4px;
-  background: #fff;
+  background: var(--surface-subtle);
+}
+
+.model-health-panel.is-dialog-mode {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
 }
 
 .summary-card span {
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.76rem;
 }
 
 .summary-card strong {
+  color: var(--text);
   font-size: 1.04rem;
   line-height: 1.2;
 }
@@ -212,10 +225,14 @@ function thinkingStyleLabel(style?: string | null) {
   padding-right: 4px;
 }
 
+.model-health-panel.is-dialog-mode .health-list {
+  max-height: min(58vh, 560px);
+}
+
 .model-item {
-  border: 1px solid #dce4ee;
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--surface-solid);
   padding: 9px 10px;
   display: grid;
   gap: 7px;
@@ -231,7 +248,7 @@ function thinkingStyleLabel(style?: string | null) {
 }
 
 .model-item.is-unavailable {
-  background: #fff8f8;
+  background: var(--surface-danger);
 }
 
 .model-item-head {
@@ -242,6 +259,7 @@ function thinkingStyleLabel(style?: string | null) {
 }
 
 .model-name {
+  color: var(--text);
   font-size: 0.95rem;
   font-weight: 600;
   line-height: 1.2;
@@ -261,12 +279,12 @@ function thinkingStyleLabel(style?: string | null) {
 }
 
 .check-pill {
-  border: 1px solid #d6deea;
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 2px 8px;
   font-size: 0.76rem;
-  color: #4f5b6a;
-  background: #f8fbff;
+  color: var(--text-muted);
+  background: var(--surface-muted);
 }
 
 .check-pill.ok {
@@ -288,7 +306,7 @@ function thinkingStyleLabel(style?: string | null) {
 .base-url {
   margin: 0;
   font-size: 0.78rem;
-  color: #586779;
+  color: var(--text-muted);
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -298,7 +316,7 @@ function thinkingStyleLabel(style?: string | null) {
 .base-url code {
   word-break: break-all;
   font-family: "JetBrains Mono", "Consolas", monospace;
-  background: #f3f6fa;
+  background: var(--surface-muted);
   border-radius: 6px;
   padding: 2px 6px;
 }
@@ -319,6 +337,10 @@ function thinkingStyleLabel(style?: string | null) {
   .model-health-panel {
     margin-left: 12px;
     margin-right: 12px;
+  }
+
+  .model-health-panel.is-dialog-mode {
+    margin: 0;
   }
 }
 </style>

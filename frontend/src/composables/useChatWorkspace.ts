@@ -6,17 +6,21 @@ import {
   getChatOptions,
   listChatConversations,
   listChatMessages,
+  type ChatOptionsResponse,
   type ChatConversationSummary,
   type ChatMessageRecord,
   type ChatModelOption,
+  type KnowledgeBaseScopeOption,
   type ChatStreamDoneEvent,
   type HistoryItem,
+  type WorkspaceScopeOption,
   type ThinkingMode,
 } from "../api";
 import type { ChatSession, UiMessage } from "../types/chat";
 
 const CONVERSATION_PAGE_SIZE = 20;
 const MESSAGE_PAGE_SIZE = 30;
+type ChatScopeType = "all" | "folder" | "kb" | "workspace";
 
 function createId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -41,11 +45,19 @@ function createWelcomeMessage(welcomeText: string): UiMessage {
   };
 }
 
-function createSession(seedTitle: string, welcomeText: string): ChatSession {
+function createSession(
+  seedTitle: string,
+  welcomeText: string,
+  scope: { scopeType?: ChatScopeType; scopeId?: number | null; workspaceKey?: string | null; scopeName?: string | null } = {},
+): ChatSession {
   return {
     id: createId(),
     backendConversationId: null,
     title: seedTitle,
+    scopeType: scope.scopeType ?? "all",
+    scopeId: scope.scopeId ?? null,
+    workspaceKey: scope.workspaceKey ?? null,
+    scopeName: scope.scopeName ?? null,
     updatedAt: Date.now(),
     messages: [createWelcomeMessage(welcomeText)],
     messagesLoaded: true,
@@ -66,6 +78,10 @@ function conversationToSession(item: ChatConversationSummary): ChatSession {
     id: `db-${item.id}`,
     backendConversationId: item.id,
     title: item.title || item.preview || "Chat",
+    scopeType: item.scope_type ?? "all",
+    scopeId: item.scope_id ?? null,
+    workspaceKey: item.workspace_key ?? null,
+    scopeName: item.scope_name ?? null,
     updatedAt: parseTimestamp(item.last_message_at ?? item.updated_at ?? item.created_at),
     messages: [],
     messagesLoaded: false,
@@ -121,8 +137,14 @@ export function useChatWorkspace(topK: Ref<number>) {
   const messageViewport = ref<HTMLElement | null>(null);
   const availableModels = ref<string[]>([]);
   const modelOptions = ref<ChatModelOption[]>([]);
+  const knowledgeBaseOptions = ref<KnowledgeBaseScopeOption[]>([]);
+  const workspaceOptions = ref<WorkspaceScopeOption[]>([]);
   const selectedModel = ref("");
   const thinkingMode = ref<ThinkingMode>("quick");
+  const scopeType = ref<"all" | "folder" | "kb" | "workspace">("all");
+  const scopeId = ref<number | null>(null);
+  const workspaceKey = ref<string | null>(null);
+  const scopeName = ref<string | null>(null);
   const nativeWebSearchEnabled = ref(false);
   const externalWebSearchEnabled = ref(false);
   const externalWebSearchAvailable = ref(false);
@@ -141,6 +163,24 @@ export function useChatWorkspace(topK: Ref<number>) {
     () => modelOptions.value.find((item) => item.model === selectedModel.value) ?? null,
   );
   const selectedModelSupportsNativeSearch = computed(() => Boolean(selectedModelOption.value?.supports_native_web_search));
+  const selectedKnowledgeBaseLabel = computed(() => {
+    if (scopeType.value !== "kb" || scopeId.value == null) {
+      return null;
+    }
+    const found = knowledgeBaseOptions.value.find((item) => item.id === scopeId.value);
+    return found?.label ?? scopeName.value ?? null;
+  });
+  const selectedWorkspaceLabel = computed(() => {
+    if (scopeType.value !== "workspace") {
+      return null;
+    }
+    const key = workspaceKey.value?.trim();
+    if (!key) {
+      return null;
+    }
+    const found = workspaceOptions.value.find((item) => item.key === key || item.id === Number(key));
+    return found?.label ?? scopeName.value ?? key;
+  });
   const starterPrompts = computed(() => [
     t("chat.starter.summary"),
     t("chat.starter.rag_flow"),
@@ -167,12 +207,61 @@ export function useChatWorkspace(topK: Ref<number>) {
     composer.value = prompt;
   }
 
+  function applySessionScope(session: ChatSession) {
+    scopeType.value = session.scopeType ?? "all";
+    scopeId.value = session.scopeId ?? null;
+    workspaceKey.value = session.workspaceKey ?? null;
+    if (session.scopeType === "kb" && session.scopeId != null) {
+      const found = knowledgeBaseOptions.value.find((item) => item.id === session.scopeId);
+      scopeName.value = session.scopeName ?? found?.label ?? null;
+      return;
+    }
+    if (session.scopeType === "workspace" && session.workspaceKey) {
+      const found = workspaceOptions.value.find((item) => item.key === session.workspaceKey || item.id === Number(session.workspaceKey));
+      scopeName.value = session.scopeName ?? found?.label ?? session.workspaceKey;
+      return;
+    }
+    scopeName.value = session.scopeName ?? null;
+  }
+
+  function syncActiveSessionScope() {
+    const session = activeSession.value;
+    if (!session) {
+      return;
+    }
+    session.scopeType = scopeType.value;
+    session.scopeId = scopeId.value;
+    session.workspaceKey = workspaceKey.value;
+    session.scopeName = scopeName.value;
+  }
+
+  function resetForUserChange() {
+    sessions.value = [];
+    activeSessionId.value = "";
+    composer.value = "";
+    errorMessage.value = "";
+    scopeType.value = "all";
+    scopeId.value = null;
+    workspaceKey.value = null;
+    scopeName.value = null;
+    knowledgeBaseOptions.value = [];
+    workspaceOptions.value = [];
+    conversationsPage.value = 1;
+    conversationsHasMore.value = false;
+  }
+
   function clearError() {
     errorMessage.value = "";
   }
 
   function newChat() {
-    const session = createSession(t("chat.new_chat"), t("chat.welcome_message"));
+    const session = createSession(t("chat.new_chat"), t("chat.welcome_message"), {
+      scopeType: scopeType.value,
+      scopeId: scopeId.value,
+      workspaceKey: workspaceKey.value,
+      scopeName: scopeName.value,
+    });
+    applySessionScope(session);
     sessions.value.unshift(session);
     activeSessionId.value = session.id;
     composer.value = "";
@@ -221,9 +310,44 @@ export function useChatWorkspace(topK: Ref<number>) {
     clearError();
     const session = activeSession.value;
     if (session) {
+      applySessionScope(session);
       await loadSessionMessages(session);
     }
     await scrollToBottom();
+  }
+
+  function setScopeType(value: ChatScopeType) {
+    scopeType.value = value;
+    scopeId.value = null;
+    workspaceKey.value = null;
+    scopeName.value = null;
+    syncActiveSessionScope();
+  }
+
+  function setScopeId(value: number | null) {
+    scopeId.value = value;
+    workspaceKey.value = null;
+    if (value === null) {
+      scopeName.value = null;
+    } else if (scopeType.value === "kb") {
+      scopeName.value = knowledgeBaseOptions.value.find((item) => item.id === value)?.label ?? null;
+    } else if (scopeType.value === "folder") {
+      scopeName.value = scopeName.value ?? null;
+    }
+    syncActiveSessionScope();
+  }
+
+  function setWorkspaceKey(value: string | null) {
+    workspaceKey.value = value;
+    scopeId.value = null;
+    const found = value ? workspaceOptions.value.find((item) => item.key === value || item.id === Number(value)) : null;
+    scopeName.value = found?.label ?? value ?? null;
+    syncActiveSessionScope();
+  }
+
+  function setScopeName(value: string | null) {
+    scopeName.value = value?.trim() ? value.trim() : null;
+    syncActiveSessionScope();
   }
 
   async function loadOlderMessages() {
@@ -352,6 +476,10 @@ export function useChatWorkspace(topK: Ref<number>) {
     });
     session.messages.push(userMessage);
     session.updatedAt = Date.now();
+    session.scopeType = scopeType.value;
+    session.scopeId = scopeId.value;
+    session.workspaceKey = workspaceKey.value;
+    session.scopeName = scopeName.value;
 
     if (session.messages.length <= 3) {
       session.title = buildSessionTitle(question, t("chat.new_chat"));
@@ -380,6 +508,9 @@ export function useChatWorkspace(topK: Ref<number>) {
           history,
           top_k: topK.value,
           model: selectedModel.value || undefined,
+          scope_type: scopeType.value,
+          scope_id: scopeId.value ?? undefined,
+          workspace_key: workspaceKey.value ?? undefined,
           web_search: false,
           native_web_search: selectedModelSupportsNativeSearch.value ? nativeWebSearchEnabled.value : false,
           external_web_search: externalWebSearchAvailable.value ? externalWebSearchEnabled.value : false,
@@ -397,6 +528,10 @@ export function useChatWorkspace(topK: Ref<number>) {
                 activeSessionId.value = session.id;
               }
             }
+            session.scopeType = scopeType.value;
+            session.scopeId = scopeId.value;
+            session.workspaceKey = workspaceKey.value;
+            session.scopeName = scopeName.value;
             applyDonePayload(assistantMessage, donePayload);
             session.messagesLoaded = true;
             session.hasMoreMessages = Boolean(session.hasMoreMessages);
@@ -419,9 +554,8 @@ export function useChatWorkspace(topK: Ref<number>) {
     }
   }
 
-  function initialize() {
-    void loadConversations();
-    void loadChatOptions();
+  async function initialize() {
+    await Promise.all([loadConversations(), loadChatOptions()]);
   }
 
   async function loadConversations(options: { reset?: boolean } = {}) {
@@ -463,7 +597,21 @@ export function useChatWorkspace(topK: Ref<number>) {
       }
       const session = activeSession.value;
       if (session) {
+        applySessionScope(session);
         await loadSessionMessages(session);
+      }
+      if (knowledgeBaseOptions.value.length || workspaceOptions.value.length) {
+        for (const sessionItem of sessions.value) {
+          if (sessionItem.scopeType === "kb" && sessionItem.scopeId != null && !sessionItem.scopeName) {
+            sessionItem.scopeName = knowledgeBaseOptions.value.find((item) => item.id === sessionItem.scopeId)?.label ?? null;
+          }
+          if (sessionItem.scopeType === "workspace" && sessionItem.workspaceKey && !sessionItem.scopeName) {
+            sessionItem.scopeName =
+              workspaceOptions.value.find(
+                (item) => item.key === sessionItem.workspaceKey || item.id === Number(sessionItem.workspaceKey),
+              )?.label ?? sessionItem.workspaceKey;
+          }
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : t("error.chat_request_failed");
@@ -490,8 +638,11 @@ export function useChatWorkspace(topK: Ref<number>) {
     optionsLoading.value = true;
     try {
       const options = await getChatOptions();
+      const typedOptions = options as ChatOptionsResponse;
       availableModels.value = options.models?.length ? options.models : [options.default_model];
       modelOptions.value = options.model_options ?? [];
+      knowledgeBaseOptions.value = typedOptions.knowledge_bases ?? [];
+      workspaceOptions.value = typedOptions.workspaces ?? [];
       const firstAvailableModel =
         modelOptions.value.find((item) => item.available)?.model || options.default_model || availableModels.value[0];
       selectedModel.value = availableModels.value.includes(firstAvailableModel)
@@ -508,6 +659,22 @@ export function useChatWorkspace(topK: Ref<number>) {
       if (!currentOption?.supports_native_web_search) {
         nativeWebSearchEnabled.value = false;
       }
+      if (sessions.value.length) {
+        for (const session of sessions.value) {
+          if (session.scopeType === "kb" && session.scopeId != null && !session.scopeName) {
+            session.scopeName = knowledgeBaseOptions.value.find((item) => item.id === session.scopeId)?.label ?? null;
+          }
+          if (session.scopeType === "workspace" && session.workspaceKey && !session.scopeName) {
+            session.scopeName =
+              workspaceOptions.value.find((item) => item.key === session.workspaceKey || item.id === Number(session.workspaceKey))?.label ??
+              session.workspaceKey;
+          }
+        }
+        const session = activeSession.value;
+        if (session) {
+          applySessionScope(session);
+        }
+      }
     } catch {
       // Keep safe defaults without interrupting chat usage.
       availableModels.value = availableModels.value.length ? availableModels.value : ["deepseek-v4-flash"];
@@ -520,6 +687,8 @@ export function useChatWorkspace(topK: Ref<number>) {
       if (!selectedModel.value) {
         selectedModel.value = availableModels.value[0];
       }
+      knowledgeBaseOptions.value = [];
+      workspaceOptions.value = [];
       externalWebSearchAvailable.value = false;
       externalWebSearchEnabled.value = false;
       nativeWebSearchEnabled.value = false;
@@ -552,10 +721,18 @@ export function useChatWorkspace(topK: Ref<number>) {
     scrollToBottom,
     availableModels,
     modelOptions,
+    knowledgeBaseOptions,
+    workspaceOptions,
     selectedModel,
     thinkingMode,
+    scopeType,
+    scopeId,
+    workspaceKey,
+    scopeName,
     nativeWebSearchEnabled,
     selectedModelSupportsNativeSearch,
+    selectedKnowledgeBaseLabel,
+    selectedWorkspaceLabel,
     externalWebSearchEnabled,
     externalWebSearchAvailable,
     optionsLoading,
@@ -563,5 +740,10 @@ export function useChatWorkspace(topK: Ref<number>) {
     conversationsLoading,
     conversationsHasMore,
     loadChatOptions,
+    setScopeType,
+    setScopeId,
+    setWorkspaceKey,
+    setScopeName,
+    resetForUserChange,
   };
 }

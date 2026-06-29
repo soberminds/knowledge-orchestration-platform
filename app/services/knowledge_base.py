@@ -16,6 +16,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from app.core.settings import settings
+from app.core.request_context import get_current_user_id
 from chromadb import PersistentClient
 from chromadb.config import Settings as ChromaSettings
 from langchain_chroma import Chroma
@@ -25,6 +26,7 @@ from openai import OpenAI
 
 from app.schemas import ChatHistoryItem
 from app.services.embeddings import get_embedding_model
+from app.services.document_library import DocumentLibraryService
 from app.services.files import iter_source_files, load_documents_from_file
 from app.services.llm_provider_mapping import (
     CapabilityRegistry,
@@ -89,6 +91,11 @@ class SearchHit:
     score: float | None
     preview: str
     content: str
+    file_id: int | None = None
+    folder_id: int | None = None
+    display_name: str | None = None
+    display_path: str | None = None
+    folder_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +138,7 @@ class KnowledgeBaseService:
         self._lock = threading.RLock()
         self._embedder = None
         self._vector_store: Chroma | None = None
+        self._document_library: DocumentLibraryService | None = None
         self._llm_clients: dict[str, OpenAI] = {}
         self._model_provider_overrides_cache: dict[str, str] | None = None
         self._extra_provider_configs_cache: dict[str, ProviderRuntimeConfig] | None = None
@@ -140,6 +148,12 @@ class KnowledgeBaseService:
             qwen_deep_thinking_budget=self.settings.qwen_deep_thinking_budget,
             deepseek_deep_reasoning_effort=self.settings.deepseek_deep_reasoning_effort,
         )
+
+    @property
+    def document_library(self) -> DocumentLibraryService:
+        if self._document_library is None:
+            self._document_library = DocumentLibraryService()
+        return self._document_library
 
     @property
     def embedder(self):
@@ -422,9 +436,44 @@ class KnowledgeBaseService:
             or "not found" in message
         )
 
-    def _similarity_search_with_recovery(self, *, query: str, k: int):
+    def _current_user_filter(
+        self,
+        *,
+        scope_type: str = "all",
+        scope_id: int | None = None,
+        workspace_key: str | None = None,
+    ) -> dict[str, Any] | None:
         try:
-            return self.vector_store.similarity_search_with_relevance_scores(query=query, k=k)
+            current_user_id = get_current_user_id()
+            if current_user_id is not None:
+                user_id = int(current_user_id)
+            else:
+                user_id = self.document_library.get_default_user_id()
+            conditions: list[dict[str, Any]] = [{"user_id": user_id}]
+            normalized_scope = str(scope_type or "all").strip().lower()
+            if normalized_scope == "folder" and scope_id:
+                conditions.append({"folder_id": int(scope_id)})
+            elif normalized_scope == "kb" and scope_id:
+                conditions.append({"kb_id": int(scope_id)})
+            elif normalized_scope == "workspace" and workspace_key:
+                conditions.append({"workspace_key": str(workspace_key)})
+
+            if len(conditions) == 1:
+                return conditions[0]
+            return {"$and": conditions}
+        except Exception as exc:
+            logger.warning("Failed to resolve current document user for Chroma filtering. error=%s", exc)
+            return None
+
+    def _run_similarity_search(self, *, query: str, k: int, where_filter: dict[str, Any] | None = None):
+        kwargs: dict[str, Any] = {"query": query, "k": k}
+        if where_filter:
+            kwargs["filter"] = where_filter
+        return self.vector_store.similarity_search_with_relevance_scores(**kwargs)
+
+    def _similarity_search_with_recovery(self, *, query: str, k: int, where_filter: dict[str, Any] | None = None):
+        try:
+            return self._run_similarity_search(query=query, k=k, where_filter=where_filter)
         except Exception as exc:
             if not self._is_missing_chroma_collection_error(exc):
                 raise
@@ -433,7 +482,7 @@ class KnowledgeBaseService:
         # after a rebuild/reload. Drop that handle and try to reopen by name.
         self._vector_store = None
         try:
-            return self.vector_store.similarity_search_with_relevance_scores(query=query, k=k)
+            return self._run_similarity_search(query=query, k=k, where_filter=where_filter)
         except Exception as retry_exc:
             if not self._is_missing_chroma_collection_error(retry_exc):
                 raise
@@ -444,7 +493,54 @@ class KnowledgeBaseService:
         stats = self.rebuild_index()
         if stats.chunks_indexed <= 0:
             return []
-        return self.vector_store.similarity_search_with_relevance_scores(query=query, k=k)
+        return self._run_similarity_search(query=query, k=k, where_filter=where_filter)
+
+    def _similarity_search_for_current_user(self, *, query: str, k: int, scope_type: str = "all", scope_id: int | None = None, workspace_key: str | None = None):
+        normalized_scope = str(scope_type or "all").strip().lower()
+        if normalized_scope == "folder" and scope_id:
+            try:
+                folder_ids = self.document_library.get_descendant_folder_ids(int(scope_id))
+            except Exception as exc:
+                logger.warning("Failed to resolve folder descendants for scoped retrieval. error=%s", exc)
+                return []
+
+            if not folder_ids:
+                return []
+
+            best_hits: dict[tuple[str, int | None, int], tuple[Any, float]] = {}
+            for folder_id in folder_ids:
+                try:
+                    user_filter = self._current_user_filter(scope_type="folder", scope_id=int(folder_id))
+                except Exception as exc:
+                    logger.warning("Failed to resolve folder filter for scoped retrieval. error=%s", exc)
+                    continue
+                if not user_filter:
+                    continue
+
+                for doc, relevance in self._similarity_search_with_recovery(
+                    query=query,
+                    k=max(k, 1),
+                    where_filter=user_filter,
+                ):
+                    metadata = doc.metadata or {}
+                    score = float(relevance) if relevance is not None else 0.0
+                    key = (
+                        str(metadata.get("source", "unknown")),
+                        self._metadata_int(metadata, "page"),
+                        int(metadata.get("chunk_index", 0)),
+                    )
+                    previous = best_hits.get(key)
+                    if previous is None or score > previous[1]:
+                        best_hits[key] = ((doc, relevance), score)
+
+            ordered_keys = sorted(best_hits.keys(), key=lambda item: best_hits[item][1], reverse=True)
+            return [best_hits[key][0] for key in ordered_keys]
+
+        where_filter = self._current_user_filter(scope_type=scope_type, scope_id=scope_id, workspace_key=workspace_key)
+        if not where_filter:
+            return []
+
+        return self._similarity_search_with_recovery(query=query, k=k, where_filter=where_filter)
 
     def resolve_available_models(self) -> list[str]:
         models = list(self.settings.available_models)
@@ -637,6 +733,42 @@ class KnowledgeBaseService:
             pass
         self._vector_store = self._build_vector_store()
 
+    def _db_index_metadata_for_path(self, path: Path) -> dict[str, Any] | None:
+        try:
+            relative_source = self._relative_source_path(path.resolve())
+            metadata = self.document_library.get_index_metadata_by_storage_path(relative_source)
+        except Exception as exc:
+            logger.warning("Failed to load document DB metadata for indexing. path=%s error=%s", path, exc)
+            return None
+        if not metadata:
+            logger.warning("Skip indexing file without DB document metadata. path=%s", path)
+            return None
+        return metadata
+
+    def _attach_index_metadata(self, documents: list[Document], metadata: dict[str, Any]) -> list[Document]:
+        if not metadata:
+            return documents
+        return [
+            Document(page_content=document.page_content, metadata={**document.metadata, **metadata})
+            for document in documents
+        ]
+
+    def _collect_file_ids_from_documents(self, documents: list[Document]) -> list[int]:
+        file_ids: list[int] = []
+        seen: set[int] = set()
+        for document in documents:
+            metadata = document.metadata or {}
+            raw_file_id = metadata.get("file_id")
+            try:
+                file_id = int(raw_file_id)
+            except Exception:
+                continue
+            if file_id in seen:
+                continue
+            seen.add(file_id)
+            file_ids.append(file_id)
+        return file_ids
+
     def load_corpus(self) -> tuple[list[Document], list[str]]:
         documents: list[Document] = []
         loaded_files: list[str] = []
@@ -645,6 +777,10 @@ class KnowledgeBaseService:
             docs = load_documents_from_file(path)
             if not docs:
                 continue
+            index_metadata = self._db_index_metadata_for_path(path)
+            if index_metadata is None:
+                continue
+            docs = self._attach_index_metadata(docs, index_metadata)
             documents.extend(docs)
             loaded_files.append(str(path.relative_to(self.settings.root_dir)).replace("\\", "/"))
 
@@ -723,17 +859,55 @@ class KnowledgeBaseService:
             # Keep callback robust across collection schema/runtime differences.
             return
 
+    def delete_chunks_by_file_ids(self, file_ids: list[int]) -> IngestStats:
+        with self._lock:
+            self.ensure_directories()
+            normalized_ids = sorted({int(file_id) for file_id in file_ids if file_id is not None})
+            if not normalized_ids:
+                return IngestStats(documents_loaded=0, chunks_indexed=self.count_chunks(), source_files=[])
+
+            client = self._build_chroma_client()
+            try:
+                collection = client.get_collection(name=self.settings.collection_name)
+            except Exception:
+                return IngestStats(documents_loaded=0, chunks_indexed=0, source_files=[])
+
+            deleted_refs: list[str] = []
+            for file_id in normalized_ids:
+                try:
+                    collection.delete(where={"file_id": file_id})
+                    deleted_refs.append(f"file_id:{file_id}")
+                except Exception as exc:
+                    logger.warning("Failed to delete Chroma chunks by file_id=%s error=%s", file_id, exc)
+
+            return IngestStats(
+                documents_loaded=0,
+                chunks_indexed=self.count_chunks(),
+                source_files=deleted_refs,
+            )
+
     def rebuild_index(self) -> IngestStats:
         with self._lock:
             self.ensure_directories()
             documents, loaded_files = self.load_corpus()
             chunks = self.split_documents(documents)
+            indexed_file_ids = self._collect_file_ids_from_documents(documents)
 
             self.reset_collection()
             if not chunks:
+                if indexed_file_ids:
+                    try:
+                        self.document_library.update_file_index_states(indexed_file_ids, index_status="success")
+                    except Exception as exc:
+                        logger.warning("Failed to update file index state after empty rebuild: %s", exc)
                 return IngestStats(documents_loaded=len(documents), chunks_indexed=0, source_files=loaded_files)
 
             self._upsert_chunks(chunks)
+            if indexed_file_ids:
+                try:
+                    self.document_library.update_file_index_states(indexed_file_ids, index_status="success")
+                except Exception as exc:
+                    logger.warning("Failed to update file index state after rebuild: %s", exc)
 
             return IngestStats(
                 documents_loaded=len(documents),
@@ -750,19 +924,91 @@ class KnowledgeBaseService:
 
             relative_source = self._relative_source_path(target)
 
-            documents = load_documents_from_file(target)
+            index_metadata = self._db_index_metadata_for_path(target)
+            documents = (
+                self._attach_index_metadata(load_documents_from_file(target), index_metadata)
+                if index_metadata is not None
+                else []
+            )
             chunks = self.split_documents(documents)
+            indexed_file_ids = self._collect_file_ids_from_documents(documents)
             if chunks:
                 # Ensure embedding/vector store can initialize before removing
                 # the previous chunks for this file.
                 _ = self.vector_store
             self._delete_chunks_by_source(relative_source)
             self._upsert_chunks(chunks)
+            if indexed_file_ids:
+                try:
+                    self.document_library.update_file_index_states(indexed_file_ids, index_status="success")
+                except Exception as exc:
+                    logger.warning("Failed to update file index state after reindex: %s", exc)
 
             return IngestStats(
                 documents_loaded=len(documents),
                 chunks_indexed=len(chunks),
                 source_files=[relative_source],
+            )
+
+    def reindex_document_files(self, *, file_ids: list[int], source_paths: list[str]) -> IngestStats:
+        """Replace chunks for specific DB files and rebuild them from current metadata."""
+        with self._lock:
+            self.ensure_directories()
+            normalized_ids = sorted({int(file_id) for file_id in file_ids if file_id is not None})
+            normalized_sources: list[str] = []
+            seen_sources: set[str] = set()
+            for source_path in source_paths:
+                normalized = str(source_path or "").strip().replace("\\", "/").strip("/")
+                if not normalized or normalized in seen_sources:
+                    continue
+                seen_sources.add(normalized)
+                normalized_sources.append(normalized)
+
+            if normalized_ids:
+                self.delete_chunks_by_file_ids(normalized_ids)
+
+            documents_loaded = 0
+            chunks_indexed = 0
+            indexed_sources: list[str] = []
+            indexed_file_ids: list[int] = []
+            seen_file_ids: set[int] = set()
+            for source_path in normalized_sources:
+                target = (self.settings.root_dir / source_path).resolve()
+                if not target.exists() or not target.is_file():
+                    logger.warning("Skip reindexing missing document source after metadata change: %s", source_path)
+                    continue
+
+                index_metadata = self._db_index_metadata_for_path(target)
+                documents = (
+                    self._attach_index_metadata(load_documents_from_file(target), index_metadata)
+                    if index_metadata is not None
+                    else []
+                )
+                chunks = self.split_documents(documents)
+                if chunks:
+                    _ = self.vector_store
+                self._delete_chunks_by_source(self._relative_source_path(target))
+                self._upsert_chunks(chunks)
+                for file_id in self._collect_file_ids_from_documents(documents):
+                    if file_id in seen_file_ids:
+                        continue
+                    seen_file_ids.add(file_id)
+                    indexed_file_ids.append(file_id)
+
+                documents_loaded += len(documents)
+                chunks_indexed += len(chunks)
+                indexed_sources.append(source_path)
+
+            if indexed_file_ids:
+                try:
+                    self.document_library.update_file_index_states(indexed_file_ids, index_status="success")
+                except Exception as exc:
+                    logger.warning("Failed to update file index state after document reindex: %s", exc)
+
+            return IngestStats(
+                documents_loaded=documents_loaded,
+                chunks_indexed=chunks_indexed,
+                source_files=indexed_sources,
             )
 
     def delete_source_file_and_rebuild(self, path: Path) -> IngestStats:
@@ -792,6 +1038,14 @@ class KnowledgeBaseService:
         except Exception:
             return 0
 
+        where_filter = self._current_user_filter()
+        try:
+            payload = collection.get(where=where_filter, include=[]) if where_filter else collection.get(include=[])
+            return len(payload.get("ids", []))
+        except Exception as exc:
+            if where_filter:
+                logger.warning("Failed to count user-scoped Chroma chunks. filter=%s error=%s", where_filter, exc)
+                return 0
         try:
             return int(collection.count())
         except Exception:
@@ -939,7 +1193,41 @@ class KnowledgeBaseService:
 
         return marker_hits >= 3 or (marker_hits >= 1 and symbol_ratio >= 0.03 and ascii_ratio >= 0.45)
 
-    def _retrieve_candidates(self, queries: list[str], per_query_limit: int) -> list[SearchHit]:
+    def _metadata_int(self, metadata: dict[str, Any], key: str) -> int | None:
+        value = metadata.get(key)
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _search_hit_from_document(self, doc: Document, relevance: float | None) -> SearchHit:
+        metadata = doc.metadata or {}
+        score = float(relevance) if relevance is not None else 0.0
+        return SearchHit(
+            source=str(metadata.get("source", "unknown")),
+            chunk_index=int(metadata.get("chunk_index", 0)),
+            page=self._metadata_int(metadata, "page"),
+            score=round(score, 4) if relevance is not None else None,
+            preview=self._format_preview(doc.page_content),
+            content=doc.page_content,
+            file_id=self._metadata_int(metadata, "file_id"),
+            folder_id=self._metadata_int(metadata, "folder_id"),
+            display_name=str(metadata.get("display_name") or "") or None,
+            display_path=str(metadata.get("display_path") or "") or None,
+            folder_path=str(metadata.get("folder_path") or "") or None,
+        )
+
+    def _retrieve_candidates(
+        self,
+        queries: list[str],
+        per_query_limit: int,
+        *,
+        scope_type: str = "all",
+        scope_id: int | None = None,
+        workspace_key: str | None = None,
+    ) -> list[SearchHit]:
         if self.count_chunks() == 0:
             return []
 
@@ -947,25 +1235,23 @@ class KnowledgeBaseService:
         best_scores: dict[tuple[str, int | None, int], float] = {}
 
         for query in queries:
-            results = self._similarity_search_with_recovery(query=query, k=per_query_limit)
+            results = self._similarity_search_for_current_user(
+                query=query,
+                k=per_query_limit,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                workspace_key=workspace_key,
+            )
             for doc, relevance in results:
                 metadata = doc.metadata or {}
-                page = int(metadata["page"]) if metadata.get("page") is not None else None
                 score = float(relevance) if relevance is not None else 0.0
                 key = (
                     str(metadata.get("source", "unknown")),
-                    page,
+                    self._metadata_int(metadata, "page"),
                     int(metadata.get("chunk_index", 0)),
                 )
 
-                hit = SearchHit(
-                    source=key[0],
-                    chunk_index=key[2],
-                    page=page,
-                    score=round(score, 4),
-                    preview=self._format_preview(doc.page_content),
-                    content=doc.page_content,
-                )
+                hit = self._search_hit_from_document(doc, relevance)
 
                 previous_score = best_scores.get(key, -1.0)
                 if score > previous_score:
@@ -1066,6 +1352,11 @@ class KnowledgeBaseService:
                     "source": hit.source,
                     "page": hit.page,
                     "score": hit.score or 0.0,
+                    "file_id": hit.file_id,
+                    "folder_id": hit.folder_id,
+                    "display_name": hit.display_name,
+                    "display_path": hit.display_path,
+                    "folder_path": hit.folder_path,
                     "hits": [],
                 }
                 order_keys.append(key)
@@ -1083,31 +1374,48 @@ class KnowledgeBaseService:
 
         return groups[:max_groups]
 
-    def retrieve(self, query: str, top_k: int | None = None) -> list[SearchHit]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int | None = None,
+        *,
+        scope_type: str = "all",
+        scope_id: int | None = None,
+        workspace_key: str | None = None,
+    ) -> list[SearchHit]:
         if self.count_chunks() == 0:
             return []
 
         limit = top_k or self.settings.top_k
-        results = self._similarity_search_with_recovery(query=query, k=limit)
+        results = self._similarity_search_for_current_user(
+            query=query,
+            k=limit,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            workspace_key=workspace_key,
+        )
 
         hits: list[SearchHit] = []
         for doc, relevance in results:
-            metadata = doc.metadata or {}
-            score = round(float(relevance), 4) if relevance is not None else None
-            hits.append(
-                SearchHit(
-                    source=str(metadata.get("source", "unknown")),
-                    chunk_index=int(metadata.get("chunk_index", 0)),
-                    page=int(metadata["page"]) if metadata.get("page") is not None else None,
-                    score=score,
-                    preview=self._format_preview(doc.page_content),
-                    content=doc.page_content,
-                )
-            )
+            hits.append(self._search_hit_from_document(doc, relevance))
         return hits
 
-    def search(self, query: str, top_k: int | None = None) -> list[SearchHit]:
-        return self.retrieve(query=query, top_k=top_k)
+    def search(
+        self,
+        query: str,
+        top_k: int | None = None,
+        *,
+        scope_type: str = "all",
+        scope_id: int | None = None,
+        workspace_key: str | None = None,
+    ) -> list[SearchHit]:
+        return self.retrieve(
+            query=query,
+            top_k=top_k,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            workspace_key=workspace_key,
+        )
 
     def _build_context(self, hits: list[SearchHit], question_mode: QuestionMode) -> tuple[str, str, list[dict[str, Any]]]:
         groups = self._group_hits_for_context(hits=hits, question_mode=question_mode, max_groups=max(6, min(12, len(hits))))
@@ -1122,7 +1430,8 @@ class KnowledgeBaseService:
             page = group["page"]
             score = round(float(group["score"]), 4)
             page_text = f"page={page}" if page is not None else "page=unknown"
-            citation_lines.append(f"[{label}] {source}, {page_text}")
+            display_source = str(group.get("display_path") or source)
+            citation_lines.append(f"[{label}] {display_source}, {page_text}")
             citation_items.append(
                 {
                     "label": label,
@@ -1131,6 +1440,11 @@ class KnowledgeBaseService:
                     "chunk_indices": [int(hit.chunk_index) for hit in group["hits"]],
                     "score": score,
                     "preview": group["hits"][0].preview if group["hits"] else "",
+                    "file_id": group.get("file_id"),
+                    "folder_id": group.get("folder_id"),
+                    "display_name": group.get("display_name"),
+                    "display_path": group.get("display_path"),
+                    "folder_path": group.get("folder_path"),
                 }
             )
 
@@ -1140,7 +1454,10 @@ class KnowledgeBaseService:
                 snippets = self._truncate_for_context(hit.content, excerpt_limit)
                 excerpts.append(f"- chunk={hit.chunk_index}{score_part}\n{snippets}")
 
-            blocks.append(f"[{label}] source={source}, {page_text}, group_score={score}\n" + "\n".join(excerpts))
+            blocks.append(
+                f"[{label}] source={display_source}, storage_source={source}, {page_text}, group_score={score}\n"
+                + "\n".join(excerpts)
+            )
 
         context = "\n\n".join(blocks)
         citation_guide = "\n".join(citation_lines)
@@ -1494,6 +1811,9 @@ class KnowledgeBaseService:
         history: list[ChatHistoryItem] | None,
         top_k: int | None,
         web_search: bool,
+        scope_type: str = "all",
+        scope_id: int | None = None,
+        workspace_key: str | None = None,
     ) -> dict[str, Any]:
         rewritten_question = self._compose_search_query(question, history)
         question_mode = self._classify_question_mode(question)
@@ -1510,7 +1830,13 @@ class KnowledgeBaseService:
             rewritten_question=rewritten_question,
             question_mode=question_mode,
         )
-        candidates = self._retrieve_candidates(queries=queries, per_query_limit=per_query_limit)
+        candidates = self._retrieve_candidates(
+            queries=queries,
+            per_query_limit=per_query_limit,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            workspace_key=workspace_key,
+        )
 
         answer_hit_limit = max(requested_top_k, 4)
         if question_mode in ("overview", "comparison", "list", "general"):
@@ -1576,6 +1902,9 @@ class KnowledgeBaseService:
         web_search: bool = False,
         native_web_search: bool = False,
         external_web_search: bool = False,
+        scope_type: str = "all",
+        scope_id: int | None = None,
+        workspace_key: str | None = None,
     ) -> dict[str, Any]:
         model_name = self.resolve_model(model)
         provider, _ = self._resolve_model_client(model_name)
@@ -1622,6 +1951,9 @@ class KnowledgeBaseService:
             history=history,
             top_k=top_k,
             web_search=use_external_web_search,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            workspace_key=workspace_key,
         )
 
         fallback_answer = prepared["fallback_answer"]
@@ -1698,6 +2030,9 @@ class KnowledgeBaseService:
         web_search: bool = False,
         native_web_search: bool = False,
         external_web_search: bool = False,
+        scope_type: str = "all",
+        scope_id: int | None = None,
+        workspace_key: str | None = None,
     ) -> Iterator[dict[str, Any]]:
         model_name = self.resolve_model(model)
         provider, _ = self._resolve_model_client(model_name)
@@ -1747,6 +2082,9 @@ class KnowledgeBaseService:
             history=history,
             top_k=top_k,
             web_search=use_external_web_search,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            workspace_key=workspace_key,
         )
         fallback_answer = prepared["fallback_answer"]
         hits = prepared["hits"]

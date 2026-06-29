@@ -18,14 +18,17 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse, urlunparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.core.database import DatabaseUnavailableError
+from app.core.request_context import set_current_user_id
 from app.core.settings import settings
-from app.dependencies import get_chat_memory_service, get_document_library_service, get_knowledge_base_service
+from app.dependencies import get_auth_service, get_chat_memory_service, get_document_library_service, get_knowledge_base_service
 from app.schemas import (
+    AuthRequest,
+    AuthResponse,
     CitationRef,
     CostEstimate,
     ChatConversationListResponse,
@@ -35,10 +38,13 @@ from app.schemas import (
     ChatRequest,
     CreateDocumentFolderRequest,
     CreateDocumentFolderResponse,
+    DocumentMutationRequest,
+    DocumentMutationResponse,
     ModelDiagnostics,
     ChatOptionsResponse,
     ChatResponse,
     DocumentInfo,
+    KnowledgeBaseScopeOption,
     FileEditTextResponse,
     FileEditTextSaveRequest,
     FileEditTextSaveResponse,
@@ -50,8 +56,11 @@ from app.schemas import (
     SearchRequest,
     SearchResponse,
     SourceHit,
+    WorkspaceScopeOption,
+    UserProfile,
     TokenUsage,
 )
+from app.services.auth import AuthError, UserAuthService
 from app.services.files import TEXT_FILE_EXTENSIONS, read_file_page_text
 from app.services.chat_memory import ChatMemoryService
 from app.services.document_library import DocumentLibraryService
@@ -82,6 +91,7 @@ EDITABLE_TEXT_EXTENSIONS = set(TEXT_FILE_EXTENSIONS)
 OFFICE_CALLBACK_SAVE_STATUSES = {2, 6}
 _office_callback_status_lock = threading.Lock()
 _office_callback_status_by_path: dict[str, dict[str, Any]] = {}
+SESSION_COOKIE_NAME = UserAuthService.SESSION_COOKIE_NAME
 
 
 def _to_source_hit(hit: SearchHit) -> SourceHit:
@@ -91,6 +101,11 @@ def _to_source_hit(hit: SearchHit) -> SourceHit:
         page=hit.page,
         score=hit.score,
         preview=hit.preview,
+        file_id=hit.file_id,
+        folder_id=hit.folder_id,
+        display_name=hit.display_name,
+        display_path=hit.display_path,
+        folder_path=hit.folder_path,
     )
 
 
@@ -106,6 +121,11 @@ def _to_citation_ref(payload: dict) -> CitationRef:
         chunk_indices=[int(value) for value in payload.get("chunk_indices", [])],
         score=float(payload["score"]) if payload.get("score") is not None else None,
         preview=str(payload.get("preview", "")),
+        file_id=int(payload["file_id"]) if payload.get("file_id") is not None else None,
+        folder_id=int(payload["folder_id"]) if payload.get("folder_id") is not None else None,
+        display_name=str(payload.get("display_name") or "") or None,
+        display_path=str(payload.get("display_path") or "") or None,
+        folder_path=str(payload.get("folder_path") or "") or None,
     )
 
 
@@ -157,6 +177,139 @@ def _to_model_diagnostics(payload: dict | None) -> ModelDiagnostics | None:
         return None
 
 
+def _to_user_profile(payload: dict | None) -> UserProfile | None:
+    if not payload or not isinstance(payload, dict):
+        return None
+    try:
+        return UserProfile(
+            id=int(payload["id"]),
+            username=str(payload.get("username") or ""),
+            nickname=str(payload.get("nickname") or "") or None,
+            avatar_url=str(payload.get("avatar_url") or "") or None,
+            user_type=str(payload.get("user_type") or "local"),
+            is_default=bool(payload.get("is_default", False)),
+            status=int(payload.get("status", 1)),
+            last_login_at=str(payload.get("last_login_at") or "") or None,
+            created_at=str(payload.get("created_at") or "") or None,
+            updated_at=str(payload.get("updated_at") or "") or None,
+            authenticated=bool(payload.get("authenticated", False)),
+            is_guest=bool(payload.get("is_guest", False)),
+        )
+    except Exception:
+        return None
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=UserAuthService.SESSION_TTL_SEC,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+
+
+def _normalize_current_request_user(http_request: Request) -> None:
+    token = http_request.cookies.get(SESSION_COOKIE_NAME) or http_request.headers.get("Authorization")
+    if token and str(token).lower().startswith("bearer "):
+        token = str(token)[7:].strip()
+    if not token:
+        return
+    auth_service = get_auth_service()
+    try:
+        user_id = auth_service.resolve_effective_user_id_from_request(http_request)
+    except Exception:
+        return
+    set_current_user_id(user_id)
+
+
+def _bind_request_user(http_request: Request) -> None:
+    _normalize_current_request_user(http_request)
+
+
+@router.get("/auth/me", response_model=UserProfile)
+async def auth_me(
+    request: Request,
+    auth_service: UserAuthService = Depends(get_auth_service),
+) -> UserProfile:
+    try:
+        payload = await run_in_threadpool(auth_service.resolve_current_user, request)
+        user = _to_user_profile(payload)
+        if user is None:
+            raise HTTPException(status_code=500, detail="Failed to resolve current user.")
+        return user
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/auth/login", response_model=AuthResponse)
+async def auth_login(
+    payload: AuthRequest,
+    response: Response,
+    auth_service: UserAuthService = Depends(get_auth_service),
+) -> AuthResponse:
+    try:
+        result = await run_in_threadpool(auth_service.login, payload.username, payload.password)
+        token = str(result.pop("session_token"))
+        _set_session_cookie(response, token)
+        user = _to_user_profile(result)
+        if user is None:
+            raise HTTPException(status_code=500, detail="Failed to build user profile.")
+        return AuthResponse(user=user, session_token=token)
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/auth/register", response_model=AuthResponse)
+async def auth_register(
+    payload: AuthRequest,
+    response: Response,
+    auth_service: UserAuthService = Depends(get_auth_service),
+) -> AuthResponse:
+    try:
+        result = await run_in_threadpool(auth_service.register, payload.username, payload.password, payload.nickname)
+        token = str(result.pop("session_token"))
+        _set_session_cookie(response, token)
+        user = _to_user_profile(result)
+        if user is None:
+            raise HTTPException(status_code=500, detail="Failed to build user profile.")
+        return AuthResponse(user=user, session_token=token)
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/auth/logout")
+async def auth_logout(
+    response: Response,
+    request: Request,
+    auth_service: UserAuthService = Depends(get_auth_service),
+) -> dict[str, bool]:
+    token = request.cookies.get(SESSION_COOKIE_NAME) or request.headers.get("Authorization")
+    if token and str(token).lower().startswith("bearer "):
+        token = str(token)[7:].strip()
+    try:
+        await run_in_threadpool(auth_service.logout, str(token or ""))
+    finally:
+        _clear_session_cookie(response)
+    return {"ok": True}
+
+
 def _source_hits_payload(hits: list[SearchHit]) -> list[dict[str, Any]]:
     return [_to_source_hit(hit).model_dump() for hit in hits]
 
@@ -173,12 +326,80 @@ def _resolve_chat_memory_context(
         conversation = chat_memory.resolve_conversation(
             request.conversation_id,
             title_seed=request.question,
+            scope_type=request.scope_type,
+            scope_id=request.scope_id,
+            workspace_key=request.workspace_key,
         )
         history = chat_memory.resolve_history(conversation.conversation_id, request.history)
         return conversation.conversation_id, history
     except Exception as exc:
         logger.warning("Chat memory is unavailable; falling back to request history: %s", exc)
         return request.conversation_id, list(request.history)
+
+
+def _get_request_user_context(request: Request) -> int | None:
+    token = request.cookies.get(SESSION_COOKIE_NAME) or request.headers.get("Authorization")
+    if token and str(token).lower().startswith("bearer "):
+        token = str(token)[7:].strip()
+    auth_service = UserAuthService()
+    try:
+        return auth_service.resolve_effective_user_id_from_request(request)
+    except Exception:
+        return None
+
+
+async def _ensure_request_user_context(request: Request) -> None:
+    user_id = await run_in_threadpool(_get_request_user_context, request)
+    if user_id is None:
+        return
+    set_current_user_id(user_id)
+
+
+async def _reindex_mutated_document_files(
+    library: DocumentLibraryService,
+    service: KnowledgeBaseService,
+    *,
+    file_ids: list[int],
+    source_paths: list[str],
+):
+    normalized_ids = sorted({int(item) for item in file_ids if item is not None})
+    normalized_sources = [str(item).strip() for item in source_paths if str(item).strip()]
+    if normalized_ids:
+        await run_in_threadpool(
+            library.update_file_index_states,
+            normalized_ids,
+            index_status="queued",
+            parse_error=None,
+        )
+        await run_in_threadpool(
+            library.update_file_index_states,
+            normalized_ids,
+            index_status="running",
+            parse_error=None,
+        )
+    try:
+        stats = await run_in_threadpool(
+            service.reindex_document_files,
+            file_ids=normalized_ids,
+            source_paths=normalized_sources,
+        )
+    except Exception as exc:
+        if normalized_ids:
+            await run_in_threadpool(
+                library.update_file_index_states,
+                normalized_ids,
+                index_status="failed",
+                parse_error=str(exc),
+            )
+        raise
+    if normalized_ids:
+        await run_in_threadpool(
+            library.update_file_index_states,
+            normalized_ids,
+            index_status="success",
+            parse_error=None,
+        )
+    return stats
 
 
 def _save_chat_memory_turn(
@@ -466,13 +687,27 @@ def _probe_onlyoffice_health() -> OfficeHealthResponse:
         notes.append("ONLYOFFICE_JWT_ENABLED=true but ONLYOFFICE_JWT_SECRET is empty.")
 
     if configured:
-        reachable, status, _ = _http_probe(f"{ds_probe_url}/healthcheck", timeout_sec=6)
-        ds_reachable = reachable
-        ds_status = status
-        if not reachable:
-            notes.append("Document Server is unreachable from backend.")
-        elif status is not None and status >= 400:
-            notes.append(f"Document Server /healthcheck returned HTTP {status}.")
+        api_reachable, api_status, _ = _http_probe(f"{ds_probe_url}/web-apps/apps/api/documents/api.js", timeout_sec=6)
+        health_reachable, health_status, _ = _http_probe(f"{ds_probe_url}/healthcheck", timeout_sec=6)
+        root_reachable, root_status, _ = _http_probe(f"{ds_probe_url}/", timeout_sec=6)
+        status_candidates = (
+            (api_reachable, api_status),
+            (health_reachable, health_status),
+            (root_reachable, root_status),
+        )
+        ds_status = api_status if api_reachable else (health_status if health_reachable else root_status)
+        api_ok = api_reachable and api_status is not None and api_status < 400
+        root_ok = root_reachable and root_status is not None and root_status < 400
+        ds_reachable = api_ok
+        if not ds_reachable:
+            if root_ok:
+                notes.append("Document Server root is reachable, but ONLYOFFICE DocsAPI script is unavailable. Check the document server URL or port mapping.")
+            else:
+                notes.append("Document Server is unreachable from backend.")
+        elif api_status is not None and api_status >= 400:
+            notes.append(f"ONLYOFFICE DocsAPI script returned HTTP {api_status}.")
+        elif health_status is not None and health_status >= 400:
+            notes.append(f"Document Server is reachable, but optional /healthcheck returned HTTP {health_status}.")
 
         command_payload = {"c": "version"}
         command_body = json.dumps(command_payload, ensure_ascii=False).encode("utf-8")
@@ -524,9 +759,19 @@ def _probe_onlyoffice_health() -> OfficeHealthResponse:
                 notes.append("CommandService token check failed (possible JWT secret mismatch).")
             else:
                 command_ok = False
-                if jwt_enabled:
+                lower_text = cmd_text.lower()
+                explicit_jwt_error = any(keyword in lower_text for keyword in ("jwt", "token", "signature")) and any(
+                    keyword in lower_text for keyword in ("invalid", "mismatch", "expired", "permission", "unauthorized")
+                )
+                if jwt_enabled and explicit_jwt_error:
                     jwt_match = False
-                notes.append("CommandService returned non-zero error.")
+                    notes.append("CommandService returned an explicit JWT/token error.")
+                elif cmd_status == 404:
+                    notes.append("CommandService endpoint returned HTTP 404; JWT status could not be verified.")
+                elif parsed:
+                    notes.append("CommandService returned a non-zero or unsupported response; JWT status could not be verified.")
+                else:
+                    notes.append("CommandService did not return JSON; JWT status could not be verified.")
         else:
             notes.append("CommandService endpoint is unreachable from backend.")
 
@@ -605,6 +850,45 @@ def _document_info_from_payload(item: dict[str, Any]) -> DocumentInfo:
     )
 
 
+def _document_mutation_response(result: dict[str, Any], stats) -> DocumentMutationResponse:
+    return DocumentMutationResponse(
+        previous_path=str(result.get("previous_path") or ""),
+        path=str(result.get("path") or ""),
+        id=int(result["file_id"]) if result.get("file_id") is not None else (
+            int(result["folder_id"]) if result.get("folder_id") is not None else None
+        ),
+        file_id=int(result["file_id"]) if result.get("file_id") is not None else None,
+        folder_id=int(result["folder_id"]) if result.get("folder_id") is not None else None,
+        documents_loaded=int(getattr(stats, "documents_loaded", 0) or 0),
+        chunks_indexed=int(getattr(stats, "chunks_indexed", 0) or 0),
+        source_files=[
+            *[str(item) for item in result.get("source_files", []) if item],
+            *[str(item) for item in getattr(stats, "source_files", []) if item],
+        ],
+    )
+
+
+async def _resolve_document_path_by_request(
+    library: DocumentLibraryService,
+    *,
+    path: str = "",
+    file_id: int | None = None,
+) -> str:
+    if file_id is not None:
+        try:
+            payload = await run_in_threadpool(library.get_document_by_id, int(file_id))
+            resolved_path = str(payload.get("path") or "")
+            if resolved_path:
+                return resolved_path
+        except Exception:
+            pass
+
+    normalized_path = str(path or "").strip()
+    if not normalized_path:
+        raise HTTPException(status_code=400, detail="path or file_id is required")
+    return normalized_path
+
+
 @router.get("/documents", response_model=list[DocumentInfo])
 async def list_documents(
     library: DocumentLibraryService = Depends(get_document_library_service),
@@ -652,6 +936,62 @@ async def create_document_folder(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.put("/document-folders/rename", response_model=DocumentMutationResponse)
+async def rename_document_folder(
+    payload: DocumentMutationRequest,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+) -> DocumentMutationResponse:
+    if not payload.new_name:
+        raise HTTPException(status_code=400, detail="new_name is required")
+    try:
+        result = await run_in_threadpool(library.rename_folder, payload.path, payload.new_name)
+        stats = await _reindex_mutated_document_files(
+            library,
+            service,
+            file_ids=[int(item) for item in result.get("file_ids", []) if item is not None],
+            source_paths=[str(item) for item in result.get("source_files", []) if item],
+        )
+        return _document_mutation_response(result, stats)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put("/document-folders/move", response_model=DocumentMutationResponse)
+async def move_document_folder(
+    payload: DocumentMutationRequest,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+) -> DocumentMutationResponse:
+    try:
+        result = await run_in_threadpool(library.move_folder, payload.path, payload.parent_path, payload.parent_id)
+        stats = await _reindex_mutated_document_files(
+            library,
+            service,
+            file_ids=[int(item) for item in result.get("file_ids", []) if item is not None],
+            source_paths=[str(item) for item in result.get("source_files", []) if item],
+        )
+        return _document_mutation_response(result, stats)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.delete("/document-folders", response_model=IngestResponse)
 async def delete_document_folder(
     path: str,
@@ -661,11 +1001,12 @@ async def delete_document_folder(
     try:
         result = await run_in_threadpool(library.delete_folder, path)
         deleted_sources = [str(item) for item in result.get("source_files", []) if item]
-        stats = await run_in_threadpool(service.rebuild_index)
+        deleted_file_ids = [int(item) for item in result.get("file_ids", []) if item is not None]
+        stats = await run_in_threadpool(service.delete_chunks_by_file_ids, deleted_file_ids)
         return IngestResponse(
             documents_loaded=stats.documents_loaded,
             chunks_indexed=stats.chunks_indexed,
-            source_files=stats.source_files + deleted_sources,
+            source_files=deleted_sources + stats.source_files,
         )
     except DatabaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -677,20 +1018,104 @@ async def delete_document_folder(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.put("/documents/rename", response_model=DocumentMutationResponse)
+async def rename_document(
+    payload: DocumentMutationRequest,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+) -> DocumentMutationResponse:
+    if not payload.new_name:
+        raise HTTPException(status_code=400, detail="new_name is required")
+    try:
+        if payload.file_id is not None:
+            result = await run_in_threadpool(library.rename_file_by_id, int(payload.file_id), payload.new_name)
+        else:
+            document_path = await _resolve_document_path_by_request(
+                library,
+                path=payload.path,
+                file_id=payload.file_id,
+            )
+            result = await run_in_threadpool(library.rename_file, document_path, payload.new_name)
+        stats = await _reindex_mutated_document_files(
+            library,
+            service,
+            file_ids=[int(result["file_id"])] if result.get("file_id") is not None else [],
+            source_paths=[str(item) for item in result.get("source_files", []) if item],
+        )
+        return _document_mutation_response(result, stats)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put("/documents/move", response_model=DocumentMutationResponse)
+async def move_document(
+    payload: DocumentMutationRequest,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+) -> DocumentMutationResponse:
+    try:
+        if payload.file_id is not None:
+            result = await run_in_threadpool(library.move_file_by_id, int(payload.file_id), payload.parent_path, payload.parent_id)
+        else:
+            document_path = await _resolve_document_path_by_request(
+                library,
+                path=payload.path,
+                file_id=payload.file_id,
+            )
+            result = await run_in_threadpool(library.move_file, document_path, payload.parent_path, payload.parent_id)
+        stats = await _reindex_mutated_document_files(
+            library,
+            service,
+            file_ids=[int(result["file_id"])] if result.get("file_id") is not None else [],
+            source_paths=[str(item) for item in result.get("source_files", []) if item],
+        )
+        return _document_mutation_response(result, stats)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.delete("/documents", response_model=IngestResponse)
 async def delete_document(
-    path: str,
+    path: str = "",
+    file_id: int | None = None,
     library: DocumentLibraryService = Depends(get_document_library_service),
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
 ) -> IngestResponse:
     try:
-        result = await run_in_threadpool(library.delete_document, path)
-        deleted_path = str(result.get("path") or path)
-        stats = await run_in_threadpool(service.rebuild_index)
+        if file_id is not None:
+            result = await run_in_threadpool(library.delete_document_by_id, int(file_id))
+            deleted_path = str(result.get("path") or "")
+        else:
+            document_path = await _resolve_document_path_by_request(
+                library,
+                path=path,
+                file_id=file_id,
+            )
+            result = await run_in_threadpool(library.delete_document, document_path)
+            deleted_path = str(result.get("path") or document_path)
+        deleted_file_id = result.get("file_id")
+        deleted_file_ids = [int(deleted_file_id)] if deleted_file_id is not None else []
+        stats = await run_in_threadpool(service.delete_chunks_by_file_ids, deleted_file_ids)
         return IngestResponse(
             documents_loaded=stats.documents_loaded,
             chunks_indexed=stats.chunks_indexed,
-            source_files=stats.source_files + [deleted_path],
+            source_files=[deleted_path, *stats.source_files],
         )
     except DatabaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -701,7 +1126,10 @@ async def delete_document(
 
 
 @router.get("/file")
-async def open_file(path: str) -> FileResponse:
+async def open_file(path: str = "", file_id: int | None = None, library: DocumentLibraryService = Depends(get_document_library_service)) -> FileResponse:
+    if file_id is not None:
+        payload = await run_in_threadpool(library.get_document_by_id, int(file_id))
+        path = str(payload.get("path") or "")
     file_path = _resolve_file_path(path)
     media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
     return FileResponse(
@@ -711,7 +1139,10 @@ async def open_file(path: str) -> FileResponse:
 
 
 @router.get("/file/edit-text", response_model=FileEditTextResponse)
-async def get_file_edit_text(path: str) -> FileEditTextResponse:
+async def get_file_edit_text(path: str = "", file_id: int | None = None, library: DocumentLibraryService = Depends(get_document_library_service)) -> FileEditTextResponse:
+    if file_id is not None:
+        payload = await run_in_threadpool(library.get_document_by_id, int(file_id))
+        path = str(payload.get("path") or "")
     file_path = _resolve_file_path(path)
     extension, size_bytes = _validate_text_edit_file(file_path)
     raw = file_path.read_bytes()
@@ -727,8 +1158,15 @@ async def get_file_edit_text(path: str) -> FileEditTextResponse:
 
 
 @router.put("/file/edit-text", response_model=FileEditTextSaveResponse)
-async def save_file_edit_text(payload: FileEditTextSaveRequest) -> FileEditTextSaveResponse:
-    file_path = _resolve_file_path(payload.path)
+async def save_file_edit_text(
+    payload: FileEditTextSaveRequest,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+) -> FileEditTextSaveResponse:
+    path_value = payload.path
+    if payload.file_id is not None:
+        document = await run_in_threadpool(library.get_document_by_id, int(payload.file_id))
+        path_value = str(document.get("path") or "")
+    file_path = _resolve_file_path(path_value)
     extension, _ = _validate_text_edit_file(file_path)
     size_bytes = _atomic_write_text(file_path, payload.content, encoding="utf-8")
     modified_at = datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(timespec="seconds")
@@ -744,10 +1182,15 @@ async def save_file_edit_text(payload: FileEditTextSaveRequest) -> FileEditTextS
 
 @router.get("/office/editor-config", response_model=OfficeEditorConfigResponse)
 async def office_editor_config(
-    path: str,
+    path: str = "",
+    file_id: int | None = None,
     mode: str = "edit",
     lang: str = "zh-CN",
+    library: DocumentLibraryService = Depends(get_document_library_service),
 ) -> OfficeEditorConfigResponse:
+    if file_id is not None:
+        payload = await run_in_threadpool(library.get_document_by_id, int(file_id))
+        path = str(payload.get("path") or "")
     file_path = _resolve_file_path(path)
     extension = file_path.suffix.lower()
     if not is_onlyoffice_editable_extension(extension):
@@ -823,7 +1266,10 @@ async def office_health() -> OfficeHealthResponse:
 
 
 @router.get("/office/callback-status", response_model=OfficeCallbackStatusResponse)
-async def office_callback_status(path: str) -> OfficeCallbackStatusResponse:
+async def office_callback_status(path: str = "", file_id: int | None = None, library: DocumentLibraryService = Depends(get_document_library_service)) -> OfficeCallbackStatusResponse:
+    if file_id is not None:
+        payload = await run_in_threadpool(library.get_document_by_id, int(file_id))
+        path = str(payload.get("path") or "")
     file_path = _resolve_file_path(path)
     relative_path = _relative_path_from_root(file_path)
     return _get_office_callback_status(relative_path)
@@ -925,7 +1371,14 @@ async def office_editor_callback(
 
 
 @router.get("/file/preview-pdf")
-async def open_file_preview_pdf(path: str) -> FileResponse:
+async def open_file_preview_pdf(
+    path: str = "",
+    file_id: int | None = None,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+) -> FileResponse:
+    if file_id is not None:
+        payload = await run_in_threadpool(library.get_document_by_id, int(file_id))
+        path = str(payload.get("path") or "")
     source_path = _resolve_file_path(path)
     try:
         preview_path = await run_in_threadpool(get_preview_pdf_path, source_path)
@@ -944,7 +1397,15 @@ async def open_file_preview_pdf(path: str) -> FileResponse:
 
 
 @router.get("/file/page-text")
-async def file_page_text(path: str, page: int | None = None) -> dict:
+async def file_page_text(
+    path: str = "",
+    page: int | None = None,
+    file_id: int | None = None,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+) -> dict:
+    if file_id is not None:
+        payload = await run_in_threadpool(library.get_document_by_id, int(file_id))
+        path = str(payload.get("path") or "")
     file_path = _resolve_file_path(path)
     try:
         payload = read_file_page_text(file_path, page=page)
@@ -1040,6 +1501,9 @@ async def chat(
             request.web_search,
             request.native_web_search,
             request.external_web_search,
+            request.scope_type,
+            request.scope_id,
+            request.workspace_key,
         )
     except ModelUnavailableError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1089,6 +1553,9 @@ async def chat_stream(
                 request.web_search,
                 request.native_web_search,
                 request.external_web_search,
+                request.scope_type,
+                request.scope_id,
+                request.workspace_key,
             ):
                 if event.get("type") == "done":
                     usage = _to_token_usage(event.get("usage"))
@@ -1191,12 +1658,25 @@ async def list_chat_messages(
 
 
 @router.get("/chat/options", response_model=ChatOptionsResponse)
-async def chat_options(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> ChatOptionsResponse:
+async def chat_options(
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+    library: DocumentLibraryService = Depends(get_document_library_service),
+) -> ChatOptionsResponse:
     model_options = service.resolve_model_options()
+    try:
+        kb_options = [KnowledgeBaseScopeOption(**item) for item in library.list_kb_scope_options()]
+    except Exception:
+        kb_options = []
+    try:
+        workspace_options = [WorkspaceScopeOption(**item) for item in library.list_workspace_scope_options()]
+    except Exception:
+        workspace_options = []
     return ChatOptionsResponse(
         default_model=service.settings.deepseek_model,
         models=service.resolve_available_models(),
         model_options=model_options,
+        knowledge_bases=kb_options,
+        workspaces=workspace_options,
         web_search_available=service.is_web_search_available(),
         external_web_search_available=service.is_web_search_available(),
         thinking_modes=["quick", "deep"],

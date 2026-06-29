@@ -160,11 +160,11 @@ function onContainerMouseLeave() {
   margin: 0;
   white-space: pre-wrap;
   line-height: 1.76;
-  color: #111827;
+  color: var(--text);
 }
 
 .markdown-body {
-  color: #111827;
+  color: var(--text);
   line-height: 1.76;
   word-break: break-word;
 }
@@ -177,8 +177,8 @@ function onContainerMouseLeave() {
   margin: 0.6rem 0;
   padding: 0.75rem 0.85rem;
   border-radius: 10px;
-  background: #f3f4f6;
-  border: 1px solid #e5e7eb;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
   overflow-x: auto;
 }
 
@@ -190,8 +190,8 @@ function onContainerMouseLeave() {
 .markdown-body :deep(:not(pre) > code) {
   padding: 0.12rem 0.35rem;
   border-radius: 8px;
-  background: #f3f4f6;
-  border: 1px solid #e5e7eb;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
 }
 
 .markdown-body :deep(ul),
@@ -203,9 +203,9 @@ function onContainerMouseLeave() {
 .markdown-body :deep(blockquote) {
   margin: 0.55rem 0;
   padding: 0.5rem 0.8rem;
-  border-left: 3px solid #d1d5db;
-  background: #f8fafc;
-  color: #334155;
+  border-left: 3px solid var(--border-strong);
+  background: var(--surface-subtle);
+  color: var(--text);
 }
 
 .markdown-body :deep(a) {
@@ -233,12 +233,12 @@ function onContainerMouseLeave() {
   position: fixed;
   max-width: 360px;
   z-index: 2800;
-  background: #fff;
-  border: 1px solid #d9e8e2;
+  background: var(--surface-solid);
+  border: 1px solid var(--border);
   box-shadow: 0 10px 32px rgba(2, 12, 27, 0.18);
   border-radius: 12px;
   padding: 10px 12px;
-  color: #334155;
+  color: var(--text);
   font-size: 0.84rem;
   line-height: 1.62;
   pointer-events: none;

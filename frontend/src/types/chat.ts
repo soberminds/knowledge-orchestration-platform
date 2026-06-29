@@ -29,6 +29,10 @@ export interface ChatSession {
   id: string;
   backendConversationId?: number | null;
   title: string;
+  scopeType: "all" | "folder" | "kb" | "workspace";
+  scopeId: number | null;
+  workspaceKey: string | null;
+  scopeName?: string | null;
   updatedAt: number;
   messages: UiMessage[];
   messagesLoaded?: boolean;

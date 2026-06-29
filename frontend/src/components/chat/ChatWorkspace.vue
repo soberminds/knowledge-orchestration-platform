@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { ChatModelOption } from "../../api";
+import type { ChatModelOption, KnowledgeBaseScopeOption, WorkspaceScopeOption } from "../../api";
 import type { UiMessage } from "../../types/chat";
 import { useI18n } from "../../composables/useI18n";
+import type { FolderScopeNode } from "../../utils/documentTree";
 import ChatComposer from "./ChatComposer.vue";
 import MessageList from "./MessageList.vue";
 import ModelHealthPanel from "./ModelHealthPanel.vue";
@@ -18,6 +19,13 @@ const props = defineProps<{
   modelOptions: ChatModelOption[];
   selectedModel: string;
   thinkingMode: "quick" | "deep";
+  scopeType: "all" | "folder" | "kb" | "workspace";
+  scopeId: number | null;
+  scopeName: string | null;
+  workspaceKey: string | null;
+  folderScopeTree: FolderScopeNode[];
+  knowledgeBaseOptions: KnowledgeBaseScopeOption[];
+  workspaceOptions: WorkspaceScopeOption[];
   nativeWebSearchEnabled: boolean;
   nativeWebSearchSupported: boolean;
   externalWebSearchEnabled: boolean;
@@ -31,6 +39,10 @@ const emit = defineEmits<{
   (event: "update:topK", value: number): void;
   (event: "update:selectedModel", value: string): void;
   (event: "update:thinkingMode", value: "quick" | "deep"): void;
+  (event: "update:scopeType", value: "all" | "folder" | "kb" | "workspace"): void;
+  (event: "update:scopeId", value: number | null): void;
+  (event: "update:scopeName", value: string | null): void;
+  (event: "update:workspaceKey", value: string | null): void;
   (event: "update:nativeWebSearchEnabled", value: boolean): void;
   (event: "update:externalWebSearchEnabled", value: boolean): void;
   (event: "refresh-model-options"): void;
@@ -129,20 +141,6 @@ const modelGroups = computed<ModelGroup[]>(() => {
 
 <template>
   <section class="chat-workspace">
-    <header class="workspace-head">
-      <h2>{{ title }}</h2>
-      <p>{{ t("chat.workspace_subtitle") }}</p>
-    </header>
-
-    <ModelHealthPanel
-      v-if="modelHealthVisible"
-      :model-options="modelOptions"
-      :selected-model="selectedModel"
-      :loading="optionsLoading"
-      :last-checked-at="optionsLastCheckedAt"
-      @refresh="emit('refresh-model-options')"
-    />
-
     <MessageList
       :messages="messages"
       @viewport-ready="emit('viewport-ready', $event)"
@@ -157,6 +155,13 @@ const modelGroups = computed<ModelGroup[]>(() => {
       :top-k="topK"
       :selected-model="selectedModel"
       :thinking-mode="thinkingMode"
+      :scope-type="scopeType"
+      :scope-id="scopeId"
+      :scope-name="scopeName"
+      :workspace-key="workspaceKey"
+      :folder-scope-tree="folderScopeTree"
+      :knowledge-base-options="knowledgeBaseOptions"
+      :workspace-options="workspaceOptions"
       :native-web-search-enabled="nativeWebSearchEnabled"
       :native-web-search-supported="nativeWebSearchSupported"
       :external-web-search-enabled="externalWebSearchEnabled"
@@ -168,6 +173,10 @@ const modelGroups = computed<ModelGroup[]>(() => {
       @update:top-k="emit('update:topK', $event)"
       @update:selected-model="emit('update:selectedModel', $event)"
       @update:thinking-mode="emit('update:thinkingMode', $event)"
+      @update:scope-type="emit('update:scopeType', $event)"
+      @update:scope-id="emit('update:scopeId', $event)"
+      @update:scope-name="emit('update:scopeName', $event)"
+      @update:workspace-key="emit('update:workspaceKey', $event)"
       @update:native-web-search-enabled="emit('update:nativeWebSearchEnabled', $event)"
       @update:external-web-search-enabled="emit('update:externalWebSearchEnabled', $event)"
       @refresh-model-options="emit('refresh-model-options')"
@@ -175,6 +184,26 @@ const modelGroups = computed<ModelGroup[]>(() => {
       @send="emit('send')"
       @pick-starter="emit('pick-starter', $event)"
     />
+
+    <el-dialog
+      v-model="modelHealthVisible"
+      class="model-health-dialog"
+      :title="t('model_health.title')"
+      width="920px"
+      top="6vh"
+      append-to-body
+      destroy-on-close
+    >
+      <ModelHealthPanel
+        :model-options="modelOptions"
+        :selected-model="selectedModel"
+        :loading="optionsLoading"
+        :last-checked-at="optionsLastCheckedAt"
+        :show-title="false"
+        dialog-mode
+        @refresh="emit('refresh-model-options')"
+      />
+    </el-dialog>
   </section>
 </template>
 
@@ -186,26 +215,23 @@ const modelGroups = computed<ModelGroup[]>(() => {
   min-height: 0;
 }
 
-.workspace-head {
-  padding: 18px 24px 12px;
+:global(.model-health-dialog) {
+  max-width: calc(100vw - 32px);
+  border-radius: 16px;
 }
 
-.workspace-head h2 {
-  margin: 0;
-  font-size: 1.18rem;
-  font-weight: 600;
-}
-
-.workspace-head p {
-  margin: 4px 0 0;
-  color: #6b7280;
-  font-size: 0.9rem;
+:global(.model-health-dialog .el-dialog__body) {
+  padding: 8px 16px 16px;
 }
 
 @media (max-width: 720px) {
-  .workspace-head {
-    padding-left: 12px;
-    padding-right: 12px;
+  :global(.model-health-dialog) {
+    width: calc(100vw - 20px) !important;
+    margin-top: 4vh;
+  }
+
+  :global(.model-health-dialog .el-dialog__body) {
+    padding: 8px 12px 12px;
   }
 }
 </style>

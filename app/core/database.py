@@ -48,6 +48,11 @@ def get_engine():
     if _engine is None:
         _engine = create_engine(
             build_mysql_url(),
+            connect_args={
+                "connect_timeout": settings.mysql_connect_timeout_sec,
+                "read_timeout": settings.mysql_read_timeout_sec,
+                "write_timeout": settings.mysql_write_timeout_sec,
+            },
             pool_pre_ping=True,
             pool_recycle=1800,
             future=True,

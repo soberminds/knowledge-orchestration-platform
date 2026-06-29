@@ -22,6 +22,9 @@ class ChatRequest(BaseModel):
     history: list[ChatHistoryItem] = Field(default_factory=list)
     top_k: int | None = Field(default=None, ge=1, le=20)
     model: str | None = Field(default=None, min_length=1, max_length=128)
+    scope_type: Literal["all", "folder", "kb", "workspace"] = "all"
+    scope_id: int | None = Field(default=None, ge=0)
+    workspace_key: str | None = Field(default=None, max_length=128)
     # Legacy flag kept for backward compatibility.
     web_search: bool = False
     # Prefer provider-native web search when model/provider supports it.
@@ -29,6 +32,38 @@ class ChatRequest(BaseModel):
     # External web search via WEB_SEARCH_PROVIDER (tavily/serper).
     external_web_search: bool = False
     thinking_mode: Literal["quick", "deep"] = "quick"
+
+
+class AuthRequest(BaseModel):
+    """Login/register request payload."""
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+    nickname: str | None = Field(default=None, max_length=128)
+
+
+class UserProfile(BaseModel):
+    """Authenticated or guest user profile."""
+
+    id: int
+    username: str
+    nickname: str | None = None
+    avatar_url: str | None = None
+    user_type: str
+    is_default: bool = False
+    status: int = 1
+    last_login_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    authenticated: bool = False
+    is_guest: bool = False
+
+
+class AuthResponse(BaseModel):
+    """Authentication response."""
+
+    user: UserProfile
+    session_token: str
 
 
 class SourceHit(BaseModel):
@@ -39,6 +74,11 @@ class SourceHit(BaseModel):
     page: int | None = None
     score: float | None = None
     preview: str
+    file_id: int | None = None
+    folder_id: int | None = None
+    display_name: str | None = None
+    display_path: str | None = None
+    folder_path: str | None = None
 
 
 class CitationRef(BaseModel):
@@ -50,6 +90,11 @@ class CitationRef(BaseModel):
     chunk_indices: list[int] = Field(default_factory=list)
     score: float | None = None
     preview: str = ""
+    file_id: int | None = None
+    folder_id: int | None = None
+    display_name: str | None = None
+    display_path: str | None = None
+    folder_path: str | None = None
 
 
 class ModelDiagnostics(BaseModel):
@@ -96,12 +141,34 @@ class ChatModelOption(BaseModel):
     unavailable_reason: str | None = None
 
 
+class KnowledgeBaseScopeOption(BaseModel):
+    """One selectable knowledge base scope entry."""
+
+    id: int
+    label: str
+    workspace_id: int | None = None
+    workspace_key: str | None = None
+    workspace_name: str | None = None
+    folder_id: int | None = None
+
+
+class WorkspaceScopeOption(BaseModel):
+    """One selectable workspace scope entry."""
+
+    id: int
+    key: str
+    label: str
+    workspace_name: str | None = None
+
+
 class ChatOptionsResponse(BaseModel):
     """Dynamic options used by chat controls in frontend."""
 
     default_model: str
     models: list[str]
     model_options: list[ChatModelOption] = Field(default_factory=list)
+    knowledge_bases: list[KnowledgeBaseScopeOption] = Field(default_factory=list)
+    workspaces: list[WorkspaceScopeOption] = Field(default_factory=list)
     web_search_available: bool
     external_web_search_available: bool = False
     thinking_modes: list[Literal["quick", "deep"]] = Field(default_factory=lambda: ["quick", "deep"])
@@ -133,6 +200,10 @@ class ChatConversationSummary(BaseModel):
     id: int
     title: str
     model: str | None = None
+    workspace_key: str | None = None
+    scope_type: Literal["all", "folder", "kb", "workspace"] = "all"
+    scope_id: int = 0
+    scope_name: str | None = None
     message_count: int = 0
     preview: str = ""
     last_message_at: str | None = None
@@ -154,6 +225,7 @@ class ChatMessageRecord(BaseModel):
 
     id: int
     conversation_id: int
+    sender_user_id: int | None = None
     role: Literal["system", "user", "assistant", "tool"]
     content: str
     seq_no: int
@@ -231,6 +303,29 @@ class CreateDocumentFolderResponse(BaseModel):
     created: bool = True
 
 
+class DocumentMutationRequest(BaseModel):
+    """Request payload for document rename or move operations."""
+
+    path: str = ""
+    file_id: int | None = Field(default=None, ge=1)
+    parent_path: str = ""
+    parent_id: int | None = None
+    new_name: str | None = Field(default=None, max_length=255)
+
+
+class DocumentMutationResponse(BaseModel):
+    """Result payload for document rename or move operations."""
+
+    previous_path: str
+    path: str
+    id: int | None = None
+    file_id: int | None = None
+    folder_id: int | None = None
+    documents_loaded: int = 0
+    chunks_indexed: int = 0
+    source_files: list[str] = Field(default_factory=list)
+
+
 class FileEditTextResponse(BaseModel):
     """Text edit payload for editable source files."""
 
@@ -245,7 +340,8 @@ class FileEditTextResponse(BaseModel):
 class FileEditTextSaveRequest(BaseModel):
     """Save payload for text-edit operation."""
 
-    path: str = Field(min_length=1)
+    path: str = ""
+    file_id: int | None = Field(default=None, ge=1)
     content: str = ""
 
 

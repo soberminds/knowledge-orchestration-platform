@@ -137,8 +137,8 @@ function boolLabel(value: boolean | null | undefined) {
   margin: 0 24px 14px;
   padding: 12px;
   border-radius: 14px;
-  border: 1px solid #d7dee8;
-  background: linear-gradient(180deg, #f7fbff 0%, #ffffff 58%);
+  border: 1px solid var(--border);
+  background: var(--surface);
   display: grid;
   gap: 9px;
 }
@@ -157,18 +157,19 @@ function boolLabel(value: boolean | null | undefined) {
 
 .panel-head h3 {
   margin: 0;
+  color: var(--text);
   font-size: 0.98rem;
 }
 
 .panel-head p {
   margin: 2px 0 0;
-  color: #5f6b7a;
+  color: var(--text-muted);
   font-size: 0.8rem;
 }
 
 .panel-subtitle {
   margin: 0;
-  color: #5f6b7a;
+  color: var(--text-muted);
   font-size: 0.82rem;
 }
 
@@ -183,8 +184,8 @@ function boolLabel(value: boolean | null | undefined) {
 }
 
 .summary-card {
-  border: 1px solid #d7dee8;
-  background: #fff;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
   border-radius: 10px;
   padding: 8px 10px;
   display: grid;
@@ -192,11 +193,12 @@ function boolLabel(value: boolean | null | undefined) {
 }
 
 .summary-card span {
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 0.76rem;
 }
 
 .summary-card strong {
+  color: var(--text);
   font-size: 0.96rem;
   line-height: 1.3;
 }
@@ -217,7 +219,7 @@ function boolLabel(value: boolean | null | undefined) {
 .meta-lines p {
   margin: 0;
   font-size: 0.82rem;
-  color: #455468;
+  color: var(--text);
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
@@ -225,7 +227,7 @@ function boolLabel(value: boolean | null | undefined) {
 
 .meta-lines code {
   font-family: "JetBrains Mono", "Consolas", monospace;
-  background: #f3f6fa;
+  background: var(--surface-muted);
   border-radius: 6px;
   padding: 1px 6px;
   word-break: break-all;
@@ -234,7 +236,7 @@ function boolLabel(value: boolean | null | undefined) {
 .notes h4 {
   margin: 0 0 6px;
   font-size: 0.86rem;
-  color: #374151;
+  color: var(--text);
 }
 
 .notes ul {
