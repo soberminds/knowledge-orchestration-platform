@@ -62,9 +62,9 @@ function switchMode(nextMode: AuthMode) {
     <div class="auth-shell">
       <div class="auth-hero">
         <div class="brand-row">
-          <div class="brand-mark">R</div>
+          <div class="brand-mark">K</div>
           <div class="brand-copy">
-            <strong>RAG Knowledge Platform</strong>
+            <strong>Knowledge Orchestration Platform</strong>
             <small>{{ guestHint }}</small>
           </div>
         </div>

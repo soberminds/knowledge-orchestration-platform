@@ -25,6 +25,10 @@ class ChatMessagePart(BaseModel):
     mime_type: str | None = Field(default=None, max_length=128)
 
 
+RunMode = Literal["chat", "rag", "agent"]
+ThinkingMode = Literal["quick", "deep"]
+
+
 class ChatRequest(BaseModel):
     """Request payload for /api/chat and /api/chat/stream."""
 
@@ -43,7 +47,8 @@ class ChatRequest(BaseModel):
     native_web_search: bool = False
     # External web search via WEB_SEARCH_PROVIDER (tavily/serper).
     external_web_search: bool = False
-    thinking_mode: Literal["quick", "deep"] = "quick"
+    thinking_mode: ThinkingMode = "quick"
+    run_mode: RunMode = "rag"
 
 
 class AuthRequest(BaseModel):
@@ -118,11 +123,36 @@ class ModelDiagnostics(BaseModel):
     native_web_search_used: bool = False
     external_web_search_used: bool = False
     thinking_mode: str | None = None
+    run_mode: str | None = None
     provider_api: str | None = None
     option_fallback_used: bool = False
     warnings: list[str] = Field(default_factory=list)
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     capabilities: dict[str, Any] | None = None
+
+
+class AgentToolConfirmationActionRequest(BaseModel):
+    """Action payload for an Agent tool confirmation."""
+
+    conversation_id: int | None = Field(default=None, ge=1)
+
+
+class AgentToolConfirmationResponse(BaseModel):
+    """Response payload for pending/confirmed Agent tool actions."""
+
+    confirmation_id: str
+    user_id: int | None = None
+    tool_name: str
+    display_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    message: str
+    status: str
+    created_at: str
+    expires_at: str
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    confirmed_at: str | None = None
+    cancelled_at: str | None = None
 
 
 class ChatResponse(BaseModel):

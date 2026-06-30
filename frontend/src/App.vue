@@ -684,6 +684,7 @@ onMounted(async () => {
         :model-options="chatWorkspace.modelOptions.value"
         :selected-model="chatWorkspace.selectedModel.value"
         :thinking-mode="chatWorkspace.thinkingMode.value"
+        :run-mode="chatWorkspace.runMode.value"
         :scope-type="chatWorkspace.activeSession.value?.scopeType ?? chatWorkspace.scopeType.value"
         :scope-id="chatWorkspace.activeSession.value?.scopeId ?? chatWorkspace.scopeId.value"
         :scope-name="chatWorkspace.activeSession.value?.scopeName ?? chatWorkspace.scopeName.value"
@@ -703,6 +704,7 @@ onMounted(async () => {
         @update:top-k="setTopK"
         @update:selected-model="chatWorkspace.setSelectedModel($event)"
         @update:thinking-mode="chatWorkspace.thinkingMode.value = $event"
+        @update:run-mode="chatWorkspace.runMode.value = $event"
         @update:scope-type="chatWorkspace.setScopeType($event)"
         @update:scope-id="chatWorkspace.setScopeId($event)"
         @update:scope-name="chatWorkspace.setScopeName($event)"
@@ -714,6 +716,8 @@ onMounted(async () => {
         @pick-starter="chatWorkspace.useStarterPrompt"
         @viewport-ready="chatWorkspace.setViewport"
         @load-older="chatWorkspace.loadOlderMessages"
+        @confirm-tool="chatWorkspace.confirmToolCall"
+        @cancel-tool="chatWorkspace.cancelToolCall"
       />
 
         <DocumentsWorkspace

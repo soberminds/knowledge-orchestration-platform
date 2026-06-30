@@ -23,10 +23,13 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.core.database import DatabaseUnavailableError
-from app.core.request_context import set_current_user_id
+from app.core.request_context import get_current_user_id, set_current_user_id
 from app.core.settings import settings
 from app.dependencies import get_auth_service, get_chat_memory_service, get_document_library_service, get_knowledge_base_service
+from app.dependencies import get_agent_tool_confirmation_service
 from app.schemas import (
+    AgentToolConfirmationActionRequest,
+    AgentToolConfirmationResponse,
     AuthRequest,
     AuthResponse,
     CitationRef,
@@ -60,6 +63,7 @@ from app.schemas import (
     UserProfile,
     TokenUsage,
 )
+from app.services.agent_tools import AgentToolConfirmationService
 from app.services.auth import AuthError, UserAuthService
 from app.services.files import TEXT_FILE_EXTENSIONS, read_file_page_text
 from app.services.chat_memory import ChatMemoryService
@@ -170,6 +174,7 @@ def _to_model_diagnostics(payload: dict | None) -> ModelDiagnostics | None:
             native_web_search_used=bool(payload.get("native_web_search_used", False)),
             external_web_search_used=bool(payload.get("external_web_search_used", False)),
             thinking_mode=str(payload.get("thinking_mode") or "") or None,
+            run_mode=str(payload.get("run_mode") or "") or None,
             provider_api=str(payload.get("provider_api") or "") or None,
             option_fallback_used=bool(payload.get("option_fallback_used", False)),
             warnings=[str(item) for item in payload.get("warnings", []) if item],
@@ -357,6 +362,13 @@ def _get_request_user_context(request: Request) -> int | None:
         return None
 
 
+def _get_context_user_id_for_confirmation() -> int | None:
+    try:
+        return get_current_user_id()
+    except Exception:
+        return None
+
+
 async def _ensure_request_user_context(request: Request) -> None:
     user_id = await run_in_threadpool(_get_request_user_context, request)
     if user_id is None:
@@ -436,6 +448,46 @@ def _save_chat_memory_turn(
         )
     except Exception as exc:
         logger.warning("Failed to save chat memory turn: %s", exc)
+
+
+def _to_agent_confirmation_response(payload: dict[str, Any]) -> AgentToolConfirmationResponse:
+    return AgentToolConfirmationResponse(
+        confirmation_id=str(payload.get("confirmation_id") or ""),
+        user_id=int(payload["user_id"]) if payload.get("user_id") is not None else None,
+        tool_name=str(payload.get("tool_name") or ""),
+        display_name=str(payload.get("display_name") or ""),
+        arguments=dict(payload.get("arguments") or {}),
+        message=str(payload.get("message") or ""),
+        status=str(payload.get("status") or "pending"),
+        created_at=str(payload.get("created_at") or ""),
+        expires_at=str(payload.get("expires_at") or ""),
+        result=dict(payload.get("result")) if isinstance(payload.get("result"), dict) else None,
+        error=str(payload.get("error") or "") or None,
+        confirmed_at=str(payload.get("confirmed_at") or "") or None,
+        cancelled_at=str(payload.get("cancelled_at") or "") or None,
+    )
+
+
+def _persist_tool_confirmation_state(
+    chat_memory: ChatMemoryService,
+    *,
+    conversation_id: int | None,
+    payload: dict[str, Any],
+) -> None:
+    if conversation_id is None:
+        return
+    try:
+        chat_memory.update_tool_confirmation_state(
+            conversation_id=int(conversation_id),
+            confirmation_id=str(payload.get("confirmation_id") or ""),
+            status=str(payload.get("status") or ""),
+            result=dict(payload.get("result")) if isinstance(payload.get("result"), dict) else None,
+            error=str(payload.get("error") or "") or None,
+            confirmed_at=str(payload.get("confirmed_at") or "") or None,
+            cancelled_at=str(payload.get("cancelled_at") or "") or None,
+        )
+    except Exception:
+        logger.exception("Failed to persist agent tool confirmation state.")
 
 
 def _streaming_event_payload(
@@ -1564,6 +1616,7 @@ async def chat(
             web_search=request.web_search,
             native_web_search=request.native_web_search,
             external_web_search=request.external_web_search,
+            run_mode=request.run_mode,
             scope_type=request.scope_type,
             scope_id=request.scope_id,
             workspace_key=request.workspace_key,
@@ -1617,6 +1670,7 @@ async def chat_stream(
                 web_search=request.web_search,
                 native_web_search=request.native_web_search,
                 external_web_search=request.external_web_search,
+                run_mode=request.run_mode,
                 scope_type=request.scope_type,
                 scope_id=request.scope_id,
                 workspace_key=request.workspace_key,
@@ -1658,6 +1712,68 @@ async def chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/agent/tool-confirmations/{confirmation_id}/confirm", response_model=AgentToolConfirmationResponse)
+async def confirm_agent_tool(
+    confirmation_id: str,
+    payload: AgentToolConfirmationActionRequest,
+    confirmation_service: AgentToolConfirmationService = Depends(get_agent_tool_confirmation_service),
+    chat_memory: ChatMemoryService = Depends(get_chat_memory_service),
+) -> AgentToolConfirmationResponse:
+    try:
+        item = await run_in_threadpool(
+            confirmation_service.confirm,
+            confirmation_id,
+            user_id=_get_context_user_id_for_confirmation(),
+        )
+        response_payload = item.to_payload()
+        await run_in_threadpool(
+            _persist_tool_confirmation_state,
+            chat_memory,
+            conversation_id=payload.conversation_id,
+            payload=response_payload,
+        )
+        return _to_agent_confirmation_response(response_payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/agent/tool-confirmations/{confirmation_id}/cancel", response_model=AgentToolConfirmationResponse)
+async def cancel_agent_tool(
+    confirmation_id: str,
+    payload: AgentToolConfirmationActionRequest,
+    confirmation_service: AgentToolConfirmationService = Depends(get_agent_tool_confirmation_service),
+    chat_memory: ChatMemoryService = Depends(get_chat_memory_service),
+) -> AgentToolConfirmationResponse:
+    try:
+        item = await run_in_threadpool(
+            confirmation_service.cancel,
+            confirmation_id,
+            user_id=_get_context_user_id_for_confirmation(),
+        )
+        response_payload = item.to_payload()
+        await run_in_threadpool(
+            _persist_tool_confirmation_state,
+            chat_memory,
+            conversation_id=payload.conversation_id,
+            payload=response_payload,
+        )
+        return _to_agent_confirmation_response(response_payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/chat/conversations", response_model=ChatConversationListResponse)

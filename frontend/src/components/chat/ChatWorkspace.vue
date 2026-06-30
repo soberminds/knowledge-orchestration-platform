@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { ChatMessagePart, ChatModelOption, DocumentInfo, KnowledgeBaseScopeOption, WorkspaceScopeOption } from "../../api";
+import type { ChatMessagePart, ChatModelOption, DocumentInfo, KnowledgeBaseScopeOption, RunMode, WorkspaceScopeOption } from "../../api";
 import type { UiMessage } from "../../types/chat";
 import { useI18n } from "../../composables/useI18n";
 import type { FolderScopeNode } from "../../utils/documentTree";
@@ -20,6 +20,7 @@ const props = defineProps<{
   modelOptions: ChatModelOption[];
   selectedModel: string;
   thinkingMode: "quick" | "deep";
+  runMode: RunMode;
   scopeType: "all" | "folder" | "kb" | "workspace";
   scopeId: number | null;
   scopeName: string | null;
@@ -42,6 +43,7 @@ const emit = defineEmits<{
   (event: "update:topK", value: number): void;
   (event: "update:selectedModel", value: string): void;
   (event: "update:thinkingMode", value: "quick" | "deep"): void;
+  (event: "update:runMode", value: RunMode): void;
   (event: "update:scopeType", value: "all" | "folder" | "kb" | "workspace"): void;
   (event: "update:scopeId", value: number | null): void;
   (event: "update:scopeName", value: string | null): void;
@@ -53,6 +55,8 @@ const emit = defineEmits<{
   (event: "pick-starter", prompt: string): void;
   (event: "viewport-ready", element: HTMLElement | null): void;
   (event: "load-older"): void;
+  (event: "confirm-tool", payload: { messageId: string; confirmationId: string }): void;
+  (event: "cancel-tool", payload: { messageId: string; confirmationId: string }): void;
 }>();
 
 const showStarters = computed(() => props.messages.length <= 1);
@@ -148,6 +152,8 @@ const modelGroups = computed<ModelGroup[]>(() => {
       :messages="messages"
       @viewport-ready="emit('viewport-ready', $event)"
       @load-older="emit('load-older')"
+      @confirm-tool="emit('confirm-tool', $event)"
+      @cancel-tool="emit('cancel-tool', $event)"
     />
 
     <ChatComposer
@@ -159,6 +165,7 @@ const modelGroups = computed<ModelGroup[]>(() => {
       :top-k="topK"
       :selected-model="selectedModel"
       :thinking-mode="thinkingMode"
+      :run-mode="runMode"
       :scope-type="scopeType"
       :scope-id="scopeId"
       :scope-name="scopeName"
@@ -179,6 +186,7 @@ const modelGroups = computed<ModelGroup[]>(() => {
       @update:top-k="emit('update:topK', $event)"
       @update:selected-model="emit('update:selectedModel', $event)"
       @update:thinking-mode="emit('update:thinkingMode', $event)"
+      @update:run-mode="emit('update:runMode', $event)"
       @update:scope-type="emit('update:scopeType', $event)"
       @update:scope-id="emit('update:scopeId', $event)"
       @update:scope-name="emit('update:scopeName', $event)"

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { Close, Link, Paperclip, Picture } from "@element-plus/icons-vue";
-import type { ChatMessagePart, ChatModelOption, DocumentInfo, KnowledgeBaseScopeOption, WorkspaceScopeOption } from "../../api";
+import type { ChatMessagePart, ChatModelOption, DocumentInfo, KnowledgeBaseScopeOption, RunMode, WorkspaceScopeOption } from "../../api";
 import { useI18n } from "../../composables/useI18n";
 import type { FolderScopeNode } from "../../utils/documentTree";
 
@@ -22,6 +22,7 @@ const props = defineProps<{
   topK: number;
   selectedModel: string;
   thinkingMode: "quick" | "deep";
+  runMode: RunMode;
   scopeType: ChatScopeType;
   scopeId: number | null;
   scopeName: string | null;
@@ -45,6 +46,7 @@ const emit = defineEmits<{
   (event: "update:top-k", value: number): void;
   (event: "update:selected-model", value: string): void;
   (event: "update:thinking-mode", value: "quick" | "deep"): void;
+  (event: "update:run-mode", value: RunMode): void;
   (event: "update:scope-type", value: ChatScopeType): void;
   (event: "update:scope-id", value: number | null): void;
   (event: "update:scope-name", value: string | null): void;
@@ -89,6 +91,21 @@ const scopeOptions = computed(() => [
 ]);
 
 const thinkingSummary = computed(() => (props.thinkingMode === "deep" ? t("chat.mode_deep") : t("chat.mode_quick")));
+const runModeSummary = computed(() => {
+  if (props.runMode === "chat") {
+    return t("chat.run_mode_chat");
+  }
+  if (props.runMode === "agent") {
+    return t("chat.run_mode_agent");
+  }
+  return t("chat.run_mode_rag");
+});
+
+const runModeOptions = computed(() => [
+  { label: t("chat.run_mode_chat"), value: "chat" },
+  { label: t("chat.run_mode_rag"), value: "rag" },
+  { label: t("chat.run_mode_agent"), value: "agent" },
+]);
 
 function findFolderLabel(nodes: FolderScopeNode[], id: number | null): string | null {
   if (id == null) {
@@ -517,6 +534,26 @@ function removeAttachment(indexInFiltered: number) {
         </section>
       </el-popover>
 
+      <el-popover placement="top-start" :width="340" trigger="click" popper-class="chat-settings-popper">
+        <template #reference>
+          <button class="option-pill" :class="{ 'option-pill--active': runMode === 'agent' }" type="button">
+            <span class="option-dot option-dot--mode" />
+            {{ t("chat.run_mode_prefix") }}: {{ runModeSummary }}
+          </button>
+        </template>
+        <section class="settings-panel">
+          <header class="settings-head">
+            <strong>{{ t("chat.settings_run_mode") }}</strong>
+          </header>
+          <el-segmented
+            :model-value="runMode"
+            :options="runModeOptions"
+            @change="$emit('update:run-mode', String($event) as RunMode)"
+          />
+          <p class="hint-line">{{ t("chat.settings_run_mode_hint") }}</p>
+        </section>
+      </el-popover>
+
       <el-popover placement="top-start" :width="360" trigger="click" popper-class="chat-settings-popper">
         <template #reference>
           <button class="option-pill" :class="{ 'option-pill--active': scopeType !== 'all' }" type="button">
@@ -894,6 +931,10 @@ function removeAttachment(indexInFiltered: number) {
 
 .option-dot--scope {
   background: #1f9d7a;
+}
+
+.option-dot--mode {
+  background: #0f766e;
 }
 
 .settings-panel {

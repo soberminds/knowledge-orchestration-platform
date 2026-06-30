@@ -75,6 +75,10 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_csv_tuple(name: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in os.getenv(name, "").split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     """Centralized immutable settings object."""
@@ -122,6 +126,22 @@ class Settings:
     web_search_top_k: int = _env_int("WEB_SEARCH_TOP_K", 5)
     cost_currency: str = os.getenv("COST_CURRENCY", "CNY").strip().upper()
     model_pricing_json: str = os.getenv("MODEL_PRICING_JSON", "").strip()
+
+    # Agent email sending tool.
+    email_tool_enabled: bool = _env_bool("EMAIL_TOOL_ENABLED", False)
+    smtp_host: str = os.getenv("SMTP_HOST", "").strip()
+    smtp_port: int = _env_int("SMTP_PORT", 465)
+    smtp_username: str = os.getenv("SMTP_USERNAME", "").strip()
+    smtp_password: str = os.getenv("SMTP_PASSWORD", "").strip()
+    smtp_use_ssl: bool = _env_bool("SMTP_USE_SSL", True)
+    smtp_starttls: bool = _env_bool("SMTP_STARTTLS", False)
+    smtp_from_email: str = os.getenv("SMTP_FROM_EMAIL", "").strip()
+    smtp_from_name: str = os.getenv("SMTP_FROM_NAME", "知识编排平台").strip()
+    smtp_timeout_sec: int = _env_int("SMTP_TIMEOUT_SEC", 20)
+    email_tool_max_recipients: int = _env_int("EMAIL_TOOL_MAX_RECIPIENTS", 5)
+    email_tool_allowed_domains: tuple[str, ...] = tuple(
+        domain.lower() for domain in _env_csv_tuple("EMAIL_TOOL_ALLOWED_DOMAINS")
+    )
 
     # Local embedding model for retrieval.
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")

@@ -95,6 +95,40 @@ export interface CostEstimate {
   estimated?: boolean;
 }
 
+export interface ToolCallDiagnostic {
+  id?: string | null;
+  name?: string | null;
+  display_name?: string | null;
+  arguments?: Record<string, unknown> | string | null;
+  status?: "success" | "error" | "pending_confirmation" | string | null;
+  summary?: string | null;
+  duration_ms?: number | null;
+  risk_level?: "read" | "write" | "dangerous" | string | null;
+  requires_confirmation?: boolean | null;
+  default_enabled?: boolean | null;
+  error?: string | null;
+  confirmation_id?: string | null;
+  confirmation_message?: string | null;
+  confirmation_status?: string | null;
+  result?: Record<string, unknown> | null;
+}
+
+export interface AgentToolConfirmationResponse {
+  confirmation_id: string;
+  user_id?: number | null;
+  tool_name: string;
+  display_name: string;
+  arguments: Record<string, unknown>;
+  message: string;
+  status: string;
+  created_at: string;
+  expires_at: string;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+  confirmed_at?: string | null;
+  cancelled_at?: string | null;
+}
+
 export interface ModelDiagnostics {
   requested_model?: string | null;
   provider?: string | null;
@@ -102,10 +136,11 @@ export interface ModelDiagnostics {
   native_web_search_used: boolean;
   external_web_search_used: boolean;
   thinking_mode?: string | null;
+  run_mode?: string | null;
   provider_api?: string | null;
   option_fallback_used: boolean;
   warnings: string[];
-  tool_calls?: Record<string, unknown>[];
+  tool_calls?: ToolCallDiagnostic[];
   capabilities?: {
     supports_native_web_search?: boolean;
     supports_tool_calling?: boolean;
@@ -117,6 +152,7 @@ export interface ModelDiagnostics {
 }
 
 export type ThinkingMode = "quick" | "deep";
+export type RunMode = "chat" | "rag" | "agent";
 
 export interface ChatModelOption {
   model: string;
@@ -226,6 +262,7 @@ export interface ChatRequestPayload {
   native_web_search?: boolean;
   external_web_search?: boolean;
   thinking_mode?: ThinkingMode;
+  run_mode?: RunMode;
 }
 
 export interface SearchResponse {
@@ -848,6 +885,32 @@ export async function getOfficeCallbackStatus(path: string, fileId?: number | nu
   const params = new URLSearchParams();
   appendFileIdentity(params, path, fileId);
   return requestJson<OfficeCallbackStatusResponse>(`/api/office/callback-status?${params.toString()}`);
+}
+
+export async function confirmAgentToolConfirmation(
+  confirmationId: string,
+  payload: { conversation_id?: number | null } = {},
+): Promise<AgentToolConfirmationResponse> {
+  return requestJson<AgentToolConfirmationResponse>(
+    `/api/agent/tool-confirmations/${encodeURIComponent(confirmationId)}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function cancelAgentToolConfirmation(
+  confirmationId: string,
+  payload: { conversation_id?: number | null } = {},
+): Promise<AgentToolConfirmationResponse> {
+  return requestJson<AgentToolConfirmationResponse>(
+    `/api/agent/tool-confirmations/${encodeURIComponent(confirmationId)}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export async function getCurrentUser(): Promise<UserProfile> {

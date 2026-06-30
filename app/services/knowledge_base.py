@@ -40,10 +40,38 @@ from app.services.llm_provider_mapping import (
 from app.services.llm_streaming import StreamingEvent, content_delta, done_event, reasoning_delta, tool_call_delta
 from app.services.preview_pdf import get_preview_pdf_cache_path
 from app.services.tools import ToolRegistry, build_readonly_tool_registry
+from app.services.agent_tools import AgentToolConfirmationService
+from app.services.email_sender import EmailSender
 
 QuestionMode = Literal["overview", "technical", "comparison", "list", "general"]
 ThinkingMode = Literal["quick", "deep"]
+RunMode = Literal["chat", "rag", "agent"]
 logger = logging.getLogger(__name__)
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except Exception:
+        return None
+    return number if number > 0 else None
+
+
+def _format_email_recipients(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple, set)):
+        return "、".join(str(item).strip() for item in value if str(item).strip())
+    return str(value).strip()
+
+
+_EMAIL_ADDRESS_PATTERN = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_FILE_ID_PATTERNS = (
+    re.compile(r"(?:file[_\s-]*id|文件\s*id|文档\s*id|文件\s*ID|文档\s*ID)\s*[:=：]?\s*(\d+)", re.IGNORECASE),
+    re.compile(r"(?:^|[\s，。:：,])id\s*[:=：]\s*(\d+)", re.IGNORECASE),
+)
 
 
 def _patch_posthog_capture_signature() -> None:
@@ -142,12 +170,25 @@ class KnowledgeBaseService:
             qwen_deep_thinking_budget=self.settings.qwen_deep_thinking_budget,
             deepseek_deep_reasoning_effort=self.settings.deepseek_deep_reasoning_effort,
         )
+        self._tool_confirmation_service: AgentToolConfirmationService | None = None
+        self._email_sender: EmailSender | None = None
+
+    def attach_tool_confirmation_service(self, service: AgentToolConfirmationService) -> None:
+        self._tool_confirmation_service = service
+        service.register_executor("rebuild_file_index", self.confirmed_rebuild_file_index)
+        service.register_executor("send_email", self.confirmed_send_email)
 
     @property
     def document_library(self) -> DocumentLibraryService:
         if self._document_library is None:
             self._document_library = DocumentLibraryService()
         return self._document_library
+
+    @property
+    def email_sender(self) -> EmailSender:
+        if self._email_sender is None:
+            self._email_sender = EmailSender(self.settings)
+        return self._email_sender
 
     @property
     def embedder(self):
@@ -1726,15 +1767,46 @@ class KnowledgeBaseService:
             )
         return "\n\n".join(blocks), citations
 
-    def _build_system_prompt(self, question_mode: QuestionMode, thinking_mode: ThinkingMode) -> str:
-        base_rules = (
-            "You are a helpful assistant. "
-            "Prefer evidence from the provided knowledge base and web context when available. "
-            "If there is no relevant evidence, still answer using general knowledge instead of refusing. "
-            "Do not fabricate citations. Only use [Sx]/[Wx] labels when evidence truly exists. "
+    def _build_system_prompt(
+        self,
+        question_mode: QuestionMode,
+        thinking_mode: ThinkingMode,
+        run_mode: RunMode,
+    ) -> str:
+        shared_rules = (
+            "You are a helpful assistant for a knowledge orchestration platform. "
             "Answer in the same language as the user. "
+            "Do not fabricate citations. Only use [Sx]/[Wx] labels when evidence truly exists. "
             "Do not add role-playing preambles like 'I am an enterprise knowledge base assistant' unless asked."
         )
+
+        if run_mode == "chat":
+            base_rules = (
+                f"{shared_rules} "
+                "Current run mode is plain chat. Do not assume the knowledge base was searched. "
+                "Answer normally from the conversation and model knowledge."
+            )
+        elif run_mode == "agent":
+            base_rules = (
+                f"{shared_rules} "
+                "Current run mode is Agent. Use available tools when the user asks about uploaded documents, "
+                "document lists, file metadata, specific file content, knowledge-base facts, or current web information. "
+                "When the user clearly asks you to send an email and provides a recipient address plus a content goal, "
+                "draft a reasonable subject/body from the conversation and call the send_email tool to create the confirmation card. "
+                "Do not merely ask the user to confirm email sending in natural language; the tool confirmation UI handles that confirmation. "
+                "When the user clearly asks to rebuild or reindex a document and the target file_id is known or can be obtained with list_documents/get_document_metadata, "
+                "call rebuild_file_index to create the confirmation card instead of only asking for confirmation in plain text. "
+                "Ask a follow-up question only when the recipient or the email content goal is missing or ambiguous. "
+                "Do not pretend that you queried a tool. If a tool fails or returns no useful result, say so clearly. "
+                "Use tool observations as the factual basis for the final answer. "
+                "High-risk write or dangerous actions must wait for user confirmation; do not claim they were executed."
+            )
+        else:
+            base_rules = (
+                f"{shared_rules} "
+                "Current run mode is RAG. Prefer evidence from the provided knowledge base and web context when available. "
+                "If there is no relevant evidence, still answer using general knowledge instead of refusing."
+            )
 
         mode_rules: dict[QuestionMode, str] = {
             "overview": (
@@ -1797,6 +1869,7 @@ class KnowledgeBaseService:
         native_web_search_used: bool = False,
         external_web_search_used: bool = False,
         thinking_mode: ThinkingMode = "quick",
+        run_mode: RunMode = "rag",
     ) -> dict[str, Any]:
         capability = self._resolve_model_capability(model_name=model_name, provider=provider)
         return {
@@ -1806,6 +1879,7 @@ class KnowledgeBaseService:
             "native_web_search_used": bool(native_web_search_used),
             "external_web_search_used": bool(external_web_search_used),
             "thinking_mode": thinking_mode,
+            "run_mode": run_mode,
             "provider_api": "chat_completions",
             "capabilities": {
                 "supports_native_web_search": capability.supports_native_web_search,
@@ -1872,9 +1946,122 @@ class KnowledgeBaseService:
                 scope_id=scope_id,
                 workspace_key=workspace_key,
             ),
+            list_documents=lambda folder_id, keyword, limit: self.document_library.list_documents_for_agent(
+                folder_id=folder_id,
+                keyword=keyword,
+                limit=limit,
+            ),
+            get_document_metadata=self.document_library.get_document_metadata_for_agent,
+            read_document_summary=lambda file_id, max_chars: self.document_library.read_document_summary_for_agent(
+                file_id=file_id,
+                max_chars=max_chars,
+            ),
+            request_tool_confirmation=self._request_tool_confirmation,
+            email_tool_available=self.email_sender.is_configured,
             search_web=self._search_web,
             web_search_available=self.is_web_search_available,
             include_web_search=include_web_search,
+        )
+
+    def _request_tool_confirmation(self, tool_spec: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._tool_confirmation_service is None:
+            return {
+                "confirmation_id": None,
+                "message": f"{tool_spec.display_name} 需要用户确认，但确认服务未初始化。",
+            }
+
+        if tool_spec.name == "send_email":
+            return self._request_send_email_confirmation(tool_spec, arguments)
+
+        if tool_spec.name != "rebuild_file_index":
+            confirmation = self._tool_confirmation_service.create(
+                tool_name=tool_spec.name,
+                display_name=tool_spec.display_name,
+                arguments=dict(arguments or {}),
+                message=f"是否确认执行：{tool_spec.display_name}？",
+            )
+            return confirmation.to_payload()
+
+        file_id = _safe_int(arguments.get("file_id"))
+        file_label = f"file_id={file_id}" if file_id else "未知文件"
+        try:
+            if file_id:
+                metadata = self.document_library.get_document_metadata_for_agent(file_id)
+                file_label = str(metadata.get("display_path") or metadata.get("name") or file_label)
+        except Exception:
+            pass
+
+        reason = str(arguments.get("reason") or "").strip()
+        message = f"是否确认执行：{tool_spec.display_name}（{file_label}）？"
+        if reason:
+            message = f"{message} 原因：{reason}"
+        confirmation = self._tool_confirmation_service.create(
+            tool_name=tool_spec.name,
+            display_name=tool_spec.display_name,
+            arguments=dict(arguments or {}),
+            message=message,
+        )
+        return confirmation.to_payload()
+
+    def _request_send_email_confirmation(self, tool_spec: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        recipients = _format_email_recipients(arguments.get("to"))
+        cc_recipients = _format_email_recipients(arguments.get("cc"))
+        subject = str(arguments.get("subject") or "").strip() or "（无主题）"
+        body = str(arguments.get("body") or "").strip()
+        body_preview = body.replace("\r\n", "\n").replace("\r", "\n")
+        if len(body_preview) > 120:
+            body_preview = f"{body_preview[:120]}..."
+
+        message_parts = [
+            f"是否确认发送邮件？收件人：{recipients or '未填写'}",
+            f"主题：{subject}",
+        ]
+        if cc_recipients:
+            message_parts.insert(1, f"抄送：{cc_recipients}")
+        if body_preview:
+            message_parts.append(f"正文预览：{body_preview}")
+
+        confirmation = self._tool_confirmation_service.create(
+            tool_name=tool_spec.name,
+            display_name=tool_spec.display_name,
+            arguments=dict(arguments or {}),
+            message="；".join(message_parts),
+        )
+        return confirmation.to_payload()
+
+    def confirmed_rebuild_file_index(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        file_id = _safe_int(arguments.get("file_id"))
+        if not file_id:
+            raise ValueError("file_id is required.")
+        metadata = self.document_library.get_document_metadata_for_agent(file_id)
+        source_path = str(metadata.get("path") or "").strip()
+        if not source_path:
+            raise FileNotFoundError(f"File path not found for file_id={file_id}")
+
+        self.document_library.update_file_index_states([file_id], index_status="queued", parse_error=None)
+        self.document_library.update_file_index_states([file_id], index_status="running", parse_error=None)
+        try:
+            stats = self.reindex_document_files(file_ids=[file_id], source_paths=[source_path])
+        except Exception as exc:
+            self.document_library.update_file_index_states([file_id], index_status="failed", parse_error=str(exc))
+            raise
+        self.document_library.update_file_index_states([file_id], index_status="success", parse_error=None)
+        return {
+            "file_id": file_id,
+            "path": source_path,
+            "display_path": metadata.get("display_path"),
+            "documents_loaded": stats.documents_loaded,
+            "chunks_indexed": stats.chunks_indexed,
+            "source_files": stats.source_files,
+            "index_status": "success",
+        }
+
+    def confirmed_send_email(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self.email_sender.send_email(
+            to=arguments.get("to"),
+            cc=arguments.get("cc"),
+            subject=str(arguments.get("subject") or ""),
+            body=str(arguments.get("body") or ""),
         )
 
     @staticmethod
@@ -1889,12 +2076,16 @@ class KnowledgeBaseService:
             return {}
         return parsed if isinstance(parsed, dict) else {}
 
-    def _append_tool_diagnostic(self, diagnostics: dict[str, Any] | None, tool_name: str) -> None:
+    def _append_tool_diagnostic(
+        self,
+        diagnostics: dict[str, Any] | None,
+        payload: dict[str, Any],
+    ) -> None:
         if diagnostics is None:
             return
         tool_calls = diagnostics.setdefault("tool_calls", [])
         if isinstance(tool_calls, list):
-            tool_calls.append({"name": tool_name})
+            tool_calls.append(payload)
 
     def _append_model_diagnostic_warning(self, diagnostics: dict[str, Any] | None, message: str) -> None:
         if diagnostics is None:
@@ -1902,6 +2093,221 @@ class KnowledgeBaseService:
         warnings = diagnostics.setdefault("warnings", [])
         if isinstance(warnings, list) and message not in warnings:
             warnings.append(message)
+
+    def _maybe_create_email_confirmation_from_answer(
+        self,
+        *,
+        original_question: str,
+        answer: str,
+        diagnostics: dict[str, Any] | None,
+        tool_registry: ToolRegistry | None,
+    ) -> bool:
+        if diagnostics is None:
+            return False
+        email_tool_registered = tool_registry is not None and tool_registry.get("send_email") is not None
+        can_create_fallback_confirmation = self._tool_confirmation_service is not None and self.email_sender.is_configured()
+        if not email_tool_registered and not can_create_fallback_confirmation:
+            return False
+        tool_calls = diagnostics.get("tool_calls")
+        if isinstance(tool_calls, list) and any(
+            isinstance(item, dict) and str(item.get("name") or "") == "send_email"
+            for item in tool_calls
+        ):
+            return False
+
+        question_text = str(original_question or "")
+        normalized_question = re.sub(r"\s+", "", question_text.lower())
+        if not any(keyword in normalized_question for keyword in ("发邮件", "发送邮件", "发邮箱", "发送邮箱", "email")):
+            return False
+
+        recipients = _EMAIL_ADDRESS_PATTERN.findall(question_text)
+        if not recipients:
+            return False
+
+        answer_text = str(answer or "").strip()
+        if not answer_text:
+            return False
+
+        subject = self._draft_email_subject(question_text, answer_text)
+        body = self._draft_email_body(answer_text)
+        if not body:
+            return False
+
+        arguments = {
+            "to": recipients,
+            "subject": subject,
+            "body": body,
+        }
+        if email_tool_registered and tool_registry is not None:
+            tool_result = tool_registry.execute("send_email", arguments)
+            diagnostic = tool_result.to_diagnostic(tool_call_id=f"auto_send_email_{abs(hash(question_text)) % 1000000}")
+        else:
+            confirmation_payload = self._request_send_email_confirmation(
+                type("EmailToolSpec", (), {"name": "send_email", "display_name": "发送邮件"})(),
+                arguments,
+            )
+            confirmation_id = str(confirmation_payload.get("confirmation_id") or "") or None
+            confirmation_message = str(confirmation_payload.get("message") or "") or None
+            diagnostic = {
+                "id": f"auto_send_email_{abs(hash(question_text)) % 1000000}",
+                "name": "send_email",
+                "display_name": "发送邮件",
+                "arguments": arguments,
+                "status": "pending_confirmation",
+                "summary": confirmation_message or "邮件发送请求已创建，等待用户确认。",
+                "duration_ms": 0,
+                "risk_level": "write",
+                "requires_confirmation": True,
+                "default_enabled": True,
+                "error": None,
+                "confirmation_id": confirmation_id,
+                "confirmation_message": confirmation_message,
+            }
+        diagnostic["summary"] = diagnostic.get("summary") or "邮件发送请求已创建，等待用户确认。"
+        self._append_tool_diagnostic(diagnostics, diagnostic)
+        self._append_model_diagnostic_warning(
+            diagnostics,
+            "模型没有主动调用 send_email，后端已根据明确的发邮件请求创建待确认邮件操作。",
+        )
+        return True
+
+    def _draft_email_subject(self, question: str, answer: str) -> str:
+        compact_question = re.sub(r"\s+", " ", question or "").strip()
+        for pattern in (
+            r"关于(.+?)(?:的)?(?:邮件|邮箱|推荐|攻略|内容)",
+            r"发一下(.+?)(?:给|到|至)",
+            r"发送(.+?)(?:给|到|至)",
+        ):
+            match = re.search(pattern, compact_question)
+            if match:
+                candidate = re.sub(r"[\s，。！？,.!?]+", "", match.group(1)).strip()
+                if candidate:
+                    return candidate[:40]
+
+        heading_match = re.search(r"^\s*#{1,6}\s*(.+)$", answer, flags=re.MULTILINE)
+        if heading_match:
+            return heading_match.group(1).strip()[:40]
+        return "知识编排平台邮件"
+
+    def _draft_email_body(self, answer: str) -> str:
+        text = str(answer or "").strip()
+        text = re.sub(r"请确认[：:，,]?\s*是否.*?发送.*?(?:\n|$)", "", text)
+        text = re.sub(r"如果确认.*?(?:\n|$)", "", text)
+        text = re.sub(r"我可以.*?发送.*?(?:\n|$)", "", text)
+        text = text.strip()
+        return text[:12000]
+
+    def _maybe_create_rebuild_index_confirmation_from_answer(
+        self,
+        *,
+        original_question: str,
+        answer: str,
+        diagnostics: dict[str, Any] | None,
+        tool_registry: ToolRegistry | None,
+    ) -> bool:
+        if diagnostics is None or self._tool_confirmation_service is None:
+            return False
+        tool_calls = diagnostics.get("tool_calls")
+        if isinstance(tool_calls, list) and any(
+            isinstance(item, dict) and str(item.get("name") or "") == "rebuild_file_index"
+            for item in tool_calls
+        ):
+            return False
+
+        question_text = str(original_question or "")
+        answer_text = str(answer or "")
+        normalized_question = re.sub(r"\s+", "", question_text.lower())
+        if not any(
+            keyword in normalized_question
+            for keyword in ("重建索引", "重新索引", "重构索引", "重建向量", "重新构建索引", "reindex")
+        ):
+            return False
+
+        file_id = self._extract_requested_rebuild_file_id(question_text, answer_text)
+        if not file_id:
+            return False
+
+        arguments = {
+            "file_id": file_id,
+            "reason": "用户请求重新构建该文件的向量索引",
+        }
+        if tool_registry is not None and tool_registry.get("rebuild_file_index") is not None:
+            tool_result = tool_registry.execute("rebuild_file_index", arguments)
+            diagnostic = tool_result.to_diagnostic(tool_call_id=f"auto_rebuild_file_index_{file_id}")
+        else:
+            confirmation_payload = self._request_tool_confirmation(
+                type("RebuildIndexToolSpec", (), {"name": "rebuild_file_index", "display_name": "重新索引文件"})(),
+                arguments,
+            )
+            confirmation_id = str(confirmation_payload.get("confirmation_id") or "") or None
+            confirmation_message = str(confirmation_payload.get("message") or "") or None
+            diagnostic = {
+                "id": f"auto_rebuild_file_index_{file_id}",
+                "name": "rebuild_file_index",
+                "display_name": "重新索引文件",
+                "arguments": arguments,
+                "status": "pending_confirmation",
+                "summary": confirmation_message or "重新索引请求已创建，等待用户确认。",
+                "duration_ms": 0,
+                "risk_level": "write",
+                "requires_confirmation": True,
+                "default_enabled": True,
+                "error": None,
+                "confirmation_id": confirmation_id,
+                "confirmation_message": confirmation_message,
+            }
+        diagnostic["summary"] = diagnostic.get("summary") or "重新索引请求已创建，等待用户确认。"
+        self._append_tool_diagnostic(diagnostics, diagnostic)
+        self._append_model_diagnostic_warning(
+            diagnostics,
+            "模型没有主动调用 rebuild_file_index，后端已根据明确的重建索引请求创建待确认操作。",
+        )
+        return True
+
+    def _extract_requested_rebuild_file_id(self, question: str, answer: str) -> int | None:
+        joined_text = f"{question}\n{answer}"
+        for pattern in _FILE_ID_PATTERNS:
+            match = pattern.search(joined_text)
+            if match:
+                file_id = _safe_int(match.group(1))
+                if file_id:
+                    return file_id
+
+        normalized_question = re.sub(r"\s+", "", question or "")
+        if any(keyword in normalized_question for keyword in ("第一个文件", "第1个文件", "第一个文档", "第1个文档", "首个文件", "第一份文件")):
+            try:
+                documents = self.document_library.list_documents_for_agent(limit=1, include_folders=False)
+            except Exception:
+                return None
+            files = documents.get("files") if isinstance(documents, dict) else None
+            if isinstance(files, list) and files:
+                return _safe_int((files[0] or {}).get("file_id") or (files[0] or {}).get("id"))
+        return None
+
+    def _maybe_create_agent_confirmation_fallbacks(
+        self,
+        *,
+        original_question: str,
+        answer: str,
+        diagnostics: dict[str, Any] | None,
+        tool_registry: ToolRegistry | None,
+    ) -> list[dict[str, Any]]:
+        created: list[dict[str, Any]] = []
+        if self._maybe_create_rebuild_index_confirmation_from_answer(
+            original_question=original_question,
+            answer=answer,
+            diagnostics=diagnostics,
+            tool_registry=tool_registry,
+        ):
+            created.append((diagnostics.get("tool_calls") or [])[-1])
+        if self._maybe_create_email_confirmation_from_answer(
+            original_question=original_question,
+            answer=answer,
+            diagnostics=diagnostics,
+            tool_registry=tool_registry,
+        ):
+            created.append((diagnostics.get("tool_calls") or [])[-1])
+        return [item for item in created if isinstance(item, dict)]
 
     def _chat_completion_with_tools(
         self,
@@ -1963,12 +2369,15 @@ class KnowledgeBaseService:
                 tool_name = str(getattr(function, "name", "") or "")
                 arguments = self._parse_tool_arguments(getattr(function, "arguments", "{}"))
                 tool_result = tool_registry.execute(tool_name, arguments)
-                self._append_tool_diagnostic(diagnostics, tool_name)
+                self._append_tool_diagnostic(
+                    diagnostics,
+                    tool_result.to_diagnostic(tool_call_id=str(getattr(tool_call, "id", "") or "")),
+                )
                 tool_messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": getattr(tool_call, "id", ""),
-                        "content": tool_result,
+                        "content": tool_result.content,
                     }
                 )
 
@@ -2081,22 +2490,19 @@ class KnowledgeBaseService:
             function = tool_call.get("function") or {}
             tool_name = str(function.get("name") or "")
             arguments = self._parse_tool_arguments(function.get("arguments"))
-            self._append_tool_diagnostic(diagnostics, tool_name)
+            tool_result = tool_registry.execute(tool_name, arguments)
+            diagnostic = tool_result.to_diagnostic(tool_call_id=str(tool_call.get("id") or ""))
+            self._append_tool_diagnostic(diagnostics, diagnostic)
             events.append(
                 tool_call_delta(
-                    {
-                        "id": tool_call.get("id") or "",
-                        "name": tool_name,
-                        "arguments": arguments,
-                    }
+                    diagnostic
                 )
             )
-            tool_result = tool_registry.execute(tool_name, arguments)
             tool_result_messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.get("id") or "",
-                    "content": tool_result,
+                    "content": tool_result.content,
                 }
             )
         return tool_result_messages, events
@@ -2284,6 +2690,7 @@ class KnowledgeBaseService:
         web_search: bool,
         capability: ModelCapability,
         diagnostics: dict[str, Any] | None,
+        run_mode: RunMode = "rag",
         scope_type: str = "all",
         scope_id: int | None = None,
         workspace_key: str | None = None,
@@ -2300,32 +2707,34 @@ class KnowledgeBaseService:
         question_mode = self._classify_question_mode(prompt_question)
         requested_top_k = top_k or self.settings.top_k
 
-        per_query_limit = max(requested_top_k, 4)
-        if question_mode in ("overview", "comparison", "list", "general"):
-            per_query_limit = max(requested_top_k * 3, 12)
-        elif question_mode == "technical":
-            per_query_limit = max(requested_top_k * 2, 8)
+        hits: list[SearchHit] = []
+        if run_mode != "chat":
+            per_query_limit = max(requested_top_k, 4)
+            if question_mode in ("overview", "comparison", "list", "general"):
+                per_query_limit = max(requested_top_k * 3, 12)
+            elif question_mode == "technical":
+                per_query_limit = max(requested_top_k * 2, 8)
 
-        queries = self._build_retrieval_queries(
-            question=prompt_question,
-            rewritten_question=rewritten_question,
-            question_mode=question_mode,
-        )
-        candidates = self._retrieve_candidates(
-            queries=queries,
-            per_query_limit=per_query_limit,
-            scope_type=scope_type,
-            scope_id=scope_id,
-            workspace_key=workspace_key,
-        )
+            queries = self._build_retrieval_queries(
+                question=prompt_question,
+                rewritten_question=rewritten_question,
+                question_mode=question_mode,
+            )
+            candidates = self._retrieve_candidates(
+                queries=queries,
+                per_query_limit=per_query_limit,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                workspace_key=workspace_key,
+            )
 
-        answer_hit_limit = max(requested_top_k, 4)
-        if question_mode in ("overview", "comparison", "list", "general"):
-            answer_hit_limit = max(requested_top_k * 2, 8)
-        elif question_mode == "technical":
-            answer_hit_limit = max(requested_top_k * 2, 6)
+            answer_hit_limit = max(requested_top_k, 4)
+            if question_mode in ("overview", "comparison", "list", "general"):
+                answer_hit_limit = max(requested_top_k * 2, 8)
+            elif question_mode == "technical":
+                answer_hit_limit = max(requested_top_k * 2, 6)
 
-        hits = self._select_hits_for_answer(candidates=candidates, limit=answer_hit_limit, question_mode=question_mode)
+            hits = self._select_hits_for_answer(candidates=candidates, limit=answer_hit_limit, question_mode=question_mode)
 
         web_context = ""
         web_citations: list[dict[str, Any]] = []
@@ -2347,15 +2756,37 @@ class KnowledgeBaseService:
         combined_citation_guide = "\n".join(citation_lines)
 
         history_text = "\n".join(f"{item.role}: {item.content}" for item in (history or []))
+        if run_mode == "chat":
+            instruction = (
+                "Instruction: This is plain chat mode. Answer directly from conversation context and general model knowledge. "
+                "Do not mention knowledge-base evidence unless it was explicitly provided in the conversation."
+            )
+        elif run_mode == "agent":
+            instruction = (
+                "Instruction: This is Agent mode. Use available tools when they can improve factual accuracy. "
+                "For email-sending requests with a recipient and a clear content goal, call send_email with a reasonable drafted subject/body; "
+                "the frontend confirmation card will ask the user to approve before sending. "
+                "Do not answer only with a plain-text confirmation request when send_email is available. "
+                "For rebuild/reindex requests, first identify the target file_id, then call rebuild_file_index to create the frontend confirmation card; "
+                "do not answer only with a plain-text confirmation request when file_id is known. "
+                "If you use tools, base the final answer on tool observations and mention failures honestly. "
+                "If the existing knowledge-base context is enough, you may answer directly."
+            )
+        else:
+            instruction = (
+                "Instruction: Prioritize the provided evidence when relevant. "
+                "If evidence is missing or irrelevant, answer normally using general model knowledge. "
+                "Answer the question directly without unnecessary self-introduction."
+            )
+
         user_prompt_parts = [
             f"Question:\n{prompt_question}",
             f"Conversation history:\n{history_text or '(none)'}",
+            f"Run mode:\n{run_mode}",
             f"Question mode:\n{question_mode}",
             f"Evidence labels:\n{combined_citation_guide or '(none)'}",
             f"Knowledge-base context:\n{context or '(none)'}",
-            "Instruction: Prioritize the provided evidence when relevant. "
-            "If evidence is missing or irrelevant, answer normally using general model knowledge. "
-            "Answer the question directly without unnecessary self-introduction.",
+            instruction,
         ]
         if web_context:
             user_prompt_parts.append(f"External web context:\n{web_context}")
@@ -2390,6 +2821,7 @@ class KnowledgeBaseService:
         web_search: bool = False,
         native_web_search: bool = False,
         external_web_search: bool = False,
+        run_mode: RunMode = "rag",
         scope_type: str = "all",
         scope_id: int | None = None,
         workspace_key: str | None = None,
@@ -2410,6 +2842,7 @@ class KnowledgeBaseService:
                 provider=provider,
                 resolved_model=model_name,
                 thinking_mode=thinking_mode,
+                run_mode=run_mode,
             )
             return {
                 "answer": fallback_answer,
@@ -2434,6 +2867,7 @@ class KnowledgeBaseService:
             native_web_search_used=use_native_web_search,
             external_web_search_used=use_external_web_search,
             thinking_mode=thinking_mode,
+            run_mode=run_mode,
         )
         capability = self._resolve_model_capability(model_name=model_name, provider=provider)
         if thinking_mode == "deep" and not (
@@ -2451,6 +2885,7 @@ class KnowledgeBaseService:
             web_search=use_external_web_search,
             capability=capability,
             diagnostics=diagnostics,
+            run_mode=run_mode,
             scope_type=scope_type,
             scope_id=scope_id,
             workspace_key=workspace_key,
@@ -2477,10 +2912,11 @@ class KnowledgeBaseService:
         prepared["messages"][0]["content"] = self._build_system_prompt(
             question_mode=prepared["question_mode"],
             thinking_mode=thinking_mode,
+            run_mode=run_mode,
         )
 
         tool_registry: ToolRegistry | None = None
-        if capability.supports_tool_calling and not (
+        if run_mode == "agent" and capability.supports_tool_calling and not (
             provider == "qwen" and self.settings.qwen_responses_api_enabled and use_native_web_search
         ):
             tool_registry = self._build_tool_registry(
@@ -2489,10 +2925,15 @@ class KnowledgeBaseService:
                 scope_id=scope_id,
                 workspace_key=workspace_key,
             )
-        elif not capability.supports_tool_calling:
+        elif run_mode == "agent" and not capability.supports_tool_calling:
             self._append_model_diagnostic_warning(
                 diagnostics,
                 "当前模型未声明支持工具调用，已跳过后端只读工具闭环。",
+            )
+        elif run_mode == "agent" and provider == "qwen" and self.settings.qwen_responses_api_enabled and use_native_web_search:
+            self._append_model_diagnostic_warning(
+                diagnostics,
+                "当前 Qwen Responses 原生联网链路暂不混用 Chat Completions 工具闭环；如需后端工具，请关闭模型原生联网。",
             )
         completion = self._chat_completion_with_tools(
             model_name=model_name,
@@ -2516,6 +2957,14 @@ class KnowledgeBaseService:
                 citation_guide=prepared["citation_guide"],
                 model_name=model_name,
                 thinking_mode=thinking_mode,
+            )
+
+        if run_mode == "agent":
+            self._maybe_create_agent_confirmation_fallbacks(
+                original_question=question,
+                answer=answer,
+                diagnostics=diagnostics,
+                tool_registry=tool_registry,
             )
 
         prompt_text = "\n".join(self._message_content_text(message.get("content", "")) for message in prepared["messages"])
@@ -2548,6 +2997,7 @@ class KnowledgeBaseService:
         web_search: bool = False,
         native_web_search: bool = False,
         external_web_search: bool = False,
+        run_mode: RunMode = "rag",
         scope_type: str = "all",
         scope_id: int | None = None,
         workspace_key: str | None = None,
@@ -2568,6 +3018,7 @@ class KnowledgeBaseService:
                 provider=provider,
                 resolved_model=model_name,
                 thinking_mode=thinking_mode,
+                run_mode=run_mode,
             )
             yield content_delta(fallback_answer)
             yield done_event(
@@ -2594,6 +3045,7 @@ class KnowledgeBaseService:
             native_web_search_used=use_native_web_search,
             external_web_search_used=use_external_web_search,
             thinking_mode=thinking_mode,
+            run_mode=run_mode,
         )
         capability = self._resolve_model_capability(model_name=model_name, provider=provider)
         if thinking_mode == "deep" and not (
@@ -2611,6 +3063,7 @@ class KnowledgeBaseService:
             web_search=use_external_web_search,
             capability=capability,
             diagnostics=diagnostics,
+            run_mode=run_mode,
             scope_type=scope_type,
             scope_id=scope_id,
             workspace_key=workspace_key,
@@ -2641,12 +3094,13 @@ class KnowledgeBaseService:
         prepared["messages"][0]["content"] = self._build_system_prompt(
             question_mode=prepared["question_mode"],
             thinking_mode=thinking_mode,
+            run_mode=run_mode,
         )
 
         collected: list[str] = []
         reasoning_parts: list[str] = []
         tool_registry: ToolRegistry | None = None
-        if capability.supports_tool_calling and not (
+        if run_mode == "agent" and capability.supports_tool_calling and not (
             provider == "qwen" and self.settings.qwen_responses_api_enabled and use_native_web_search
         ):
             tool_registry = self._build_tool_registry(
@@ -2655,10 +3109,15 @@ class KnowledgeBaseService:
                 scope_id=scope_id,
                 workspace_key=workspace_key,
             )
-        elif not capability.supports_tool_calling:
+        elif run_mode == "agent" and not capability.supports_tool_calling:
             self._append_model_diagnostic_warning(
                 diagnostics,
                 "当前模型未声明支持工具调用，已跳过后端只读工具闭环。",
+            )
+        elif run_mode == "agent" and provider == "qwen" and self.settings.qwen_responses_api_enabled and use_native_web_search:
+            self._append_model_diagnostic_warning(
+                diagnostics,
+                "当前 Qwen Responses 原生联网链路暂不混用 Chat Completions 工具闭环；如需后端工具，请关闭模型原生联网。",
             )
         for event in self._stream_completion_with_tools(
             model_name=model_name,
@@ -2678,6 +3137,15 @@ class KnowledgeBaseService:
             final_answer = "The model returned an empty response. Please try again."
         # 流式链路里正文已经逐段发给前端，结束后不能再同步发起二次润色模型调用。
         # 否则前端要等润色调用结束才收到 done，看起来就像回答结束后还卡在流式状态。
+        if run_mode == "agent":
+            created_fallbacks = self._maybe_create_agent_confirmation_fallbacks(
+                original_question=question,
+                answer=final_answer,
+                diagnostics=diagnostics,
+                tool_registry=tool_registry,
+            )
+            for fallback in created_fallbacks:
+                yield tool_call_delta(fallback)
 
         prompt_text = "\n".join(self._message_content_text(message.get("content", "")) for message in prepared["messages"])
         usage = self._normalize_usage(

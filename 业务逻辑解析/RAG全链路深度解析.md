@@ -1199,6 +1199,248 @@ RAG 主流程
 - 记录本次模型能力快照
 - 记录 warnings 和 fallback
 
+#### L-5. `run_mode`
+
+`run_mode` 是当前聊天链路新补上的“运行模式”字段。
+
+位置：
+
+- 后端请求：`app/schemas.py::ChatRequest`
+- 后端主流程：`app/services/knowledge_base.py::answer()` / `stream_answer()`
+- 前端类型：`frontend/src/api.ts::RunMode`
+- 前端状态：`frontend/src/composables/useChatWorkspace.ts`
+- 前端入口：`frontend/src/components/chat/ChatComposer.vue`
+
+当前取值：
+
+```text
+chat：普通聊天
+rag：知识库问答
+agent：单 Agent 工具调用模式
+```
+
+三种模式的区别：
+
+```text
+chat
+├─ 不主动检索知识库
+├─ 系统提示词会明确说明“不要假装已经查过知识库”
+└─ 适合普通闲聊、解释概念、非知识库问题
+
+rag
+├─ 保持原来的 RAG 主流程
+├─ 先按当前用户和会话范围检索 Chroma
+├─ 再把证据上下文交给模型生成答案
+└─ 适合基于知识库证据回答
+
+agent
+├─ 使用 Agent 系统提示词
+├─ 在模型支持 tool calling 时注册 ToolRegistry
+├─ 模型可以按需调用知识库搜索、文档列表、文档元数据、文档摘要、网页搜索、邮件发送等工具
+├─ 工具调用过程会进入 model_diagnostics.tool_calls
+└─ 写入类 / 高风险工具必须先进入用户确认流程
+```
+
+这个字段的意义是：
+
+- 前端不再只有“问答”一种行为
+- 后端可以根据用户选择切换不同 prompt 和执行策略
+- 后续做多 Agent 或任务编排时，可以继续扩展 `run_mode`
+
+#### L-6. `ToolSpec` / `ToolExecutionResult`
+
+当前工具系统已经不再只是一个函数名列表，而是统一成 `ToolSpec`。
+
+位置：
+
+- `app/services/tools.py`
+
+`ToolSpec` 负责描述一个工具：
+
+```text
+name：模型调用时使用的工具名
+display_name：前端展示用中文名
+description：给模型看的工具说明
+parameters：OpenAI-compatible function schema
+risk_level：read / write / dangerous
+requires_confirmation：是否需要用户确认
+default_enabled：是否默认暴露给模型
+handler：真实执行函数
+summarize_result：工具结果摘要函数
+confirmation_requester：确认型工具的确认请求创建函数
+```
+
+`ToolExecutionResult` 负责描述一次工具执行结果：
+
+```text
+name
+display_name
+arguments
+status：success / error / pending_confirmation
+content：回传给模型的工具原始结果
+summary：给前端看的摘要
+duration_ms
+risk_level
+requires_confirmation
+default_enabled
+error
+confirmation_id
+confirmation_message
+```
+
+这样前端就可以把工具调用展示成“用户看得懂的轨迹”，而不是只显示底层函数名。
+
+#### L-7. `AgentToolConfirmationService`
+
+这是第二阶段新增的确认型工具服务。
+
+位置：
+
+- `app/services/agent_tools.py`
+- `app/dependencies.py::get_agent_tool_confirmation_service()`
+- `app/api/routes.py`
+
+它解决的问题是：
+
+- 模型不能直接执行会修改数据的工具
+- 写入类工具要先生成一个待确认动作
+- 用户确认后，后端再执行真实操作
+- 用户取消后，后端不执行
+
+当前快速版是**内存队列**：
+
+```text
+AgentToolConfirmationService
+├─ create()：创建 pending 确认项
+├─ confirm()：确认后执行注册好的 executor
+├─ cancel()：取消确认项
+├─ get()：查询确认项
+└─ register_executor()：注册真正的工具执行函数
+```
+
+确认项状态：
+
+```text
+pending：等待用户确认
+confirmed：已确认且已执行
+cancelled：用户已取消
+expired：已过期
+failed：确认执行失败
+```
+
+当前限制：
+
+- 确认项暂存在后端进程内存
+- 后端重启后未处理的确认项会丢失
+- 后续正式版建议落 MySQL 表 `agent_tool_confirmations`
+
+#### L-8. `rebuild_file_index`
+
+这是当前第一个确认型工具。
+
+位置：
+
+- 工具定义：`app/services/tools.py::build_readonly_tool_registry(...)`
+- 确认请求：`app/services/knowledge_base.py::_request_tool_confirmation(...)`
+- 确认执行：`app/services/knowledge_base.py::confirmed_rebuild_file_index(...)`
+- 确认接口：`POST /api/agent/tool-confirmations/{confirmation_id}/confirm`
+- 取消接口：`POST /api/agent/tool-confirmations/{confirmation_id}/cancel`
+
+它的行为是：
+
+```text
+模型请求 rebuild_file_index(file_id)
+├─ ToolRegistry 发现 requires_confirmation=true
+├─ 不直接执行重建索引
+├─ 创建 confirmation_id
+├─ 返回 status=pending_confirmation
+├─ 前端展示确认卡片
+├─ 用户点击确认
+├─ 后端执行 confirmed_rebuild_file_index()
+├─ 按 file_id 找到文件 metadata 和真实 path
+├─ 更新索引状态 queued -> running
+├─ 调用 reindex_document_files(file_ids=[file_id], source_paths=[path])
+├─ 成功后更新索引状态 success
+└─ 前端把确认结果回写到同一条工具调用卡片
+```
+
+为什么先选它作为第一个确认型工具：
+
+- 它确实会修改索引状态和向量库内容
+- 但不删除用户源文件
+- 风险比删除文件、移动文件、改文件低
+- 很适合验证确认机制是否跑通
+
+`rebuild_file_index` 也有一个保守兜底：
+
+```text
+用户明确说“重建索引 / 重新索引 / reindex”
+├─ 原始问题或模型回答里能提取到 file_id
+├─ 或用户说“第一个文件 / 第一个文档”，后端能从文档列表拿到第一个 file_id
+├─ 模型没有主动调用 rebuild_file_index
+└─ 后端创建 rebuild_file_index pending_confirmation
+```
+
+这个兜底解决的是：模型有时会先调用 `list_documents` 找到文件，然后在正文里问“是否确认重建索引”，但没有真正发起 `rebuild_file_index` tool call。前端只有收到 `model_diagnostics.tool_calls` 里的 `pending_confirmation` 诊断时才会出现确认按钮，所以后端会在这种明确场景下补一个真实确认项。
+
+兜底仍然不会直接重建索引。它只是创建确认卡片，最终重建仍然必须由用户点击确认触发。
+
+#### L-9. `send_email`
+
+这是当前接入的第一个外部动作型 Agent 工具。
+
+位置：
+
+- 工具定义：`app/services/tools.py::build_readonly_tool_registry(...)`
+- SMTP 配置：`app/core/settings.py`
+- 邮件发送服务：`app/services/email_sender.py`
+- 确认请求：`app/services/knowledge_base.py::_request_send_email_confirmation(...)`
+- 确认执行：`app/services/knowledge_base.py::confirmed_send_email(...)`
+- 前端预览：`frontend/src/components/chat/MessageItem.vue`
+
+它的行为是：
+
+```text
+模型请求 send_email(to, cc, subject, body)
+├─ ToolRegistry 发现 requires_confirmation=true
+├─ 不直接调用 SMTP
+├─ 创建 confirmation_id
+├─ 返回 status=pending_confirmation
+├─ 前端展示确认卡片
+│  ├─ 收件人
+│  ├─ 抄送
+│  ├─ 主题
+│  └─ 正文预览
+├─ 用户点击确认
+├─ 后端执行 confirmed_send_email()
+├─ EmailSender 校验 SMTP 配置、收件人、主题、正文和域名白名单
+├─ 通过 SMTP 发送纯文本邮件
+└─ 前端把确认结果回写到同一条工具调用卡片
+```
+
+它不会默认暴露给模型。必须满足：
+
+```text
+EMAIL_TOOL_ENABLED=true
+SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD 配置完整
+SMTP_FROM_EMAIL 或 SMTP_USERNAME 可作为发件人
+```
+
+为什么它必须走确认：
+
+- 邮件会离开本系统，属于真实外部动作
+- 误发邮件的后果比普通查询更明显
+- 模型可能误解收件人、主题或正文
+- 用户确认卡片可以在发送前最后检查内容
+
+可选安全配置：
+
+```text
+EMAIL_TOOL_MAX_RECIPIENTS：限制单次收件人和抄送总数
+EMAIL_TOOL_ALLOWED_DOMAINS：限制允许发送到哪些邮箱域名
+SMTP_TIMEOUT_SEC：限制 SMTP 阻塞时间
+```
+
 #### M. `_resolve_chat_memory_context(...)`
 位置：
 
@@ -1697,12 +1939,33 @@ RAG 主流程
 ├─ 解析模型和 provider
 ├─ 解析 ModelCapability
 ├─ 处理 message_parts
+├─ 读取 run_mode：chat / rag / agent
 ├─ 按能力决定是否启用图片输入
 ├─ 按能力决定是否启用 tool calling
 ├─ 按能力决定是否启用 Qwen Responses API
 ├─ 调用 provider adapter
 ├─ 流式时统一成 StreamingEvent
 └─ 把 model_diagnostics 返回前端和落库
+```
+
+如果 `run_mode=agent`，生成层会额外进入工具编排路径：
+
+```text
+Agent 生成层
+├─ 根据当前用户和会话范围构建 ToolRegistry
+├─ 注册只读工具
+│  ├─ search_knowledge_base
+│  ├─ list_documents
+│  ├─ get_document_metadata
+│  ├─ read_document_summary
+│  └─ search_web（仅外部搜索配置可用时）
+├─ 注册确认型工具
+│  └─ rebuild_file_index
+├─ 将 OpenAI-compatible tools schema 传给支持 tool calling 的模型
+├─ 模型返回 tool_calls
+├─ 后端执行 read 工具，或为 write 工具创建 confirmation
+├─ 工具调用诊断进入 model_diagnostics.tool_calls
+└─ 模型基于工具结果生成最终回答
 ```
 
 ### 2.6 API 层
@@ -1722,6 +1985,7 @@ RAG 主流程
 - 聊天
 - 聊天配置：`/api/chat/options`
 - 会话列表与消息列表：`/api/chat/conversations`
+- Agent 工具确认：`/api/agent/tool-confirmations/{confirmation_id}/confirm` / `cancel`
 - ONLYOFFICE 保存回调后的索引更新
 
 ### 2.7 聊天记忆层
@@ -1866,6 +2130,123 @@ RAG 主流程
       ├─ 由大模型负责最终回答生成
       └─ 返回 answer / citations / usage / cost_estimate / model_diagnostics
 ```
+
+### 补充：Agent 模式和确认型工具流程
+
+当用户在前端选择 `Agent` 模式时，请求里会带：
+
+```json
+{
+  "run_mode": "agent"
+}
+```
+
+这时完整链路会变成：
+
+```text
+用户提问
+├─ 前端 ChatComposer 发送 run_mode=agent
+├─ app/api/routes.py 接收 ChatRequest
+├─ KnowledgeBaseService.stream_answer(...)
+├─ _prepare_answer(...) 按当前用户和会话范围准备上下文
+├─ 判断当前模型 capability.supports_tool_calling
+│  ├─ 不支持：写入 warning，走普通生成
+│  └─ 支持：构建 ToolRegistry
+├─ ToolRegistry 暴露工具 schema 给模型
+├─ 模型按需返回 tool_calls
+├─ 后端执行工具
+│  ├─ read 工具：直接执行
+│  └─ write / dangerous 工具：创建 pending_confirmation，不直接执行
+├─ 工具调用结果写入 model_diagnostics.tool_calls
+├─ 前端 MessageItem 展示工具调用轨迹
+└─ 模型生成最终回答
+```
+
+确认型工具以 `rebuild_file_index` 为例：
+
+```text
+模型请求 rebuild_file_index(file_id=123)
+├─ tools.py 发现 requires_confirmation=true
+├─ ToolRegistry 返回 status=pending_confirmation
+├─ knowledge_base.py 创建 confirmation_id
+├─ 前端显示“待确认操作”卡片
+│  ├─ 确认执行
+│  └─ 取消
+├─ 用户点击确认
+├─ frontend/src/api.ts 调用：
+│  └─ POST /api/agent/tool-confirmations/{confirmation_id}/confirm
+├─ AgentToolConfirmationService.confirm()
+├─ 状态 pending -> running
+├─ 执行 registered executor：
+│  └─ KnowledgeBaseService.confirmed_rebuild_file_index(...)
+├─ 按 file_id 重新解析、切片、写入 Chroma
+├─ 状态 running -> confirmed / failed
+├─ ChatMemoryService.update_tool_confirmation_state(...)
+│  └─ 把 confirmation_status / result / error 回写到 kop_chat_message.meta_json
+└─ 前端把结果回写到同一条工具调用卡片
+```
+
+如果用户点击取消：
+
+```text
+POST /api/agent/tool-confirmations/{confirmation_id}/cancel
+├─ 状态 pending -> cancelled
+└─ 不执行真实工具函数
+```
+
+当前确认项是内存队列，适合快速验证核心流程。正式生产版如果要支持后端重启后继续确认、审计、审批历史，建议落到 MySQL 表。
+
+注意这里有两层状态：
+
+```text
+1. 待确认队列状态
+   └─ AgentToolConfirmationService 当前仍然是内存队列
+
+2. 聊天消息展示状态
+   └─ confirm / cancel 后会回写 kop_chat_message.meta_json.model_diagnostics.tool_calls
+```
+
+所以当前版本的语义是：
+
+- 后端重启后，尚未处理的 pending 确认项会丢失。
+- 但已经点击确认 / 取消的工具调用，会把状态和结果写回聊天消息。
+- 页面刷新后，前端重新读取历史消息时，会看到 confirmed / cancelled / failed，而不会重新显示成待确认。
+
+当前另一个确认型工具是 `send_email`：
+
+```text
+模型请求 send_email(to=["user@example.com"], subject="...", body="...")
+├─ tools.py 发现 requires_confirmation=true
+├─ ToolRegistry 返回 status=pending_confirmation
+├─ knowledge_base.py 创建邮件确认项
+├─ 前端 MessageItem 显示邮件预览
+│  ├─ 收件人 / 抄送
+│  ├─ 主题
+│  └─ 正文
+├─ 用户点击确认
+├─ AgentToolConfirmationService.confirm()
+├─ 执行 registered executor：
+│  └─ KnowledgeBaseService.confirmed_send_email(...)
+├─ app/services/email_sender.py 通过 SMTP 发送邮件
+├─ ChatMemoryService.update_tool_confirmation_state(...) 回写工具调用状态
+└─ 前端展示 confirmed / failed 状态和发送结果
+```
+
+`send_email` 只有在 `.env` 中设置 `EMAIL_TOOL_ENABLED=true` 并且 SMTP 配置完整时才会注册到 `ToolRegistry`。如果没有配置，模型不会看到这个工具，也就不会产生“假装可以发邮件”的工具调用。
+
+邮件工具还有一个保守兜底：
+
+```text
+用户明确说“发邮件 / 发送邮箱”
+├─ 原始问题里能提取到邮箱地址
+├─ 邮件工具已注册
+├─ 模型没有主动调用 send_email
+└─ 后端根据模型回答整理 subject/body，并创建 send_email pending_confirmation
+```
+
+这个兜底解决的是：有些模型会在自然语言里说“请确认是否发送到 xxx@qq.com”，但没有真正发起 tool_call。前端只有收到 `model_diagnostics.tool_calls` 里的 `send_email` 诊断时才会出现“确认执行”按钮，所以后端会在这种明确场景下补一个真实的确认项。
+
+兜底仍然不会直接发送邮件。它只是创建确认卡片，最终发送仍然必须由用户点击确认触发。
 
 ### 补充：当前聊天问答入口新增的会话记忆链路
 
@@ -3821,7 +4202,7 @@ LLM 生成回答
 
 如果按现在已经补上的模型能力层再说得更完整一点，可以记成：
 
-**这是一个“用户隔离文档库 + 会话范围检索 + 本地向量索引 + OpenAI-compatible 多 provider 生成 + 模型能力自动匹配 + 基础工具调用 + 基础多模态输入”的工程化 RAG 工作台。**
+**这是一个“用户隔离文档库 + 会话范围检索 + 本地向量索引 + OpenAI-compatible 多 provider 生成 + 模型能力自动匹配 + 基础工具调用 + 基础多模态输入”的知识编排平台。**
 
 它不是：
 

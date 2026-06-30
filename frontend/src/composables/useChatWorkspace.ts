@@ -3,9 +3,12 @@ import { computed, nextTick, reactive, ref } from "vue";
 import { useI18n } from "./useI18n";
 import {
   chatStream,
+  cancelAgentToolConfirmation,
+  confirmAgentToolConfirmation,
   getChatOptions,
   listChatConversations,
   listChatMessages,
+  type AgentToolConfirmationResponse,
   type ChatOptionsResponse,
   type ChatConversationSummary,
   type ChatMessageRecord,
@@ -13,10 +16,12 @@ import {
   type ChatModelOption,
   type KnowledgeBaseScopeOption,
   type ModelDiagnostics,
+  type ToolCallDiagnostic,
   type ChatStreamDoneEvent,
   type HistoryItem,
   type WorkspaceScopeOption,
   type ThinkingMode,
+  type RunMode,
 } from "../api";
 import type { ChatSession, UiMessage } from "../types/chat";
 
@@ -24,6 +29,7 @@ const CONVERSATION_PAGE_SIZE = 20;
 const MESSAGE_PAGE_SIZE = 30;
 type ChatScopeType = "all" | "folder" | "kb" | "workspace";
 type UiToolCall = NonNullable<UiMessage["toolCalls"]>[number];
+type ToolConfirmationUiPayload = { messageId: string; confirmationId: string };
 
 function createId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -94,14 +100,31 @@ function parseToolArguments(value: unknown): Record<string, unknown> | undefined
   return undefined;
 }
 
-function normalizeToolCall(payload: Record<string, unknown>): UiToolCall | null {
+function normalizeToolCall(payload: Record<string, unknown> | ToolCallDiagnostic): UiToolCall | null {
+  const payloadRecord = payload as Record<string, unknown>;
   const functionPayload =
-    payload.function && typeof payload.function === "object" && !Array.isArray(payload.function)
-      ? (payload.function as Record<string, unknown>)
+    payloadRecord.function && typeof payloadRecord.function === "object" && !Array.isArray(payloadRecord.function)
+      ? (payloadRecord.function as Record<string, unknown>)
       : {};
-  const id = String(payload.id ?? "").trim();
-  const name = String(payload.name ?? functionPayload.name ?? "").trim();
-  const args = parseToolArguments(payload.arguments ?? functionPayload.arguments);
+  const id = String(payloadRecord.id ?? "").trim();
+  const name = String(payloadRecord.name ?? functionPayload.name ?? "").trim();
+  const args = parseToolArguments(payloadRecord.arguments ?? functionPayload.arguments);
+  const displayName = String(payloadRecord.display_name ?? "").trim();
+  const status = String(payloadRecord.status ?? "").trim();
+  const summary = String(payloadRecord.summary ?? "").trim();
+  const riskLevel = String(payloadRecord.risk_level ?? "").trim();
+  const error = String(payloadRecord.error ?? "").trim();
+  const confirmationId = String(payloadRecord.confirmation_id ?? "").trim();
+  const confirmationMessage = String(payloadRecord.confirmation_message ?? "").trim();
+  const confirmationStatus = String(payloadRecord.confirmation_status ?? "").trim();
+  const result =
+    payloadRecord.result && typeof payloadRecord.result === "object" && !Array.isArray(payloadRecord.result)
+      ? (payloadRecord.result as Record<string, unknown>)
+      : null;
+  const durationMs =
+    typeof payloadRecord.duration_ms === "number" && Number.isFinite(payloadRecord.duration_ms)
+      ? payloadRecord.duration_ms
+      : null;
 
   if (!id && !name) {
     return null;
@@ -109,7 +132,19 @@ function normalizeToolCall(payload: Record<string, unknown>): UiToolCall | null 
   return {
     ...(id ? { id } : {}),
     ...(name ? { name } : {}),
+    ...(displayName ? { display_name: displayName } : {}),
     ...(args ? { arguments: args } : {}),
+    ...(status ? { status } : {}),
+    ...(summary ? { summary } : {}),
+    ...(durationMs !== null ? { duration_ms: durationMs } : {}),
+    ...(riskLevel ? { risk_level: riskLevel } : {}),
+    ...(typeof payloadRecord.requires_confirmation === "boolean" ? { requires_confirmation: payloadRecord.requires_confirmation } : {}),
+    ...(typeof payloadRecord.default_enabled === "boolean" ? { default_enabled: payloadRecord.default_enabled } : {}),
+    ...(error ? { error } : {}),
+    ...(confirmationId ? { confirmation_id: confirmationId } : {}),
+    ...(confirmationMessage ? { confirmation_message: confirmationMessage } : {}),
+    ...(confirmationStatus ? { confirmation_status: confirmationStatus } : {}),
+    ...(result ? { result } : {}),
   };
 }
 
@@ -117,6 +152,21 @@ function toolCallsFromDiagnostics(diagnostics?: ModelDiagnostics | null): UiTool
   return (diagnostics?.tool_calls ?? [])
     .map((item) => normalizeToolCall(item))
     .filter((item): item is UiToolCall => item !== null);
+}
+
+function confirmationSuccessSummary(toolCall: UiToolCall, result?: Record<string, unknown> | null) {
+  const toolName = String(toolCall.name || "");
+  if (toolName === "rebuild_file_index" && result) {
+    const displayPath = String(result.display_path || result.path || result.file_id || "文件");
+    const chunksIndexed = Number(result.chunks_indexed);
+    const chunkLabel = Number.isFinite(chunksIndexed) ? `，写入 ${chunksIndexed} 个切片` : "";
+    return `已重新索引 ${displayPath}${chunkLabel}。`;
+  }
+  if (toolName === "send_email" && result) {
+    const subject = String(result.subject || "邮件");
+    return `邮件已发送：${subject}。`;
+  }
+  return "已确认并执行。";
 }
 
 function applyDiagnosticsToMessage(target: UiMessage, diagnostics?: ModelDiagnostics | null) {
@@ -129,6 +179,49 @@ function applyDiagnosticsToMessage(target: UiMessage, diagnostics?: ModelDiagnos
   if (toolCalls.length) {
     target.toolCalls = toolCalls;
   }
+}
+
+function applyToolConfirmationResponse(toolCall: UiToolCall, response: AgentToolConfirmationResponse): UiToolCall {
+  const status = String(response.status || "");
+  const isConfirmed = status === "confirmed";
+  const isCancelled = status === "cancelled";
+  const isFailed = status === "failed" || Boolean(response.error);
+  const result = response.result ?? toolCall.result ?? null;
+  const summary = isConfirmed
+    ? confirmationSuccessSummary(toolCall, result)
+    : isCancelled
+      ? "已取消执行。"
+      : isFailed
+        ? "确认执行失败。"
+        : toolCall.summary;
+
+  return {
+    ...toolCall,
+    status: isConfirmed ? "success" : isFailed ? "error" : isCancelled ? "cancelled" : toolCall.status,
+    confirmation_status: status || toolCall.confirmation_status || null,
+    summary,
+    error: response.error ?? null,
+    result,
+  };
+}
+
+function markToolConfirmationRunning(toolCall: UiToolCall): UiToolCall {
+  return {
+    ...toolCall,
+    confirmation_status: "running",
+    summary: toolCall.summary || "等待确认的工具操作正在执行。",
+    error: null,
+  };
+}
+
+function markToolConfirmationFailed(toolCall: UiToolCall, message: string): UiToolCall {
+  return {
+    ...toolCall,
+    status: "error",
+    confirmation_status: "failed",
+    summary: "确认操作失败。",
+    error: message,
+  };
 }
 
 function conversationToSession(item: ChatConversationSummary): ChatSession {
@@ -204,6 +297,7 @@ export function useChatWorkspace(topK: Ref<number>) {
   const workspaceOptions = ref<WorkspaceScopeOption[]>([]);
   const selectedModel = ref("");
   const thinkingMode = ref<ThinkingMode>("quick");
+  const runMode = ref<RunMode>("rag");
   const scopeType = ref<"all" | "folder" | "kb" | "workspace">("all");
   const scopeId = ref<number | null>(null);
   const workspaceKey = ref<string | null>(null);
@@ -304,6 +398,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     composer.value = "";
     messageParts.value = [];
     errorMessage.value = "";
+    runMode.value = "rag";
     scopeType.value = "all";
     scopeId.value = null;
     workspaceKey.value = null;
@@ -609,6 +704,7 @@ export function useChatWorkspace(topK: Ref<number>) {
           native_web_search: selectedModelSupportsNativeSearch.value ? nativeWebSearchEnabled.value : false,
           external_web_search: externalWebSearchAvailable.value ? externalWebSearchEnabled.value : false,
           thinking_mode: thinkingMode.value,
+          run_mode: runMode.value,
         },
         {
           onDelta: async (delta) => {
@@ -665,6 +761,77 @@ export function useChatWorkspace(topK: Ref<number>) {
     } finally {
       loading.value = false;
       session.updatedAt = Date.now();
+    }
+  }
+
+  function updateToolCall(
+    payload: ToolConfirmationUiPayload,
+    updater: (toolCall: UiToolCall) => UiToolCall,
+  ): boolean {
+    for (const session of sessions.value) {
+      const message = session.messages.find((item) => item.id === payload.messageId);
+      if (!message?.toolCalls?.length) {
+        continue;
+      }
+      let updated = false;
+      message.toolCalls = message.toolCalls.map((toolCall) => {
+        if (toolCall.confirmation_id !== payload.confirmationId) {
+          return toolCall;
+        }
+        updated = true;
+        return updater(toolCall);
+      });
+      if (updated) {
+        session.updatedAt = Date.now();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function findConversationIdByMessageId(messageId: string): number | null {
+    for (const session of sessions.value) {
+      if (session.messages.some((message) => message.id === messageId)) {
+        return session.backendConversationId ?? null;
+      }
+    }
+    return activeSession.value?.backendConversationId ?? null;
+  }
+
+  async function confirmToolCall(payload: ToolConfirmationUiPayload) {
+    const confirmationId = payload.confirmationId.trim();
+    if (!confirmationId) {
+      return;
+    }
+    clearError();
+    updateToolCall(payload, markToolConfirmationRunning);
+    try {
+      const response = await confirmAgentToolConfirmation(confirmationId, {
+        conversation_id: findConversationIdByMessageId(payload.messageId),
+      });
+      updateToolCall(payload, (toolCall) => applyToolConfirmationResponse(toolCall, response));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("error.chat_request_failed");
+      errorMessage.value = message;
+      updateToolCall(payload, (toolCall) => markToolConfirmationFailed(toolCall, message));
+    }
+  }
+
+  async function cancelToolCall(payload: ToolConfirmationUiPayload) {
+    const confirmationId = payload.confirmationId.trim();
+    if (!confirmationId) {
+      return;
+    }
+    clearError();
+    try {
+      const response = await cancelAgentToolConfirmation(confirmationId, {
+        conversation_id: findConversationIdByMessageId(payload.messageId),
+      });
+      updateToolCall(payload, (toolCall) => applyToolConfirmationResponse(toolCall, response));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("error.chat_request_failed");
+      errorMessage.value = message;
+      updateToolCall(payload, (toolCall) => markToolConfirmationFailed(toolCall, message));
     }
   }
 
@@ -832,6 +999,8 @@ export function useChatWorkspace(topK: Ref<number>) {
     setSelectedModel,
     useStarterPrompt,
     sendChat,
+    confirmToolCall,
+    cancelToolCall,
     initialize,
     clearError,
     setMessageParts,
@@ -843,6 +1012,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     workspaceOptions,
     selectedModel,
     thinkingMode,
+    runMode,
     scopeType,
     scopeId,
     workspaceKey,

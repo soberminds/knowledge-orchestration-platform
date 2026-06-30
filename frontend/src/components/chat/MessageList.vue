@@ -10,6 +10,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: "viewport-ready", element: HTMLElement | null): void;
   (event: "load-older"): void;
+  (event: "confirm-tool", payload: { messageId: string; confirmationId: string }): void;
+  (event: "cancel-tool", payload: { messageId: string; confirmationId: string }): void;
 }>();
 
 const viewportRef = ref<HTMLElement | null>(null);
@@ -39,6 +41,8 @@ function onScroll() {
       v-for="message in props.messages"
       :key="message.id"
       :message="message"
+      @confirm-tool="emit('confirm-tool', $event)"
+      @cancel-tool="emit('cancel-tool', $event)"
     />
   </section>
 </template>

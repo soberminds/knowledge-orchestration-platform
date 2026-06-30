@@ -15,6 +15,7 @@ from fastapi import UploadFile
 from app.core.database import DatabaseUnavailableError, session_scope
 from app.core.request_context import get_current_user_id
 from app.core.settings import settings
+from app.services.files import read_file_page_text
 from app.services.preview_pdf import get_preview_pdf_cache_path
 
 try:
@@ -584,6 +585,24 @@ class DocumentLibraryService:
             "source_type": file_row.source_type,
         }
 
+    def _file_to_agent_payload(self, file_row: DocumentFileRow, folder_cache: str = "") -> dict[str, Any]:
+        payload = self._file_to_payload(file_row, folder_cache=folder_cache)
+        payload.update(
+            {
+                "file_id": file_row.id,
+                "kb_id": file_row.kb_id or None,
+                "mime_type": file_row.mime_type,
+                "file_hash": file_row.file_hash,
+                "parse_status": file_row.parse_status,
+                "index_status": file_row.index_status,
+                "parse_error": file_row.parse_error,
+                "last_indexed_at": file_row.last_indexed_at.isoformat(timespec="seconds") if file_row.last_indexed_at else None,
+                "created_at": file_row.created_at.isoformat(timespec="seconds"),
+                "updated_at": file_row.updated_at.isoformat(timespec="seconds"),
+            }
+        )
+        return payload
+
     def _folder_to_payload(self, folder: DocumentFolderRow, folder_path: str) -> dict[str, Any]:
         parent_path = self._build_folder_cache("", folder_path.rsplit("/", 1)[0]) if "/" in folder_path else ""
         return {
@@ -954,6 +973,107 @@ class DocumentLibraryService:
                 raise FileNotFoundError(f"File not found: {file_id}")
             folder_cache = self._folder_path_cache(session, user_id, row.folder_id)
             return self._file_to_payload(row, folder_cache=folder_cache)
+
+    def get_document_metadata_for_agent(self, file_id: int) -> dict[str, Any]:
+        self._ensure_sql()
+        with session_scope() as session:
+            user_id = self._get_or_create_default_user_id(session)
+            row = self._get_file_by_id(session, user_id, int(file_id))
+            if row is None:
+                raise FileNotFoundError(f"File not found: {file_id}")
+            folder_cache = self._folder_path_cache(session, user_id, row.folder_id)
+            return self._file_to_agent_payload(row, folder_cache=folder_cache)
+
+    def list_documents_for_agent(
+        self,
+        *,
+        folder_id: int | None = None,
+        keyword: str | None = None,
+        limit: int = 20,
+        include_folders: bool = True,
+    ) -> dict[str, Any]:
+        self._ensure_sql()
+        normalized_keyword = str(keyword or "").strip().lower()
+        normalized_limit = max(1, min(50, int(limit or 20)))
+        with session_scope() as session:
+            user_id = self._get_or_create_default_user_id(session)
+            folder_rows = self._list_user_folder_rows(session, user_id)
+            folder_paths = self._folder_payload_path_map(folder_rows)
+            folder_id_set: set[int] | None = None
+            if folder_id is not None and int(folder_id) > 0:
+                target_id = int(folder_id)
+                target_folder = self._get_folder_row(session, target_id)
+                if target_folder is None or target_folder.user_id != user_id:
+                    raise FileNotFoundError(f"Folder not found: {folder_id}")
+                folder_id_set = set(self._collect_descendant_folder_ids(folder_rows, target_id))
+
+            folders: list[dict[str, Any]] = []
+            if include_folders:
+                for folder_row in folder_rows:
+                    if folder_id_set is not None and folder_row.id not in folder_id_set:
+                        continue
+                    folder_path = folder_paths.get(folder_row.id, folder_row.folder_name)
+                    searchable = f"{folder_row.folder_name} {folder_path}".lower()
+                    if normalized_keyword and normalized_keyword not in searchable:
+                        continue
+                    folders.append(self._folder_row_to_payload(folder_row, folder_path))
+
+            files: list[dict[str, Any]] = []
+            for file_row in self._list_user_file_rows(session, user_id):
+                if folder_id_set is not None and file_row.folder_id not in folder_id_set:
+                    continue
+                folder_cache = folder_paths.get(file_row.folder_id, "") if file_row.folder_id else ""
+                display_path = f"{folder_cache}/{file_row.original_name}" if folder_cache else file_row.original_name
+                searchable = f"{file_row.original_name} {display_path} {file_row.file_ext}".lower()
+                if normalized_keyword and normalized_keyword not in searchable:
+                    continue
+                files.append(self._file_to_agent_payload(file_row, folder_cache=folder_cache))
+
+            folders = sorted(folders, key=lambda item: str(item.get("display_path") or item.get("path") or "").lower())
+            files = sorted(files, key=lambda item: str(item.get("display_path") or item.get("path") or "").lower())
+            return {
+                "folder_id": int(folder_id) if folder_id is not None else None,
+                "keyword": keyword or None,
+                "limit": normalized_limit,
+                "folders": folders[:normalized_limit],
+                "files": files[:normalized_limit],
+                "folder_count": len(folders),
+                "file_count": len(files),
+                "truncated": len(folders) > normalized_limit or len(files) > normalized_limit,
+            }
+
+    def read_document_summary_for_agent(self, *, file_id: int, max_chars: int = 2000) -> dict[str, Any]:
+        metadata = self.get_document_metadata_for_agent(file_id)
+        max_len = max(200, min(8000, int(max_chars or 2000)))
+        source_path = str(metadata.get("path") or "")
+        disk_path = (self.settings.root_dir / source_path).resolve()
+        if not disk_path.exists() or not disk_path.is_file():
+            raise FileNotFoundError(f"Stored file not found: {source_path}")
+
+        page_payload = read_file_page_text(disk_path, page=1)
+        text = str(page_payload.get("text") or "")
+        normalized_text = text.strip()
+        truncated = len(normalized_text) > max_len
+        preview = normalized_text[:max_len].rstrip()
+        if truncated:
+            preview = f"{preview}..."
+        return {
+            "file_id": metadata.get("file_id") or metadata.get("id"),
+            "name": metadata.get("name"),
+            "display_path": metadata.get("display_path"),
+            "folder_id": metadata.get("folder_id"),
+            "folder_path": metadata.get("display_path", "").rsplit("/", 1)[0] if "/" in str(metadata.get("display_path") or "") else "",
+            "extension": metadata.get("extension"),
+            "mime_type": metadata.get("mime_type"),
+            "index_status": metadata.get("index_status"),
+            "parse_status": metadata.get("parse_status"),
+            "page": page_payload.get("page"),
+            "page_count": page_payload.get("page_count"),
+            "format": page_payload.get("format"),
+            "content_preview": preview,
+            "char_count": len(normalized_text),
+            "truncated": truncated,
+        }
 
     def list_documents(self) -> list[dict[str, Any]]:
         self._ensure_sql()

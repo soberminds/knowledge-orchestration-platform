@@ -842,6 +842,133 @@ class ChatMemoryService:
         self._delete_recent_history_cache(conversation_id)
         self._cache_recent_history(conversation_id, self.load_recent_history(conversation_id))
 
+    def update_tool_confirmation_state(
+        self,
+        *,
+        conversation_id: int,
+        confirmation_id: str,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+        confirmed_at: str | None = None,
+        cancelled_at: str | None = None,
+    ) -> bool:
+        if text is None:
+            raise DatabaseUnavailableError("SQLAlchemy is not installed.")
+
+        confirmation_id = str(confirmation_id or "").strip()
+        if not confirmation_id:
+            return False
+
+        with session_scope() as session:
+            user_id = self._get_or_create_default_user_id(session)
+            rows = session.execute(
+                text(
+                    """
+                    SELECT m.id, m.meta_json
+                    FROM kop_chat_message m
+                    INNER JOIN kop_chat_conversation c ON c.id = m.conversation_id
+                    WHERE m.conversation_id = :conversation_id
+                      AND c.user_id = :user_id
+                      AND m.role = 'assistant'
+                    ORDER BY m.seq_no DESC
+                    LIMIT 20
+                    """
+                ),
+                {"conversation_id": int(conversation_id), "user_id": user_id},
+            ).all()
+
+            target_message_id: int | None = None
+            target_meta: dict[str, Any] | None = None
+            target_tool_call: dict[str, Any] | None = None
+            for row in rows:
+                meta = self._parse_json_value(row[1], {})
+                if not isinstance(meta, dict):
+                    continue
+                diagnostics = meta.get("model_diagnostics")
+                if not isinstance(diagnostics, dict):
+                    continue
+                tool_calls = diagnostics.get("tool_calls")
+                if not isinstance(tool_calls, list):
+                    continue
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    if str(tool_call.get("confirmation_id") or "").strip() != confirmation_id:
+                        continue
+                    target_message_id = int(row[0])
+                    target_meta = meta
+                    target_tool_call = tool_call
+                    break
+                if target_tool_call is not None:
+                    break
+
+            if target_message_id is None or target_meta is None or target_tool_call is None:
+                return False
+
+            normalized_status = str(status or "").strip()
+            target_tool_call["confirmation_status"] = normalized_status
+            if normalized_status == "confirmed":
+                target_tool_call["status"] = "success"
+            elif normalized_status == "cancelled":
+                target_tool_call["status"] = "cancelled"
+            elif normalized_status == "failed" or error:
+                target_tool_call["status"] = "error"
+
+            if result is not None:
+                target_tool_call["result"] = result
+            if error:
+                target_tool_call["error"] = error
+            else:
+                target_tool_call.pop("error", None)
+            if confirmed_at:
+                target_tool_call["confirmed_at"] = confirmed_at
+            if cancelled_at:
+                target_tool_call["cancelled_at"] = cancelled_at
+            target_tool_call["summary"] = self._tool_confirmation_summary(target_tool_call, normalized_status)
+
+            session.execute(
+                text(
+                    """
+                    UPDATE kop_chat_message
+                    SET meta_json = :meta_json,
+                        updated_at = :updated_at
+                    WHERE id = :message_id
+                    """
+                ),
+                {
+                    "meta_json": json.dumps(target_meta, ensure_ascii=False),
+                    "updated_at": self._now(),
+                    "message_id": target_message_id,
+                },
+            )
+
+        self._delete_recent_history_cache(conversation_id)
+        return True
+
+    def _tool_confirmation_summary(self, tool_call: dict[str, Any], status: str) -> str:
+        if status == "confirmed":
+            result = tool_call.get("result")
+            if isinstance(result, dict) and str(tool_call.get("name") or "") == "rebuild_file_index":
+                display_path = str(result.get("display_path") or result.get("path") or result.get("file_id") or "文件")
+                chunks_indexed = result.get("chunks_indexed")
+                try:
+                    chunk_label = f"，写入 {int(chunks_indexed)} 个切片"
+                except Exception:
+                    chunk_label = ""
+                return f"已重新索引 {display_path}{chunk_label}。"
+            if isinstance(result, dict) and str(tool_call.get("name") or "") == "send_email":
+                subject = str(result.get("subject") or "邮件")
+                return f"邮件已发送：{subject}。"
+            return "已确认并执行。"
+        if status == "cancelled":
+            return "已取消执行。"
+        if status == "failed":
+            return "确认执行失败。"
+        if status == "running":
+            return "等待确认的工具操作正在执行。"
+        return str(tool_call.get("summary") or "")
+
     def summarize_placeholder(self, conversation_id: int) -> None:
         client = self._safe_redis()
         if client is not None:

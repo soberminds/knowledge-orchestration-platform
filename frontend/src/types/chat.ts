@@ -1,4 +1,5 @@
 import type { ChatMessagePart, CitationRef, CostEstimate, ModelDiagnostics, SourceHit, TokenUsage } from "../api";
+import type { ToolCallDiagnostic } from "../api";
 
 export type WorkspaceTab = "chat" | "documents" | "index" | "search";
 
@@ -16,7 +17,7 @@ export interface UiMessage {
   content: string;
   messageParts?: ChatMessagePart[];
   reasoningParts?: string[];
-  toolCalls?: Array<{ id?: string; name?: string; arguments?: Record<string, unknown> }>;
+  toolCalls?: ToolCallDiagnostic[];
   providerApi?: string | null;
   createdAt: number;
   sources: SourceHit[];

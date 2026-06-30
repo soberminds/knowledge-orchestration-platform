@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import type { CitationRef } from "../../api";
+import type { CitationRef, ToolCallDiagnostic } from "../../api";
 import { useI18n } from "../../composables/useI18n";
 import type { UiMessage } from "../../types/chat";
 import { isOnlyOfficeDocument } from "../../utils/documentRouting";
@@ -10,6 +10,11 @@ import MarkdownRenderer from "./MarkdownRenderer.vue";
 
 const props = defineProps<{
   message: UiMessage;
+}>();
+
+const emit = defineEmits<{
+  (event: "confirm-tool", payload: { messageId: string; confirmationId: string }): void;
+  (event: "cancel-tool", payload: { messageId: string; confirmationId: string }): void;
 }>();
 
 const sourceDetailsRef = ref<HTMLDetailsElement | null>(null);
@@ -50,6 +55,12 @@ const assistantReasoningText = computed(() => {
   return normalizeReasoningMarkdown(parts.join(""));
 });
 const assistantToolCalls = computed(() => (props.message.role === "assistant" ? props.message.toolCalls ?? [] : []));
+const shouldOpenToolCalls = computed(() =>
+  assistantToolCalls.value.some((toolCall) => {
+    const confirmationStatus = String(toolCall.confirmation_status || "");
+    return toolCallNeedsConfirmation(toolCall) || confirmationStatus === "running";
+  }),
+);
 const userAttachments = computed(() =>
   props.message.role === "user" ? (props.message.messageParts ?? []).filter((part) => part.type !== "text") : [],
 );
@@ -72,6 +83,9 @@ const assistantDiagnosticsChips = computed(() => {
   }
   if (props.message.modelDiagnostics?.thinking_mode) {
     chips.push(t("message.diagnostics_thinking", { mode: props.message.modelDiagnostics.thinking_mode }));
+  }
+  if (props.message.modelDiagnostics?.run_mode) {
+    chips.push(t("message.diagnostics_run_mode", { mode: props.message.modelDiagnostics.run_mode }));
   }
   return chips;
 });
@@ -164,6 +178,7 @@ const diagnosticsSummary = computed(() => {
     `nativeWeb=${diagnostics.native_web_search_used ? "on" : "off"}`,
     `externalWeb=${diagnostics.external_web_search_used ? "on" : "off"}`,
     `thinking=${diagnostics.thinking_mode || "-"}`,
+    `mode=${diagnostics.run_mode || "-"}`,
   ];
   if (diagnostics.option_fallback_used) {
     parts.push("fallback=on");
@@ -189,11 +204,202 @@ function formatToolArguments(argumentsValue?: Record<string, unknown>) {
   }
 }
 
+function toolCallArguments(argumentsValue?: Record<string, unknown> | string | null) {
+  if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) {
+    return undefined;
+  }
+  return argumentsValue;
+}
+
+function toolCallName(toolCall: ToolCallDiagnostic) {
+  return String(toolCall.name || "").trim();
+}
+
+function isSendEmailTool(toolCall: ToolCallDiagnostic) {
+  return toolCallName(toolCall) === "send_email";
+}
+
+function formatEmailRecipients(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean).join("、");
+  }
+  return String(value || "").trim();
+}
+
+function emailToolArguments(toolCall: ToolCallDiagnostic) {
+  return toolCallArguments(toolCall.arguments) ?? {};
+}
+
+function emailPreviewTo(toolCall: ToolCallDiagnostic) {
+  return formatEmailRecipients(emailToolArguments(toolCall).to);
+}
+
+function emailPreviewCc(toolCall: ToolCallDiagnostic) {
+  return formatEmailRecipients(emailToolArguments(toolCall).cc);
+}
+
+function emailPreviewSubject(toolCall: ToolCallDiagnostic) {
+  return String(emailToolArguments(toolCall).subject || "").trim();
+}
+
+function emailPreviewBody(toolCall: ToolCallDiagnostic) {
+  return String(emailToolArguments(toolCall).body || "").trim();
+}
+
+function toolCallResult(toolCall: ToolCallDiagnostic) {
+  if (!toolCall.result || typeof toolCall.result !== "object" || Array.isArray(toolCall.result)) {
+    return null;
+  }
+  return toolCall.result as Record<string, unknown>;
+}
+
+function isRebuildIndexTool(toolCall: ToolCallDiagnostic) {
+  return toolCallName(toolCall) === "rebuild_file_index";
+}
+
+function hasToolResultSummary(toolCall: ToolCallDiagnostic) {
+  return Boolean(toolCallResult(toolCall) && (isRebuildIndexTool(toolCall) || isSendEmailTool(toolCall)));
+}
+
+function formatNumberValue(value: unknown) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? String(numberValue) : "-";
+}
+
+function toolResultDisplayPath(toolCall: ToolCallDiagnostic) {
+  const result = toolCallResult(toolCall);
+  return String(result?.display_path || result?.path || result?.file_id || "-");
+}
+
+function rebuildDocumentsLoaded(toolCall: ToolCallDiagnostic) {
+  return formatNumberValue(toolCallResult(toolCall)?.documents_loaded);
+}
+
+function rebuildChunksIndexed(toolCall: ToolCallDiagnostic) {
+  return formatNumberValue(toolCallResult(toolCall)?.chunks_indexed);
+}
+
+function rebuildIndexStatus(toolCall: ToolCallDiagnostic) {
+  return String(toolCallResult(toolCall)?.index_status || "-");
+}
+
+function emailResultRecipients(toolCall: ToolCallDiagnostic) {
+  return formatEmailRecipients(toolCallResult(toolCall)?.to);
+}
+
+function emailResultSubject(toolCall: ToolCallDiagnostic) {
+  return String(toolCallResult(toolCall)?.subject || "-");
+}
+
+function emailResultSentAt(toolCall: ToolCallDiagnostic) {
+  return String(toolCallResult(toolCall)?.sent_at || "-");
+}
+
 function toolCallTitle(index: number, name?: string) {
   return t("message.tool_call_item", {
     index: index + 1,
     name: name || t("message.tool_call_unknown"),
   });
+}
+
+function toolCallDisplayName(toolCall: { name?: string | null; display_name?: string | null }) {
+  return String(toolCall.display_name || toolCall.name || t("message.tool_call_unknown"));
+}
+
+function toolCallStatusLabel(status?: string | null) {
+  const normalized = String(status || "success");
+  if (normalized === "error") {
+    return t("message.tool_status_error");
+  }
+  if (normalized === "cancelled") {
+    return t("message.tool_status_cancelled");
+  }
+  if (normalized === "pending_confirmation") {
+    return t("message.tool_status_pending");
+  }
+  return t("message.tool_status_success");
+}
+
+function toolCallRiskLabel(riskLevel?: string | null) {
+  const normalized = String(riskLevel || "read");
+  if (normalized === "write") {
+    return t("message.tool_risk_write");
+  }
+  if (normalized === "dangerous") {
+    return t("message.tool_risk_dangerous");
+  }
+  return t("message.tool_risk_read");
+}
+
+function toolCallDurationLabel(durationMs?: number | null) {
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) {
+    return "";
+  }
+  return t("message.tool_duration", { duration: durationMs });
+}
+
+function toolCallConfirmationId(toolCall: ToolCallDiagnostic) {
+  return String(toolCall.confirmation_id || "").trim();
+}
+
+function toolCallConfirmationMessage(toolCall: ToolCallDiagnostic) {
+  return String(toolCall.confirmation_message || toolCall.summary || "").trim();
+}
+
+function toolCallNeedsConfirmation(toolCall: ToolCallDiagnostic) {
+  const confirmationId = toolCallConfirmationId(toolCall);
+  const status = String(toolCall.status || "");
+  const confirmationStatus = String(toolCall.confirmation_status || "");
+  return (
+    Boolean(confirmationId) &&
+    status === "pending_confirmation" &&
+    (!confirmationStatus || confirmationStatus === "pending")
+  );
+}
+
+function toolCallConfirmationStateLabel(toolCall: ToolCallDiagnostic) {
+  const status = String(toolCall.confirmation_status || toolCall.status || "");
+  if (status === "confirmed") {
+    return t("message.tool_confirmation_confirmed");
+  }
+  if (status === "cancelled") {
+    return t("message.tool_confirmation_cancelled");
+  }
+  if (status === "failed" || toolCall.status === "error") {
+    return t("message.tool_confirmation_failed");
+  }
+  if (status === "running") {
+    return t("message.tool_confirmation_running");
+  }
+  return "";
+}
+
+function toolCallResultText(toolCall: ToolCallDiagnostic) {
+  const result = toolCallResult(toolCall);
+  if (!result) {
+    return "";
+  }
+  try {
+    return JSON.stringify(result, null, 2);
+  } catch {
+    return "";
+  }
+}
+
+function confirmToolCall(toolCall: ToolCallDiagnostic) {
+  const confirmationId = toolCallConfirmationId(toolCall);
+  if (!confirmationId) {
+    return;
+  }
+  emit("confirm-tool", { messageId: props.message.id, confirmationId });
+}
+
+function cancelToolCall(toolCall: ToolCallDiagnostic) {
+  const confirmationId = toolCallConfirmationId(toolCall);
+  if (!confirmationId) {
+    return;
+  }
+  emit("cancel-tool", { messageId: props.message.id, confirmationId });
 }
 
 function citationElementId(label: string) {
@@ -339,15 +545,109 @@ async function focusCitation(label: string) {
         </div>
       </details>
 
-      <details v-if="assistantToolCalls.length" class="analysis-details">
+      <details v-if="assistantToolCalls.length" class="analysis-details" :open="shouldOpenToolCalls">
         <summary>{{ t("message.tool_calls_summary", { count: assistantToolCalls.length }) }}</summary>
         <ul class="tool-call-list">
           <li v-for="(toolCall, index) in assistantToolCalls" :key="`${message.id}-tool-${index}`" class="tool-call-item">
             <div class="tool-call-head">
-              <strong>{{ toolCallTitle(index, toolCall.name) }}</strong>
+              <strong>{{ toolCallTitle(index, toolCallDisplayName(toolCall)) }}</strong>
               <span v-if="toolCall.id" class="tool-call-id">ID {{ toolCall.id }}</span>
+              <span :class="['tool-call-status', `is-${toolCall.status || 'success'}`]">
+                {{ toolCallStatusLabel(toolCall.status) }}
+              </span>
+              <span class="tool-call-risk">{{ toolCallRiskLabel(toolCall.risk_level) }}</span>
+              <span v-if="toolCallDurationLabel(toolCall.duration_ms)" class="tool-call-duration">
+                {{ toolCallDurationLabel(toolCall.duration_ms) }}
+              </span>
             </div>
-            <pre v-if="formatToolArguments(toolCall.arguments)" class="tool-call-args">{{ formatToolArguments(toolCall.arguments) }}</pre>
+            <p v-if="toolCall.summary || toolCall.error" class="tool-call-summary">
+              {{ toolCall.error || toolCall.summary }}
+            </p>
+            <pre v-if="formatToolArguments(toolCallArguments(toolCall.arguments))" class="tool-call-args">{{ formatToolArguments(toolCallArguments(toolCall.arguments)) }}</pre>
+            <div
+              v-if="toolCallNeedsConfirmation(toolCall) || toolCallConfirmationStateLabel(toolCall)"
+              :class="[
+                'tool-confirmation-card',
+                toolCallNeedsConfirmation(toolCall) ? 'is-pending' : '',
+                toolCall.confirmation_status ? `is-${toolCall.confirmation_status}` : '',
+              ]"
+            >
+              <div class="tool-confirmation-main">
+                <strong>{{ t("message.tool_confirmation_title") }}</strong>
+                <p>{{ toolCallConfirmationMessage(toolCall) || t("message.tool_confirmation_default_message") }}</p>
+                <dl v-if="isSendEmailTool(toolCall)" class="tool-email-preview">
+                  <div v-if="emailPreviewTo(toolCall)" class="tool-email-preview-row">
+                    <dt>{{ t("message.email_preview_to") }}</dt>
+                    <dd>{{ emailPreviewTo(toolCall) }}</dd>
+                  </div>
+                  <div v-if="emailPreviewCc(toolCall)" class="tool-email-preview-row">
+                    <dt>{{ t("message.email_preview_cc") }}</dt>
+                    <dd>{{ emailPreviewCc(toolCall) }}</dd>
+                  </div>
+                  <div v-if="emailPreviewSubject(toolCall)" class="tool-email-preview-row">
+                    <dt>{{ t("message.email_preview_subject") }}</dt>
+                    <dd>{{ emailPreviewSubject(toolCall) }}</dd>
+                  </div>
+                  <div v-if="emailPreviewBody(toolCall)" class="tool-email-preview-row is-body">
+                    <dt>{{ t("message.email_preview_body") }}</dt>
+                    <dd><pre>{{ emailPreviewBody(toolCall) }}</pre></dd>
+                  </div>
+                </dl>
+                <span v-if="toolCallConfirmationId(toolCall)" class="tool-confirmation-id">
+                  {{ toolCallConfirmationId(toolCall) }}
+                </span>
+              </div>
+              <div v-if="toolCallNeedsConfirmation(toolCall)" class="tool-confirmation-actions">
+                <button class="tool-confirmation-btn is-confirm" type="button" @click="confirmToolCall(toolCall)">
+                  {{ t("message.tool_confirmation_confirm") }}
+                </button>
+                <button class="tool-confirmation-btn" type="button" @click="cancelToolCall(toolCall)">
+                  {{ t("message.tool_confirmation_cancel") }}
+                </button>
+              </div>
+              <span v-else class="tool-confirmation-state">
+                {{ toolCallConfirmationStateLabel(toolCall) }}
+              </span>
+            </div>
+            <div v-if="hasToolResultSummary(toolCall)" class="tool-result-card">
+              <strong>{{ t("message.tool_result_title") }}</strong>
+              <dl v-if="isRebuildIndexTool(toolCall)" class="tool-result-grid">
+                <div>
+                  <dt>{{ t("message.tool_result_file") }}</dt>
+                  <dd>{{ toolResultDisplayPath(toolCall) }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t("message.tool_result_documents_loaded") }}</dt>
+                  <dd>{{ rebuildDocumentsLoaded(toolCall) }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t("message.tool_result_chunks_indexed") }}</dt>
+                  <dd>{{ rebuildChunksIndexed(toolCall) }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t("message.tool_result_index_status") }}</dt>
+                  <dd>{{ rebuildIndexStatus(toolCall) }}</dd>
+                </div>
+              </dl>
+              <dl v-else-if="isSendEmailTool(toolCall)" class="tool-result-grid">
+                <div>
+                  <dt>{{ t("message.email_preview_to") }}</dt>
+                  <dd>{{ emailResultRecipients(toolCall) }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t("message.email_preview_subject") }}</dt>
+                  <dd>{{ emailResultSubject(toolCall) }}</dd>
+                </div>
+                <div>
+                  <dt>{{ t("message.tool_result_sent_at") }}</dt>
+                  <dd>{{ emailResultSentAt(toolCall) }}</dd>
+                </div>
+              </dl>
+            </div>
+            <details v-if="toolCallResultText(toolCall)" class="tool-result-raw">
+              <summary>{{ t("message.tool_result_raw") }}</summary>
+              <pre class="tool-call-args is-result">{{ toolCallResultText(toolCall) }}</pre>
+            </details>
           </li>
         </ul>
       </details>
@@ -667,6 +967,48 @@ async function focusCitation(label: string) {
   background: rgba(15, 23, 42, 0.05);
 }
 
+.tool-call-status,
+.tool-call-risk,
+.tool-call-duration {
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  background: rgba(20, 184, 166, 0.1);
+  color: #0f766e;
+}
+
+.tool-call-status.is-error {
+  background: rgba(220, 38, 38, 0.1);
+  color: #b42318;
+}
+
+.tool-call-status.is-pending_confirmation {
+  background: rgba(217, 119, 6, 0.12);
+  color: #b45309;
+}
+
+.tool-call-status.is-cancelled {
+  background: rgba(100, 116, 139, 0.12);
+  color: #475569;
+}
+
+.tool-call-risk {
+  background: rgba(15, 23, 42, 0.05);
+  color: var(--text-muted);
+}
+
+.tool-call-duration {
+  background: rgba(15, 118, 110, 0.06);
+}
+
+.tool-call-summary {
+  margin: 5px 0 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
 .tool-call-args {
   margin: 6px 0 0;
   padding: 8px 10px;
@@ -677,6 +1019,225 @@ async function focusCitation(label: string) {
   word-break: break-word;
   font-size: 0.78rem;
   line-height: 1.55;
+}
+
+.tool-call-args.is-result {
+  border: 1px solid rgba(20, 184, 166, 0.14);
+  background: rgba(236, 253, 249, 0.48);
+}
+
+.tool-result-card {
+  margin-top: 8px;
+  padding: 10px 11px;
+  border: 1px solid rgba(20, 184, 166, 0.16);
+  border-radius: 12px;
+  background: rgba(236, 253, 249, 0.62);
+}
+
+.tool-result-card > strong {
+  display: block;
+  margin-bottom: 7px;
+  color: #0f766e;
+  font-size: 0.82rem;
+}
+
+.tool-result-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 12px;
+}
+
+.tool-result-grid div {
+  min-width: 0;
+}
+
+.tool-result-grid dt {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.tool-result-grid dd {
+  margin: 1px 0 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.tool-result-raw {
+  margin-top: 6px;
+}
+
+.tool-result-raw summary {
+  cursor: pointer;
+  width: fit-content;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.tool-result-raw .tool-call-args {
+  margin-top: 6px;
+}
+
+.tool-confirmation-card {
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(217, 119, 6, 0.2);
+  border-radius: 12px;
+  background: rgba(255, 251, 235, 0.72);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tool-confirmation-card.is-confirmed {
+  border-color: rgba(20, 184, 166, 0.2);
+  background: rgba(236, 253, 249, 0.62);
+}
+
+.tool-confirmation-card.is-cancelled {
+  border-color: rgba(100, 116, 139, 0.16);
+  background: rgba(248, 250, 252, 0.78);
+}
+
+.tool-confirmation-card.is-failed {
+  border-color: rgba(220, 38, 38, 0.18);
+  background: rgba(254, 242, 242, 0.78);
+}
+
+.tool-confirmation-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.tool-confirmation-main strong {
+  color: #92400e;
+  font-size: 0.82rem;
+}
+
+.tool-confirmation-card.is-confirmed .tool-confirmation-main strong {
+  color: #0f766e;
+}
+
+.tool-confirmation-card.is-failed .tool-confirmation-main strong {
+  color: #b42318;
+}
+
+.tool-confirmation-main p {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.tool-email-preview {
+  margin: 4px 0 2px;
+  display: grid;
+  gap: 6px;
+}
+
+.tool-email-preview-row {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+
+.tool-email-preview-row dt {
+  margin: 0;
+  color: var(--text-muted);
+  font-weight: 650;
+}
+
+.tool-email-preview-row dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.tool-email-preview-row.is-body {
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+
+.tool-email-preview-row pre {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 10px;
+  padding: 8px 9px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(217, 119, 6, 0.16);
+  color: var(--text);
+  font-family: inherit;
+}
+
+.tool-confirmation-id {
+  width: fit-content;
+  max-width: 100%;
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: rgba(15, 23, 42, 0.05);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-confirmation-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.tool-confirmation-btn {
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.tool-confirmation-btn:hover {
+  border-color: rgba(20, 184, 166, 0.28);
+  background: rgba(20, 184, 166, 0.08);
+  color: #0f766e;
+}
+
+.tool-confirmation-btn.is-confirm {
+  border-color: #0f766e;
+  background: #0f766e;
+  color: #fff;
+}
+
+.tool-confirmation-btn.is-confirm:hover {
+  border-color: #0d9488;
+  background: #0d9488;
+  color: #fff;
+}
+
+.tool-confirmation-state {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(20, 184, 166, 0.1);
+  color: #0f766e;
+  font-size: 0.76rem;
+  font-weight: 650;
 }
 
 .source-details {
@@ -699,6 +1260,12 @@ async function focusCitation(label: string) {
   border: 1px solid rgba(20, 184, 166, 0.12);
   border-radius: 10px;
   background: rgba(236, 253, 249, 0.72);
+}
+
+@media (max-width: 720px) {
+  .tool-result-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .citation-index h4 {

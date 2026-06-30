@@ -115,7 +115,7 @@ function onRecentScroll(event: Event) {
       </template>
       <template v-else>
         <div class="sidebar-head-main">
-          <div class="logo-mark">R</div>
+          <div class="logo-mark">K</div>
           <div class="head-text">
             <strong>{{ t("sidebar.brand_name") }}</strong>
             <small>{{ t("sidebar.brand_subtitle") }}</small>
