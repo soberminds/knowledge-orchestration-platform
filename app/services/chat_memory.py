@@ -614,6 +614,12 @@ class ChatMemoryService:
             model_diagnostics = meta.get("model_diagnostics")
             if not isinstance(model_diagnostics, dict):
                 model_diagnostics = None
+            message_parts = meta.get("message_parts")
+            if not isinstance(message_parts, list):
+                message_parts = []
+            reasoning_parts = meta.get("reasoning_parts")
+            if not isinstance(reasoning_parts, list):
+                reasoning_parts = []
 
             sources = [self._citation_to_source(citation) for citation in normalized_citations]
             items.append(
@@ -623,6 +629,7 @@ class ChatMemoryService:
                     "sender_user_id": int(row[2]) if row[2] is not None else None,
                     "role": str(row[3]),
                     "content": str(row[4] or ""),
+                    "message_parts": [item for item in message_parts if isinstance(item, dict)],
                     "seq_no": int(row[5]),
                     "created_at": self._to_iso(row[6]) or "",
                     "model": str(meta.get("model") or "") or None,
@@ -630,6 +637,7 @@ class ChatMemoryService:
                     "sources": sources,
                     "usage": usage,
                     "model_diagnostics": model_diagnostics,
+                    "reasoning_parts": [str(item) for item in reasoning_parts if str(item).strip()],
                 }
             )
         return items, has_more
@@ -724,9 +732,11 @@ class ChatMemoryService:
         question: str,
         answer: str,
         model_name: str | None,
+        message_parts: list[dict[str, Any]] | None = None,
         citations: list[dict[str, Any]] | None = None,
         usage: dict[str, Any] | None = None,
         model_diagnostics: dict[str, Any] | None = None,
+        reasoning_parts: list[str] | None = None,
         rewritten_question: str | None = None,
         question_mode: str | None = None,
     ) -> None:
@@ -764,7 +774,7 @@ class ChatMemoryService:
                     INSERT INTO kop_chat_message
                         (conversation_id, sender_user_id, role, content, seq_no, meta_json, citations_json, token_count, created_at, updated_at)
                     VALUES
-                        (:conversation_id, :sender_user_id, 'user', :content, :seq_no, NULL, NULL, NULL, :created_at, :updated_at)
+                        (:conversation_id, :sender_user_id, 'user', :content, :seq_no, :meta_json, NULL, NULL, :created_at, :updated_at)
                     """
                 ),
                 {
@@ -772,6 +782,9 @@ class ChatMemoryService:
                     "sender_user_id": user_id,
                     "content": question,
                     "seq_no": seq_no,
+                    "meta_json": json.dumps({"message_parts": message_parts or []}, ensure_ascii=False)
+                    if message_parts
+                    else None,
                     "created_at": now_value,
                     "updated_at": now_value,
                 },
@@ -783,6 +796,7 @@ class ChatMemoryService:
                 "question_mode": question_mode,
                 "usage": usage,
                 "model_diagnostics": model_diagnostics,
+                "reasoning_parts": [str(item) for item in (reasoning_parts or []) if str(item).strip()],
                 "model": model_name,
             }
             session.execute(

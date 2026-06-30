@@ -22,19 +22,24 @@ from chromadb.config import Settings as ChromaSettings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from openai import OpenAI
 
-from app.schemas import ChatHistoryItem
+from app.schemas import ChatHistoryItem, ChatMessagePart
 from app.services.embeddings import get_embedding_model
 from app.services.document_library import DocumentLibraryService
 from app.services.files import iter_source_files, load_documents_from_file
+from app.services.llm_provider_adapter import (
+    LLMProviderAdapter,
+    LLMProviderAdapterFactory,
+    ModelUnavailableError,
+    ProviderRuntimeConfig,
+)
 from app.services.llm_provider_mapping import (
     CapabilityRegistry,
-    CanonicalCompletionOptions,
     ModelCapability,
-    build_provider_options,
 )
+from app.services.llm_streaming import StreamingEvent, content_delta, done_event, reasoning_delta, tool_call_delta
 from app.services.preview_pdf import get_preview_pdf_cache_path
+from app.services.tools import ToolRegistry, build_readonly_tool_registry
 
 QuestionMode = Literal["overview", "technical", "comparison", "list", "general"]
 ThinkingMode = Literal["quick", "deep"]
@@ -116,19 +121,6 @@ class WebSearchHit:
     snippet: str
 
 
-@dataclass(frozen=True)
-class ProviderRuntimeConfig:
-    """Runtime connection config for one OpenAI-compatible provider."""
-
-    provider: str
-    base_url: str
-    api_key: str
-
-
-class ModelUnavailableError(RuntimeError):
-    """Raised when selected model has no available provider credentials."""
-
-
 class KnowledgeBaseService:
     """Main knowledge-base service used by API routes."""
 
@@ -139,7 +131,9 @@ class KnowledgeBaseService:
         self._embedder = None
         self._vector_store: Chroma | None = None
         self._document_library: DocumentLibraryService | None = None
-        self._llm_clients: dict[str, OpenAI] = {}
+        self._llm_adapter_factory = LLMProviderAdapterFactory(
+            qwen_responses_api_enabled=self.settings.qwen_responses_api_enabled,
+        )
         self._model_provider_overrides_cache: dict[str, str] | None = None
         self._extra_provider_configs_cache: dict[str, ProviderRuntimeConfig] | None = None
         self._model_pricing_cache: dict[str, dict[str, float]] | None = None
@@ -335,27 +329,37 @@ class KnowledgeBaseService:
         provider_token = provider or self._resolve_provider_name(model_name)
         return self._capability_registry.resolve(provider=provider_token, model_name=model_name)
 
-    def _resolve_model_client(self, model_name: str) -> tuple[str, OpenAI]:
+    def _resolve_model_provider(self, model_name: str) -> str:
         config = self._resolve_model_provider_config(model_name)
         if config is None:
             raise ModelUnavailableError(
                 f"Model '{model_name}' is not mapped to a configured provider. "
                 "Add MODEL_PROVIDER_OVERRIDES_JSON or EXTRA_PROVIDER_CONFIGS_JSON in .env."
             )
+        return config.provider
 
-        if not config.api_key:
-            env_name = f"{config.provider.upper()}_API_KEY"
+    def _resolve_model_adapter(self, model_name: str) -> LLMProviderAdapter:
+        config = self._resolve_model_provider_config(model_name)
+        if config is None:
             raise ModelUnavailableError(
-                f"Model '{model_name}' is temporarily unavailable: missing {env_name}. "
-                "Please set it in .env, then restart backend."
+                f"Model '{model_name}' is not mapped to a configured provider. "
+                "Add MODEL_PROVIDER_OVERRIDES_JSON or EXTRA_PROVIDER_CONFIGS_JSON in .env."
             )
-
-        cache_key = f"{config.provider}|{config.base_url}|{hash(config.api_key)}"
-        client = self._llm_clients.get(cache_key)
-        if client is None:
-            client = OpenAI(api_key=config.api_key, base_url=config.base_url)
-            self._llm_clients[cache_key] = client
-        return config.provider, client
+        capability = self._resolve_model_capability(model_name=model_name, provider=config.provider)
+        try:
+            return self._llm_adapter_factory.create(
+                config=config,
+                capability=capability,
+                temperature=self.settings.temperature,
+                max_tokens=self.settings.max_tokens,
+            )
+        except ModelUnavailableError as exc:
+            message = str(exc)
+            provider_phrase = f"Model provider '{config.provider}'"
+            model_phrase = f"Model '{model_name}'"
+            if message.startswith(provider_phrase):
+                message = message.replace(provider_phrase, model_phrase, 1)
+            raise ModelUnavailableError(message) from exc
 
     def resolve_model_options(self) -> list[dict[str, str | bool | int | None]]:
         options: list[dict[str, str | bool | int | None]] = []
@@ -380,6 +384,10 @@ class KnowledgeBaseService:
                     "model": model_name,
                     "provider": provider,
                     "supports_native_web_search": capability.supports_native_web_search,
+                    "supports_tool_calling": capability.supports_tool_calling,
+                    "supports_multimodal_input": capability.supports_multimodal_input,
+                    "supports_responses_api": capability.supports_responses_api,
+                    "supports_responses_streaming": capability.supports_responses_streaming,
                     "thinking_style": capability.thinking_style,
                     "deep_reasoning_effort": capability.deep_reasoning_effort if capability.supports_reasoning_effort else None,
                     "deep_thinking_budget": capability.deep_thinking_budget
@@ -1062,6 +1070,131 @@ class KnowledgeBaseService:
         history_text = "\n".join(f"{item.role}: {item.content}" for item in recent_turns)
         return f"Conversation context:\n{history_text}\n\nCurrent question:\n{question}"
 
+    @classmethod
+    def _message_content_text(cls, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("type") or "")
+                if item_type == "text":
+                    text_value = str(item.get("text") or "").strip()
+                    if text_value:
+                        parts.append(text_value)
+                elif item_type == "image_url":
+                    image_payload = item.get("image_url")
+                    image_url = image_payload.get("url") if isinstance(image_payload, dict) else image_payload
+                    if image_url:
+                        parts.append(cls._format_image_reference_text(str(image_url)))
+                elif item_type == "file_ref":
+                    parts.append(
+                        "[file_ref] "
+                        f"file_id={item.get('file_id') or ''} "
+                        f"file_name={item.get('file_name') or ''} "
+                        f"mime_type={item.get('mime_type') or ''}".strip()
+                    )
+            return "\n".join(parts)
+        return str(content or "")
+
+    @staticmethod
+    def _normalize_message_parts(question: str, message_parts: list[ChatMessagePart] | None) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        has_text = False
+        for part in message_parts or []:
+            part_type = str(part.type or "text")
+            if part_type == "text":
+                text_value = str(part.text or "").strip()
+                if text_value:
+                    normalized.append({"type": "text", "text": text_value})
+                    has_text = True
+                continue
+            if part_type == "image_url":
+                image_url = str(part.image_url or "").strip()
+                if image_url:
+                    normalized.append({"type": "image_url", "image_url": {"url": image_url}})
+                continue
+            if part_type == "file_ref":
+                normalized.append(
+                    {
+                        "type": "file_ref",
+                        "file_id": part.file_id,
+                        "file_name": str(part.file_name or "").strip(),
+                        "mime_type": str(part.mime_type or "").strip(),
+                    }
+                )
+
+        question_text = question.strip()
+        if question_text and not has_text:
+            normalized.insert(0, {"type": "text", "text": question_text})
+        return normalized
+
+    @classmethod
+    def _message_parts_to_prompt_text(cls, message_parts: list[dict[str, Any]]) -> str:
+        return cls._message_content_text(message_parts)
+
+    @staticmethod
+    def _format_image_reference_text(image_url: str) -> str:
+        image_url = str(image_url or "").strip()
+        if not image_url:
+            return ""
+        if image_url.startswith("data:image/"):
+            mime_type = image_url.split(";", 1)[0].replace("data:", "", 1) or "image"
+            return f"[image_url] pasted inline image ({mime_type})"
+        return f"[image_url] {image_url}"
+
+    def _message_parts_to_provider_content(
+        self,
+        message_parts: list[dict[str, Any]],
+        fallback_text: str,
+        *,
+        capability: ModelCapability,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> str | list[dict[str, Any]]:
+        provider_parts: list[dict[str, Any]] = []
+        file_lines: list[str] = []
+        image_lines: list[str] = []
+        for part in message_parts:
+            part_type = str(part.get("type") or "")
+            if part_type == "text":
+                text_value = str(part.get("text") or "").strip()
+                if text_value:
+                    provider_parts.append({"type": "text", "text": text_value})
+                continue
+            if part_type == "image_url":
+                image_payload = part.get("image_url")
+                image_url = image_payload.get("url") if isinstance(image_payload, dict) else image_payload
+                image_url = str(image_url or "").strip()
+                if image_url:
+                    if capability.supports_multimodal_input:
+                        provider_parts.append({"type": "image_url", "image_url": {"url": image_url}})
+                    else:
+                        image_lines.append(self._format_image_reference_text(image_url))
+                continue
+            if part_type == "file_ref":
+                file_lines.append(
+                    "File reference: "
+                    f"id={part.get('file_id') or ''}, "
+                    f"name={part.get('file_name') or ''}, "
+                    f"mime_type={part.get('mime_type') or ''}"
+                )
+
+        if image_lines:
+            provider_parts.append({"type": "text", "text": "\n".join(image_lines)})
+            self._append_model_diagnostic_warning(
+                diagnostics,
+                "当前模型未声明支持原生图片输入，图片 URL 已作为文本引用传入。",
+            )
+        if file_lines:
+            provider_parts.append({"type": "text", "text": "\n".join(file_lines)})
+        if not provider_parts:
+            return fallback_text
+        if len(provider_parts) == 1 and provider_parts[0].get("type") == "text":
+            return str(provider_parts[0].get("text") or fallback_text)
+        return provider_parts
+
     def _classify_question_mode(self, question: str) -> QuestionMode:
         normalized = re.sub(r"\s+", "", question.lower())
 
@@ -1665,6 +1798,7 @@ class KnowledgeBaseService:
         external_web_search_used: bool = False,
         thinking_mode: ThinkingMode = "quick",
     ) -> dict[str, Any]:
+        capability = self._resolve_model_capability(model_name=model_name, provider=provider)
         return {
             "requested_model": requested_model or model_name,
             "provider": provider,
@@ -1672,16 +1806,18 @@ class KnowledgeBaseService:
             "native_web_search_used": bool(native_web_search_used),
             "external_web_search_used": bool(external_web_search_used),
             "thinking_mode": thinking_mode,
+            "provider_api": "chat_completions",
+            "capabilities": {
+                "supports_native_web_search": capability.supports_native_web_search,
+                "supports_tool_calling": capability.supports_tool_calling,
+                "supports_multimodal_input": capability.supports_multimodal_input,
+                "supports_responses_api": capability.supports_responses_api,
+                "supports_responses_streaming": capability.supports_responses_streaming,
+                "thinking_style": capability.thinking_style,
+            },
             "option_fallback_used": False,
             "warnings": [],
         }
-
-    def _append_model_diagnostic_warning(self, diagnostics: dict[str, Any] | None, message: str) -> None:
-        if diagnostics is None:
-            return
-        warnings = diagnostics.setdefault("warnings", [])
-        if isinstance(warnings, list) and message not in warnings:
-            warnings.append(message)
 
     def _should_polish_answer(self, answer: str, question_mode: QuestionMode, thinking_mode: ThinkingMode) -> bool:
         compact = re.sub(r"\s+", "", answer)
@@ -1696,29 +1832,6 @@ class KnowledgeBaseService:
             return True
         return False
 
-    def _completion_options(
-        self,
-        *,
-        model_name: str,
-        provider: str,
-        thinking_mode: ThinkingMode,
-        stream: bool,
-        native_web_search: bool,
-    ) -> dict[str, Any]:
-        capability = self._resolve_model_capability(model_name=model_name, provider=provider)
-        canonical = CanonicalCompletionOptions(
-            thinking_mode=thinking_mode,
-            stream=stream,
-            native_web_search=native_web_search,
-            temperature=self.settings.temperature,
-            max_tokens=self.settings.max_tokens,
-        )
-        return build_provider_options(
-            provider=provider,
-            capability=capability,
-            canonical=canonical,
-        )
-
     def _chat_completion(
         self,
         *,
@@ -1728,50 +1841,407 @@ class KnowledgeBaseService:
         stream: bool,
         native_web_search: bool = False,
         diagnostics: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ):
-        provider, client = self._resolve_model_client(model_name)
-        options = self._completion_options(
+        adapter = self._resolve_model_adapter(model_name)
+        return adapter.create_chat_completion(
             model_name=model_name,
-            provider=provider,
+            messages=messages,
             thinking_mode=thinking_mode,
             stream=stream,
             native_web_search=native_web_search,
+            diagnostics=diagnostics,
+            tools=tools,
+            tool_choice=tool_choice,
         )
-        kwargs: dict[str, Any] = {
-            "model": model_name,
-            "messages": messages,
-            "stream": stream,
-            **options,
-        }
 
+    def _build_tool_registry(
+        self,
+        *,
+        include_web_search: bool = False,
+        scope_type: str = "all",
+        scope_id: int | None = None,
+        workspace_key: str | None = None,
+    ) -> ToolRegistry:
+        return build_readonly_tool_registry(
+            search_knowledge_base=lambda query, top_k: self.search(
+                query=query,
+                top_k=top_k,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                workspace_key=workspace_key,
+            ),
+            search_web=self._search_web,
+            web_search_available=self.is_web_search_available,
+            include_web_search=include_web_search,
+        )
+
+    @staticmethod
+    def _parse_tool_arguments(raw_arguments: Any) -> dict[str, Any]:
+        if isinstance(raw_arguments, dict):
+            return raw_arguments
+        if raw_arguments is None:
+            return {}
         try:
-            return client.chat.completions.create(**kwargs)
+            parsed = json.loads(str(raw_arguments or "{}"))
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _append_tool_diagnostic(self, diagnostics: dict[str, Any] | None, tool_name: str) -> None:
+        if diagnostics is None:
+            return
+        tool_calls = diagnostics.setdefault("tool_calls", [])
+        if isinstance(tool_calls, list):
+            tool_calls.append({"name": tool_name})
+
+    def _append_model_diagnostic_warning(self, diagnostics: dict[str, Any] | None, message: str) -> None:
+        if diagnostics is None:
+            return
+        warnings = diagnostics.setdefault("warnings", [])
+        if isinstance(warnings, list) and message not in warnings:
+            warnings.append(message)
+
+    def _chat_completion_with_tools(
+        self,
+        *,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        thinking_mode: ThinkingMode,
+        native_web_search: bool,
+        diagnostics: dict[str, Any] | None,
+        tool_registry: ToolRegistry | None,
+        max_tool_rounds: int = 2,
+    ):
+        if tool_registry is None or tool_registry.is_empty():
+            return self._chat_completion(
+                model_name=model_name,
+                messages=messages,
+                thinking_mode=thinking_mode,
+                stream=False,
+                native_web_search=native_web_search,
+                diagnostics=diagnostics,
+            )
+
+        tool_messages = [dict(message) for message in messages]
+        tools = tool_registry.openai_tools()
+        try:
+            completion = self._chat_completion(
+                model_name=model_name,
+                messages=tool_messages,
+                thinking_mode=thinking_mode,
+                stream=False,
+                native_web_search=native_web_search,
+                diagnostics=diagnostics,
+                tools=tools,
+                tool_choice="auto",
+            )
         except Exception as exc:
-            # Some proxy models may not support thinking params.
-            warning = (
-                "模型扩展参数调用失败，后端已使用同一 provider/model 去掉扩展参数重试；"
-                "本次回答的原生联网或深度思考可能没有生效。"
+            self._append_model_diagnostic_warning(
+                diagnostics,
+                f"模型工具调用初始化失败，已退回普通模型回答：{exc}",
             )
-            logger.warning(
-                "LLM extended-options call failed; retrying without extra options. "
-                "provider=%s model=%s stream=%s option_keys=%s error=%s",
-                provider,
-                model_name,
-                stream,
-                sorted(options.keys()),
-                exc,
+            return self._chat_completion(
+                model_name=model_name,
+                messages=messages,
+                thinking_mode=thinking_mode,
+                stream=False,
+                native_web_search=native_web_search,
+                diagnostics=diagnostics,
             )
-            if diagnostics is not None:
-                diagnostics["option_fallback_used"] = True
-            self._append_model_diagnostic_warning(diagnostics, warning)
-            fallback_kwargs: dict[str, Any] = {
-                "model": model_name,
-                "messages": messages,
-                "stream": stream,
-                "temperature": self.settings.temperature,
-                "max_tokens": self.settings.max_tokens,
-            }
-            return client.chat.completions.create(**fallback_kwargs)
+
+        for _ in range(max_tool_rounds):
+            message = completion.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if not tool_calls:
+                return completion
+
+            tool_messages.append(message.model_dump(exclude_none=True))
+            for tool_call in tool_calls:
+                function = getattr(tool_call, "function", None)
+                tool_name = str(getattr(function, "name", "") or "")
+                arguments = self._parse_tool_arguments(getattr(function, "arguments", "{}"))
+                tool_result = tool_registry.execute(tool_name, arguments)
+                self._append_tool_diagnostic(diagnostics, tool_name)
+                tool_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": getattr(tool_call, "id", ""),
+                        "content": tool_result,
+                    }
+                )
+
+            try:
+                completion = self._chat_completion(
+                    model_name=model_name,
+                    messages=tool_messages,
+                    thinking_mode=thinking_mode,
+                    stream=False,
+                    native_web_search=native_web_search,
+                    diagnostics=diagnostics,
+                    tools=tools,
+                    tool_choice="auto",
+                )
+            except Exception as exc:
+                self._append_model_diagnostic_warning(
+                    diagnostics,
+                    f"工具结果回传模型失败，已退回普通模型回答：{exc}",
+                )
+                return self._chat_completion(
+                    model_name=model_name,
+                    messages=messages,
+                    thinking_mode=thinking_mode,
+                    stream=False,
+                    native_web_search=native_web_search,
+                    diagnostics=diagnostics,
+                )
+
+        return completion
+
+    @staticmethod
+    def _extract_message_reasoning_parts(message: Any) -> list[str]:
+        parts: list[str] = []
+        for attr_name in ("reasoning_content", "reasoning", "reasoning_text", "reasoning_details", "reasoning_detail"):
+            value = getattr(message, attr_name, None)
+            if isinstance(value, str) and value.strip():
+                parts.append(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        text = item.get("text") or item.get("content") or item.get("reasoning_content")
+                        if str(text or "").strip():
+                            parts.append(str(text))
+                    elif str(item).strip():
+                        parts.append(str(item))
+            elif isinstance(value, dict):
+                text = value.get("text") or value.get("content") or value.get("reasoning_content")
+                if str(text or "").strip():
+                    parts.append(str(text))
+        return parts
+
+    @staticmethod
+    def _merge_tool_call_delta(
+        state: dict[int, dict[str, Any]],
+        tool_call: Any,
+    ) -> None:
+        index = int(getattr(tool_call, "index", 0) or 0)
+        item = state.setdefault(
+            index,
+            {
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            },
+        )
+        tool_call_id = str(getattr(tool_call, "id", "") or "")
+        if tool_call_id:
+            item["id"] = tool_call_id
+        tool_type = str(getattr(tool_call, "type", "") or "")
+        if tool_type:
+            item["type"] = tool_type
+
+        function = getattr(tool_call, "function", None)
+        if function is None:
+            return
+        name = str(getattr(function, "name", "") or "")
+        arguments = str(getattr(function, "arguments", "") or "")
+        if name:
+            item["function"]["name"] += name
+        if arguments:
+            item["function"]["arguments"] += arguments
+
+    @staticmethod
+    def _tool_call_state_to_messages(state: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for index in sorted(state):
+            item = state[index]
+            messages.append(
+                {
+                    "id": item.get("id") or f"tool_call_{index}",
+                    "type": item.get("type") or "function",
+                    "function": {
+                        "name": str((item.get("function") or {}).get("name") or ""),
+                        "arguments": str((item.get("function") or {}).get("arguments") or "{}"),
+                    },
+                }
+            )
+        return messages
+
+    def _execute_tool_call_messages(
+        self,
+        *,
+        tool_calls: list[dict[str, Any]],
+        tool_registry: ToolRegistry,
+        diagnostics: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[StreamingEvent]]:
+        tool_result_messages: list[dict[str, Any]] = []
+        events: list[StreamingEvent] = []
+        for tool_call in tool_calls:
+            function = tool_call.get("function") or {}
+            tool_name = str(function.get("name") or "")
+            arguments = self._parse_tool_arguments(function.get("arguments"))
+            self._append_tool_diagnostic(diagnostics, tool_name)
+            events.append(
+                tool_call_delta(
+                    {
+                        "id": tool_call.get("id") or "",
+                        "name": tool_name,
+                        "arguments": arguments,
+                    }
+                )
+            )
+            tool_result = tool_registry.execute(tool_name, arguments)
+            tool_result_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id") or "",
+                    "content": tool_result,
+                }
+            )
+        return tool_result_messages, events
+
+    def _stream_completion_with_tools(
+        self,
+        *,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        thinking_mode: ThinkingMode,
+        native_web_search: bool,
+        diagnostics: dict[str, Any],
+        tool_registry: ToolRegistry | None,
+        reasoning_parts: list[str] | None = None,
+        max_tool_rounds: int = 2,
+    ) -> Iterator[StreamingEvent]:
+        if tool_registry is None or tool_registry.is_empty():
+            stream = self._chat_completion(
+                model_name=model_name,
+                messages=messages,
+                thinking_mode=thinking_mode,
+                stream=True,
+                native_web_search=native_web_search,
+                diagnostics=diagnostics,
+            )
+            yield from self._consume_content_stream(
+                stream=stream,
+                diagnostics=diagnostics,
+                reasoning_parts=reasoning_parts,
+            )
+            return
+
+        tool_messages = [dict(message) for message in messages]
+        tools = tool_registry.openai_tools()
+
+        for round_index in range(max_tool_rounds + 1):
+            try:
+                stream = self._chat_completion(
+                    model_name=model_name,
+                    messages=tool_messages,
+                    thinking_mode=thinking_mode,
+                    stream=True,
+                    native_web_search=native_web_search,
+                    diagnostics=diagnostics,
+                    tools=tools,
+                    tool_choice="auto",
+                )
+            except Exception as exc:
+                self._append_model_diagnostic_warning(
+                    diagnostics,
+                    f"流式工具调用初始化失败，已退回普通流式回答：{exc}",
+                )
+                fallback_stream = self._chat_completion(
+                    model_name=model_name,
+                    messages=messages,
+                    thinking_mode=thinking_mode,
+                    stream=True,
+                    native_web_search=native_web_search,
+                    diagnostics=diagnostics,
+                )
+                yield from self._consume_content_stream(
+                    stream=fallback_stream,
+                    diagnostics=diagnostics,
+                    reasoning_parts=reasoning_parts,
+                )
+                return
+
+            tool_call_state: dict[int, dict[str, Any]] = {}
+            assistant_content_parts: list[str] = []
+            for event in self._consume_content_stream(
+                stream=stream,
+                diagnostics=diagnostics,
+                tool_call_state=tool_call_state,
+                collected=assistant_content_parts,
+                reasoning_parts=reasoning_parts,
+            ):
+                yield event
+
+            tool_calls = self._tool_call_state_to_messages(tool_call_state)
+            if not tool_calls:
+                return
+
+            if round_index >= max_tool_rounds:
+                self._append_model_diagnostic_warning(
+                    diagnostics,
+                    "模型工具调用轮数超过限制，已停止继续调用工具。",
+                )
+                return
+
+            tool_messages.append(
+                {
+                    "role": "assistant",
+                    "content": "".join(assistant_content_parts),
+                    "tool_calls": tool_calls,
+                }
+            )
+            tool_result_messages, tool_events = self._execute_tool_call_messages(
+                tool_calls=tool_calls,
+                tool_registry=tool_registry,
+                diagnostics=diagnostics,
+            )
+            for event in tool_events:
+                yield event
+            tool_messages.extend(tool_result_messages)
+
+    def _consume_content_stream(
+        self,
+        *,
+        stream: Any,
+        diagnostics: dict[str, Any],
+        tool_call_state: dict[int, dict[str, Any]] | None = None,
+        collected: list[str] | None = None,
+        reasoning_parts: list[str] | None = None,
+    ) -> Iterator[StreamingEvent]:
+        for chunk in stream:
+            chunk_model = getattr(chunk, "model", None)
+            if chunk_model:
+                diagnostics["resolved_model"] = str(chunk_model)
+
+            if not chunk.choices:
+                continue
+
+            delta_piece = chunk.choices[0].delta
+            for tool_call in getattr(delta_piece, "tool_calls", None) or []:
+                if tool_call_state is not None:
+                    self._merge_tool_call_delta(tool_call_state, tool_call)
+
+            reasoning_content = (
+                getattr(delta_piece, "reasoning_content", None)
+                or getattr(delta_piece, "reasoning", None)
+                or getattr(delta_piece, "reasoning_text", None)
+            )
+            if reasoning_content:
+                text = str(reasoning_content)
+                if reasoning_parts is not None:
+                    reasoning_parts.append(text)
+                yield reasoning_delta(text)
+                continue
+
+            delta = delta_piece.content or ""
+            if not delta:
+                continue
+            if collected is not None:
+                collected.append(delta)
+            yield content_delta(delta)
 
     def _polish_answer(
         self,
@@ -1808,15 +2278,26 @@ class KnowledgeBaseService:
         self,
         *,
         question: str,
+        message_parts: list[ChatMessagePart] | None,
         history: list[ChatHistoryItem] | None,
         top_k: int | None,
         web_search: bool,
+        capability: ModelCapability,
+        diagnostics: dict[str, Any] | None,
         scope_type: str = "all",
         scope_id: int | None = None,
         workspace_key: str | None = None,
     ) -> dict[str, Any]:
-        rewritten_question = self._compose_search_query(question, history)
-        question_mode = self._classify_question_mode(question)
+        normalized_parts = self._normalize_message_parts(question, message_parts)
+        prompt_question = self._message_parts_to_prompt_text(normalized_parts) or question
+        provider_content = self._message_parts_to_provider_content(
+            normalized_parts,
+            fallback_text=prompt_question,
+            capability=capability,
+            diagnostics=diagnostics,
+        )
+        rewritten_question = self._compose_search_query(prompt_question, history)
+        question_mode = self._classify_question_mode(prompt_question)
         requested_top_k = top_k or self.settings.top_k
 
         per_query_limit = max(requested_top_k, 4)
@@ -1826,7 +2307,7 @@ class KnowledgeBaseService:
             per_query_limit = max(requested_top_k * 2, 8)
 
         queries = self._build_retrieval_queries(
-            question=question,
+            question=prompt_question,
             rewritten_question=rewritten_question,
             question_mode=question_mode,
         )
@@ -1849,7 +2330,7 @@ class KnowledgeBaseService:
         web_context = ""
         web_citations: list[dict[str, Any]] = []
         if web_search and self.is_web_search_available():
-            web_hits = self._search_web(question, top_k=max(1, min(self.settings.web_search_top_k, 8)))
+            web_hits = self._search_web(prompt_question, top_k=max(1, min(self.settings.web_search_top_k, 8)))
             web_context, web_citations = self._build_web_context(web_hits)
 
         if not hits and not web_context:
@@ -1867,7 +2348,7 @@ class KnowledgeBaseService:
 
         history_text = "\n".join(f"{item.role}: {item.content}" for item in (history or []))
         user_prompt_parts = [
-            f"Question:\n{question}",
+            f"Question:\n{prompt_question}",
             f"Conversation history:\n{history_text or '(none)'}",
             f"Question mode:\n{question_mode}",
             f"Evidence labels:\n{combined_citation_guide or '(none)'}",
@@ -1879,6 +2360,14 @@ class KnowledgeBaseService:
         if web_context:
             user_prompt_parts.append(f"External web context:\n{web_context}")
 
+        messages: list[dict[str, Any]] = [{"role": "system", "content": ""}]
+        has_native_image_part = capability.supports_multimodal_input and any(
+            part.get("type") == "image_url" for part in normalized_parts
+        )
+        if has_native_image_part and isinstance(provider_content, list):
+            messages.append({"role": "user", "content": provider_content})
+        messages.append({"role": "user", "content": "\n\n".join(user_prompt_parts)})
+
         return {
             "fallback_answer": None,
             "rewritten_question": rewritten_question,
@@ -1886,10 +2375,9 @@ class KnowledgeBaseService:
             "citations": combined_citations,
             "question_mode": question_mode,
             "citation_guide": combined_citation_guide,
-            "messages": [
-                {"role": "system", "content": ""},
-                {"role": "user", "content": "\n\n".join(user_prompt_parts)},
-            ],
+            "messages": messages,
+            "prompt_question": prompt_question,
+            "message_parts": normalized_parts,
         }
 
     def answer(
@@ -1905,9 +2393,10 @@ class KnowledgeBaseService:
         scope_type: str = "all",
         scope_id: int | None = None,
         workspace_key: str | None = None,
+        message_parts: list[ChatMessagePart] | None = None,
     ) -> dict[str, Any]:
         model_name = self.resolve_model(model)
-        provider, _ = self._resolve_model_client(model_name)
+        provider = self._resolve_model_provider(model_name)
         if self._is_model_identity_question(question):
             fallback_answer = self._build_model_identity_answer(model_name)
             usage = self._normalize_usage(
@@ -1946,11 +2435,22 @@ class KnowledgeBaseService:
             external_web_search_used=use_external_web_search,
             thinking_mode=thinking_mode,
         )
+        capability = self._resolve_model_capability(model_name=model_name, provider=provider)
+        if thinking_mode == "deep" and not (
+            capability.supports_thinking_budget or capability.supports_reasoning_effort
+        ):
+            self._append_model_diagnostic_warning(
+                diagnostics,
+                "当前模型未声明支持原生深度思考参数，后端会保留更完整回答提示，但不保证返回可展示的思考片段。",
+            )
         prepared = self._prepare_answer(
             question=question,
+            message_parts=message_parts,
             history=history,
             top_k=top_k,
             web_search=use_external_web_search,
+            capability=capability,
+            diagnostics=diagnostics,
             scope_type=scope_type,
             scope_id=scope_id,
             workspace_key=workspace_key,
@@ -1979,17 +2479,34 @@ class KnowledgeBaseService:
             thinking_mode=thinking_mode,
         )
 
-        completion = self._chat_completion(
+        tool_registry: ToolRegistry | None = None
+        if capability.supports_tool_calling and not (
+            provider == "qwen" and self.settings.qwen_responses_api_enabled and use_native_web_search
+        ):
+            tool_registry = self._build_tool_registry(
+                include_web_search=use_external_web_search,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                workspace_key=workspace_key,
+            )
+        elif not capability.supports_tool_calling:
+            self._append_model_diagnostic_warning(
+                diagnostics,
+                "当前模型未声明支持工具调用，已跳过后端只读工具闭环。",
+            )
+        completion = self._chat_completion_with_tools(
             model_name=model_name,
             messages=prepared["messages"],
             thinking_mode=thinking_mode,
-            stream=False,
             native_web_search=use_native_web_search,
             diagnostics=diagnostics,
+            tool_registry=tool_registry,
         )
         resolved_model_name = str(getattr(completion, "model", "") or model_name)
         diagnostics["resolved_model"] = resolved_model_name
-        answer = (completion.choices[0].message.content or "").strip()
+        message = completion.choices[0].message
+        answer = (message.content or "").strip()
+        reasoning_parts = self._extract_message_reasoning_parts(message)
 
         if self._should_polish_answer(answer, prepared["question_mode"], thinking_mode):
             answer = self._polish_answer(
@@ -2001,7 +2518,7 @@ class KnowledgeBaseService:
                 thinking_mode=thinking_mode,
             )
 
-        prompt_text = "\n".join(message.get("content", "") for message in prepared["messages"])
+        prompt_text = "\n".join(self._message_content_text(message.get("content", "")) for message in prepared["messages"])
         usage = self._normalize_usage(
             getattr(completion, "usage", None),
             prompt_fallback_text=prompt_text,
@@ -2018,6 +2535,7 @@ class KnowledgeBaseService:
             "usage": usage,
             "cost_estimate": cost_estimate,
             "model_diagnostics": diagnostics,
+            "reasoning_parts": reasoning_parts,
         }
 
     def stream_answer(
@@ -2033,9 +2551,10 @@ class KnowledgeBaseService:
         scope_type: str = "all",
         scope_id: int | None = None,
         workspace_key: str | None = None,
-    ) -> Iterator[dict[str, Any]]:
+        message_parts: list[ChatMessagePart] | None = None,
+    ) -> Iterator[StreamingEvent]:
         model_name = self.resolve_model(model)
-        provider, _ = self._resolve_model_client(model_name)
+        provider = self._resolve_model_provider(model_name)
         if self._is_model_identity_question(question):
             fallback_answer = self._build_model_identity_answer(model_name)
             usage = self._normalize_usage(
@@ -2050,18 +2569,17 @@ class KnowledgeBaseService:
                 resolved_model=model_name,
                 thinking_mode=thinking_mode,
             )
-            yield {"type": "delta", "delta": fallback_answer}
-            yield {
-                "type": "done",
-                "answer": fallback_answer,
-                "rewritten_question": question,
-                "hits": [],
-                "citations": [],
-                "model": model_name,
-                "usage": usage,
-                "cost_estimate": self._estimate_cost(model_name, usage),
-                "model_diagnostics": diagnostics,
-            }
+            yield content_delta(fallback_answer)
+            yield done_event(
+                answer=fallback_answer,
+                rewritten_question=question,
+                hits=[],
+                citations=[],
+                model=model_name,
+                usage=usage,
+                cost_estimate=self._estimate_cost(model_name, usage),
+                model_diagnostics=diagnostics,
+            )
             return
         use_native_web_search, use_external_web_search = self._resolve_web_search_plan(
             model_name=model_name,
@@ -2077,11 +2595,22 @@ class KnowledgeBaseService:
             external_web_search_used=use_external_web_search,
             thinking_mode=thinking_mode,
         )
+        capability = self._resolve_model_capability(model_name=model_name, provider=provider)
+        if thinking_mode == "deep" and not (
+            capability.supports_thinking_budget or capability.supports_reasoning_effort
+        ):
+            self._append_model_diagnostic_warning(
+                diagnostics,
+                "当前模型未声明支持原生深度思考参数，后端会保留更完整回答提示，但不保证返回可展示的思考片段。",
+            )
         prepared = self._prepare_answer(
             question=question,
+            message_parts=message_parts,
             history=history,
             top_k=top_k,
             web_search=use_external_web_search,
+            capability=capability,
+            diagnostics=diagnostics,
             scope_type=scope_type,
             scope_id=scope_id,
             workspace_key=workspace_key,
@@ -2096,18 +2625,17 @@ class KnowledgeBaseService:
                 prompt_fallback_text=question,
                 completion_fallback_text=fallback_answer,
             )
-            yield {"type": "delta", "delta": fallback_answer}
-            yield {
-                "type": "done",
-                "answer": fallback_answer,
-                "rewritten_question": rewritten_question,
-                "hits": hits,
-                "citations": [],
-                "model": model_name,
-                "usage": usage,
-                "cost_estimate": self._estimate_cost(model_name, usage),
-                "model_diagnostics": diagnostics,
-            }
+            yield content_delta(fallback_answer)
+            yield done_event(
+                answer=fallback_answer,
+                rewritten_question=rewritten_question,
+                hits=hits,
+                citations=[],
+                model=model_name,
+                usage=usage,
+                cost_estimate=self._estimate_cost(model_name, usage),
+                model_diagnostics=diagnostics,
+            )
             return
 
         prepared["messages"][0]["content"] = self._build_system_prompt(
@@ -2116,72 +2644,60 @@ class KnowledgeBaseService:
         )
 
         collected: list[str] = []
-        usage_obj: Any = None
-        stream = self._chat_completion(
+        reasoning_parts: list[str] = []
+        tool_registry: ToolRegistry | None = None
+        if capability.supports_tool_calling and not (
+            provider == "qwen" and self.settings.qwen_responses_api_enabled and use_native_web_search
+        ):
+            tool_registry = self._build_tool_registry(
+                include_web_search=use_external_web_search,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                workspace_key=workspace_key,
+            )
+        elif not capability.supports_tool_calling:
+            self._append_model_diagnostic_warning(
+                diagnostics,
+                "当前模型未声明支持工具调用，已跳过后端只读工具闭环。",
+            )
+        for event in self._stream_completion_with_tools(
             model_name=model_name,
             messages=prepared["messages"],
             thinking_mode=thinking_mode,
-            stream=True,
             native_web_search=use_native_web_search,
             diagnostics=diagnostics,
-        )
-        resolved_model_name = model_name
-
-        for chunk in stream:
-            chunk_model = getattr(chunk, "model", None)
-            if chunk_model:
-                resolved_model_name = str(chunk_model)
-                diagnostics["resolved_model"] = resolved_model_name
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage is not None:
-                usage_obj = chunk_usage
-
-            if not chunk.choices:
-                continue
-
-            delta_piece = chunk.choices[0].delta
-            reasoning_content = getattr(delta_piece, "reasoning_content", None)
-            if reasoning_content:
-                # Keep internal reasoning hidden.
-                continue
-
-            delta = delta_piece.content or ""
-            if not delta:
-                continue
-            collected.append(delta)
-            yield {"type": "delta", "delta": delta}
+            tool_registry=tool_registry,
+            reasoning_parts=reasoning_parts,
+        ):
+            if event.get("type") == "content_delta":
+                collected.append(str(event.get("content_delta") or ""))
+            yield event
 
         final_answer = "".join(collected).strip()
         if not final_answer:
             final_answer = "The model returned an empty response. Please try again."
-        elif self._should_polish_answer(final_answer, prepared["question_mode"], thinking_mode):
-            final_answer = self._polish_answer(
-                answer=final_answer,
-                question=question,
-                question_mode=prepared["question_mode"],
-                citation_guide=prepared["citation_guide"],
-                model_name=model_name,
-                thinking_mode=thinking_mode,
-            )
+        # 流式链路里正文已经逐段发给前端，结束后不能再同步发起二次润色模型调用。
+        # 否则前端要等润色调用结束才收到 done，看起来就像回答结束后还卡在流式状态。
 
-        prompt_text = "\n".join(message.get("content", "") for message in prepared["messages"])
+        prompt_text = "\n".join(self._message_content_text(message.get("content", "")) for message in prepared["messages"])
         usage = self._normalize_usage(
-            usage_obj,
+            None,
             prompt_fallback_text=prompt_text,
             completion_fallback_text=final_answer,
         )
         cost_estimate = self._estimate_cost(model_name, usage)
+        resolved_model_name = str(diagnostics.get("resolved_model") or model_name)
 
-        yield {
-            "type": "done",
-            "answer": final_answer,
-            "rewritten_question": rewritten_question,
-            "hits": hits,
-            "citations": prepared["citations"],
-            "model": resolved_model_name,
-            "usage": usage,
-            "cost_estimate": cost_estimate,
-            "model_diagnostics": diagnostics,
-        }
+        yield done_event(
+            answer=final_answer,
+            rewritten_question=rewritten_question,
+            hits=hits,
+            citations=prepared["citations"],
+            model=resolved_model_name,
+            usage=usage,
+            cost_estimate=cost_estimate,
+            model_diagnostics=diagnostics,
+            reasoning_parts=reasoning_parts,
+        )
 
 

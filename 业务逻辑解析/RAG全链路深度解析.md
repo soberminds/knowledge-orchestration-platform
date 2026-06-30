@@ -1,4 +1,4 @@
-# RAG 全链路深度解析
+﻿# RAG 全链路深度解析
 
 这份文档的目标不是只告诉你“切片 -> 向量化 -> 向量检索”这三个词，
 而是把当前项目里真正发生的完整业务流程全部摊开，让你知道：
@@ -243,7 +243,7 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 - `scope_type`
   - 这条会话当前绑定的是 `all` / `folder` / `kb` / `workspace`
 - `scope_id`
-  - 当作用域是文件夹或知识库时，对应的目标 ID
+  - 当作用域是文件夹或知识库时，对应的目标 ID；`all` 通常是 0 / null
 - `workspace_key`
   - 当前工作区的稳定标识，常用于“工作区级会话”
 - `scope_name`
@@ -254,6 +254,154 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 - 让同一个 `conversation_id` 不只是“某次聊天”
 - 还明确这次聊天到底是在全量知识库里问，还是在某个文件夹 / 知识库 / 工作区里问
 - 前端会话列表现在也能直接把范围标签显示出来
+
+当前前端不是让用户手输这些字段，而是用可选控件生成：
+
+- `ChatComposer.vue`
+  - `scope_type` 用分段选项选择：全部 / 文件夹 / 知识库 / 工作区
+  - 文件夹范围用 `el-tree-select` 从文档库树里选
+  - 知识库范围用 `el-select` 从 `/api/chat/options` 返回的 `knowledge_bases` 里选
+  - 工作区范围用 `el-select` 从 `/api/chat/options` 返回的 `workspaces` 里选
+- `DocumentsWorkspace.vue`
+  - 当前文件夹可以一键设为聊天检索范围
+- `LeftSidebar.vue`
+  - 最近会话列表会展示范围标签，方便区分这条会话问的是全部、文件夹、知识库还是工作区
+
+#### J. `ChatMessagePart`
+这是当前聊天多模态输入的结构化消息片段。
+
+位置：
+
+- 后端 schema：`app/schemas.py::ChatMessagePart`
+- 前端类型：`frontend/src/api.ts::ChatMessagePart`
+- 前端输入：`frontend/src/components/chat/ChatComposer.vue`
+
+它解决的问题是：
+
+- 以前一条用户消息基本只有 `question: str`
+- 现在一条用户消息可以同时带文字、图片引用、文档引用
+
+当前支持的 part 是：
+
+```text
+ChatMessagePart
+├─ text
+├─ image_url
+└─ file_ref
+   ├─ file_id
+   ├─ file_name
+   └─ mime_type
+```
+
+这里的 `image_url` 是 OpenAI-compatible 多模态协议里的字段名，不代表用户必须手动输入公网 URL。
+前端现在支持两种图片来源：
+
+- 用户输入图片 URL
+- 用户在聊天输入框直接粘贴图片，前端转成 `data:image/...;base64,...`
+
+后端会根据当前模型能力决定：
+
+- 支持图片输入：把 `image_url` 原样传给 provider
+- 不支持图片输入：只把图片降级成文本摘要，并写入 `model_diagnostics.warnings`
+
+#### K. `ModelCapability`
+这是当前模型能力判断的核心结构。
+
+位置：
+
+- `app/services/llm_provider_mapping.py::ModelCapability`
+- `app/services/llm_provider_mapping.py::CapabilityRegistry`
+
+它表示“某个模型这次运行时被系统认为支持什么能力”。
+
+核心字段包括：
+
+- `supports_native_web_search`
+- `supports_tool_calling`
+- `supports_multimodal_input`
+- `supports_responses_api`
+- `supports_responses_streaming`
+- `thinking_style`
+- `supports_reasoning_effort`
+- `supports_thinking_budget`
+
+它解决的问题是：
+
+- 不是所有模型都支持图片
+- 不是所有模型都支持工具调用
+- 不是所有模型都支持 Responses API
+- 同一个“深度思考”开关，在 DeepSeek 和 Qwen 里参数名也不一样
+
+当前策略是：
+
+- Qwen 默认支持原生联网和工具调用，但不是所有 Qwen 模型都默认支持图片、Responses API 或原生 thinking budget
+- `qwen-vl*`、`qwen-omni*`、`qwen3.7-plus`、`qwen3.7-max` 等会自动标记为支持图片输入
+- `qwen3.7-plus`、`qwen3.7-max`、`qwen3.6*`、`qwen3.5*`、`qwen3-max` 等会按能力标记 Responses API
+- `qwen3*`、`qwq*`、`qvq*` 会按千问深度思考模型处理；`qwen-max` 当前只按通用文本模型处理，不承诺返回可展示的思考片段
+- `gpt-4o*`、`gpt-4.1*`、`gpt-5*`、`o3*`、`o4*` 会自动标记为支持图片输入
+- 具体模型能力可以通过 `.env` 的 `MODEL_CAPABILITIES_JSON` 覆盖
+
+#### L. `StreamingEvent`
+这是当前后端内部的统一流式事件结构。
+
+位置：
+
+- `app/services/llm_streaming.py`
+
+以前流式回答主要就是一段段正文 delta。
+现在模型流式返回里可能有很多不同类型的内容：
+
+- 正文增量
+- reasoning / 思考增量
+- tool call 增量
+- usage
+- diagnostics
+- done
+- error
+
+所以现在后端内部先统一成：
+
+```text
+StreamingEvent
+├─ content_delta
+├─ reasoning_delta
+├─ tool_call_delta
+├─ usage
+├─ diagnostics
+├─ done
+└─ error
+```
+
+然后 `routes.py` 再把它转换成前端能消费的 SSE payload。
+
+#### M. `model_diagnostics`
+这是每次模型调用返回给前端和落库的诊断信息。
+
+位置：
+
+- `app/schemas.py::ModelDiagnostics`
+- `app/services/knowledge_base.py::_build_model_diagnostics(...)`
+- `frontend/src/components/chat/MessageItem.vue`
+- `frontend/src/components/chat/ModelHealthPanel.vue`
+
+它包含：
+
+- 实际 provider
+- 请求模型和最终模型
+- 是否使用原生联网
+- 是否使用外部联网
+- thinking mode
+- provider API，例如 `chat_completions` / `qwen_responses` / `qwen_responses_stream`
+- 是否发生参数降级
+- warnings
+- tool calls
+- capabilities 快照
+
+它的意义是：
+
+- 不再只靠模型正文判断“它到底用了哪个模型 / 哪个能力”
+- 前端和后端都能看到这次调用是否发生了降级
+- 排查“为什么图片没生效 / 工具没生效 / Responses 没生效”时有据可查
 
 ### 1.2 再记住这几个核心对象 / 服务
 
@@ -282,6 +430,12 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 - `folder` 作用域会自动包含子文件夹
 - 最终在回答结果里回传 `model_diagnostics`
 - 如果供应商扩展参数失败，会退回一次再试，但会保留 warning，不会静默换模型
+
+这一层现在和文档库数据库元数据强绑定：
+
+- 建索引时先从 `DocumentLibraryService.get_index_metadata_by_storage_path(...)` 取文件元数据
+- 然后把 `user_id` / `file_id` / `folder_id` / `kb_id` / `workspace_key` 等写入 Chroma metadata
+- 检索时再用这些 metadata 做用户隔离和范围过滤
 
 这里面几个词可以再翻译成更具体的动作：
 
@@ -430,13 +584,15 @@ chunk Document
 
 - 用户提问后
 - 把问题转成向量
-- 去 Chroma 里找最相近的 chunk
+- 先按当前用户和会话 scope 过滤 Chroma metadata
+- 再去 Chroma 里找最相近的 chunk
 - 再把结果包装成 `SearchHit`
 
 对应方法是：
 
-- `retrieve(query, top_k)`
+- `retrieve(query, top_k, scope_type, scope_id, workspace_key)`
 - `_retrieve_candidates(...)`
+- `_similarity_search_for_current_user(...)`
 
 #### 组织上下文是干什么？
 意思是：
@@ -507,7 +663,78 @@ KnowledgeBaseService
 - `ChatMemoryService` 管“对话状态”
 - `KnowledgeBaseService` 管“RAG 问答链路”
 
-#### 补充：`database.py` 和 `redis_client.py`#### 补充：`database.py` 和 `redis_client.py`
+#### 补充：`DocumentLibraryService`
+位置：
+
+- `app/services/document_library.py`
+
+这是第三阶段后文档库的核心元数据服务。
+
+它负责的是：
+
+- 解析当前有效用户；未登录时回落到游客用户 `local-user`
+- 创建 / 查询文档文件夹：`kop_document_folder`
+- 创建 / 查询文档文件：`kop_document_file`
+- 上传文件时把真实文件放到 `data/user_docs/{user_id}/{folder_id}/...`
+- 给前端返回文件夹树和文件列表
+- 按 `file_id` 做文件查看、编辑、删除、移动、重命名
+- 移动 / 重命名文件或文件夹后，返回需要重建索引的 `file_ids` 和 `source_files`
+- 给 `KnowledgeBaseService` 提供写入 Chroma 所需的索引 metadata
+
+它和 `files.py` 的关系是：
+
+```text
+DocumentLibraryService
+├─ 管数据库元数据、用户、文件夹、文件 ID、真实存储路径
+└─ 输出文件路径和索引 metadata
+
+files.py::load_documents_from_file(path)
+├─ 只负责把某个真实文件解析成 list[Document]
+└─ 不负责用户、文件夹、权限和数据库状态
+```
+
+所以现在“文档库”不是简单扫目录列表了，而是：
+
+```text
+MySQL 元数据
+  +
+data/user_docs/{user_id}/{folder_id}/真实文件
+  +
+Chroma metadata
+```
+
+三者一起组成完整文档库。
+
+#### 补充：`UserAuthService`
+位置：
+
+- `app/services/auth.py`
+
+这是现在登录 / 注册 / 游客回落的核心服务。
+
+它负责的是：
+
+- `/api/auth/me` 读取当前用户
+- `/api/auth/login` 登录并写入 `kop_session` cookie
+- `/api/auth/register` 注册用户并自动登录
+- `/api/auth/logout` 删除 Redis session
+- 没有登录态时自动解析或创建默认游客用户 `local-user`
+
+它和 `CurrentUserContextMiddleware` 配合工作：
+
+```text
+每个请求进来
+├─ CurrentUserContextMiddleware
+│  ├─ 调用 UserAuthService.resolve_effective_user_id_from_request(...)
+│  └─ 把 user_id 写入 request_context
+├─ DocumentLibraryService / ChatMemoryService / KnowledgeBaseService
+│  └─ 从 request_context 读取当前 user_id
+└─ 如果没有登录态，就统一落到游客用户 local-user
+```
+
+这就是现在“未登录也能用，登录后按自己的数据隔离”的基础。
+
+#### 补充：`database.py` 和 `redis_client.py`
 新增位置：
 
 - `app/core/database.py`
@@ -753,6 +980,74 @@ vectors = embedder.embed_documents(texts)
 - OpenAI
 - 其他兼容 provider
 
+#### 当前已经升级成 `LLMProviderAdapter` 分层
+
+上面说的 OpenAI-compatible client 是协议层理解。
+当前代码实现上，已经不再让 `KnowledgeBaseService` 自己直接包办所有 provider 调用细节，而是拆成了一个适配层：
+
+```text
+KnowledgeBaseService
+├─ 负责 RAG 主流程
+├─ 负责检索、上下文、prompt、引用、会话
+└─ 把模型调用交给 LLMProviderAdapter
+
+LLMProviderAdapter
+├─ 负责创建 / 复用 provider client
+├─ 负责 Chat Completions 调用
+├─ 负责 Responses API 调用
+├─ 负责参数失败后的 fallback
+└─ 负责把不同 provider 的返回归一化给主流程
+```
+
+核心代码位置：
+
+- `app/services/llm_provider_adapter.py`
+- `app/services/llm_provider_mapping.py`
+- `app/services/llm_streaming.py`
+- `app/services/tools.py`
+
+当前主要 adapter 是：
+
+```text
+LLMProviderAdapter
+├─ OpenAICompatibleProviderAdapter
+│  └─ DeepSeek / Qwen Chat Completions / OpenAI / Kimi / Hunyuan / 其他兼容网关
+└─ QwenResponsesProviderAdapter
+   └─ QWEN_RESPONSES_API_ENABLED=true 时，千问原生联网可走 responses.create()
+```
+
+这样做的意义是：
+
+- `knowledge_base.py` 继续保持 RAG 编排职责
+- provider 的特殊参数不再全部堆在 RAG 主流程里
+- 后续本地模型、厂商 SDK、Responses API、更多多模态能力，都可以继续新增 adapter
+
+#### 当前模型能力兼容层已经完成的基础阶段
+
+目前“模型能力兼容层”已经完成 1-7 阶段基础闭环：
+
+1. `LLMProviderAdapter` 正式化
+2. 统一 `StreamingEvent`
+3. `ToolRegistry` 和只读工具调用闭环
+4. 多模态 `message_parts`
+5. 千问 Responses API adapter
+6. 前端模型诊断和健康检查可视化
+7. `ModelCapability` 自动匹配与降级
+
+这些阶段不是替代 RAG 主流程，而是在“生成层”周围加了一圈工程化能力：
+
+```text
+RAG 主流程
+├─ 仍然负责检索和上下文组织
+└─ 生成层增强
+   ├─ provider adapter
+   ├─ model capability
+   ├─ streaming event
+   ├─ tool registry
+   ├─ multimodal message parts
+   └─ diagnostics
+```
+
 ### 1.3 再记住这几个关键方法
 
 下面这些方法，后面在主流程里会反复出现：
@@ -816,23 +1111,95 @@ vectors = embedder.embed_documents(texts)
 
 - 只重建单个文件对应的 chunk
 
-#### H. `retrieve(query, top_k)`
+#### H. `reindex_document_files(file_ids, source_paths)`
+作用：
+
+- 第三阶段后更推荐的“按数据库文件 ID 重建索引”入口
+- 先按 `file_id` 删除旧 chunk
+- 再按当前数据库 metadata 和真实文件路径重新解析、切片、写入 Chroma
+- 文件移动、重命名、文件夹移动、文件夹重命名后都会优先走这条链路
+
+#### I. `delete_chunks_by_file_ids(file_ids)`
+作用：
+
+- 按 Chroma metadata 里的 `file_id` 删除对应 chunk
+- 文件删除和文件夹删除后使用
+- 比只按 `source path` 删除更适合现在的数据库文档库模型
+
+#### J. `retrieve(query, top_k, scope_type, scope_id, workspace_key)`
 作用：
 
 - 做基础检索
 - 返回 `SearchHit` 列表
+- 默认按当前用户过滤
+- 如果传了文件夹 / 知识库 / 工作区范围，还会追加 metadata filter
 
-#### I. `_build_context(...)`
+#### K. `_build_context(...)`
 作用：
 
 - 把命中的 chunk 组织成给大模型使用的上下文块
 
-#### J. `chat()`
+#### L. `answer()` / `stream_answer()`
 作用：
 
 - 走完整的“检索 + 生成回答”链路
+- `answer()` 用于普通 JSON 响应
+- `stream_answer()` 用于 SSE 流式响应
+- 会先解析模型、provider、capability
+- 会把 `message_parts` 转成 provider 可用的内容
+- 会按模型能力决定是否开启工具调用、图片输入、Responses API
+- 会把 `model_diagnostics` 带回前端和聊天记录
 
-#### K. `_resolve_chat_memory_context(...)`
+#### L-1. `_prepare_answer(...)`
+作用：
+
+- 归一化 `message_parts`
+- 把文本、图片、文件引用整理成检索问题和 provider 输入
+- 根据当前用户和会话 scope 检索 Chroma
+- 组织证据上下文、引用标签、web context
+- 输出最终要交给模型的 `messages`
+
+它是“RAG 检索”和“模型生成”之间的准备层。
+
+#### L-2. `_chat_completion_with_tools(...)` / `_stream_completion_with_tools(...)`
+作用：
+
+- 在 provider 支持工具调用时，把 `ToolRegistry` 里的只读工具传给模型
+- 如果模型返回 `tool_calls`，后端执行工具
+- 再把 `role=tool` 的结果回传模型
+- 最后让模型生成自然语言回答
+
+区别是：
+
+- `_chat_completion_with_tools(...)` 服务普通 `/api/chat`
+- `_stream_completion_with_tools(...)` 服务 `/api/chat/stream`
+
+当前工具调用是保守设计，只开放只读工具，不能让模型直接删除文件、改文件、写数据库。
+
+#### L-3. `_message_parts_to_provider_content(...)`
+作用：
+
+- 把 `ChatMessagePart` 转成 provider 能接收的 OpenAI-compatible message content
+- 支持 `text`
+- 支持 `image_url`
+- 支持 `file_ref` 文本化引用
+
+它会按 `ModelCapability.supports_multimodal_input` 做判断：
+
+- 支持图片：把 `image_url` 原样传给 provider
+- 不支持图片：把图片降级成文本引用，并写入 warning
+
+#### L-4. `_build_model_diagnostics(...)`
+作用：
+
+- 为每次回答构建模型诊断信息
+- 记录 provider / requested_model / resolved_model
+- 记录是否用了原生联网 / 外部联网
+- 记录 provider API
+- 记录本次模型能力快照
+- 记录 warnings 和 fallback
+
+#### M. `_resolve_chat_memory_context(...)`
 位置：
 
 - `app/api/routes.py`
@@ -846,7 +1213,7 @@ vectors = embedder.embed_documents(texts)
 
 它是新增聊天记忆链路的“前置入口”。
 
-#### L. `_save_chat_memory_turn(...)`
+#### N. `_save_chat_memory_turn(...)`
 位置：
 
 - `app/api/routes.py`
@@ -856,7 +1223,7 @@ vectors = embedder.embed_documents(texts)
 - 在模型回答完成以后，把本轮对话写回 MySQL
 - 写入一条 `user` 消息
 - 写入一条 `assistant` 消息
-- 保存引用、usage、改写问题等元信息
+- 保存引用、usage、改写问题、模型诊断等元信息
 
 它是新增聊天记忆链路的“后置落库入口”。
 
@@ -1251,6 +1618,8 @@ vectors = embedder.embed_documents(texts)
 - 存储 chunk 向量
 - 存储 chunk metadata
 - 做相似度检索
+- 按当前用户过滤
+- 按会话 scope 过滤：全部 / 文件夹 / 知识库 / 工作区
 
 对应代码：
 
@@ -1258,11 +1627,40 @@ vectors = embedder.embed_documents(texts)
 - `_build_vector_store()`
 - `retrieve()`
 - `_retrieve_candidates()`
+- `_similarity_search_for_current_user()`
+- `_current_user_filter()`
 
 底层中间件：
 
 - `Chroma`
 - `chromadb.PersistentClient`
+
+### 2.4.1 文档库元数据层
+
+负责把“文件系统里的真实文件”和“业务上的用户 / 文件夹 / 知识库 / 工作区”连起来。
+
+对应代码：
+
+- `app/services/document_library.py`
+- `DocumentLibraryService`
+
+底层表：
+
+- `kop_document_folder`
+- `kop_document_file`
+- `kop_kb`
+- `kop_workspace`
+
+它提供给 RAG 的关键字段是：
+
+- `user_id`
+- `file_id`
+- `folder_id`
+- `kb_id`
+- `workspace_key`
+- `display_path`
+
+这些字段会进入 Chroma metadata，后面检索和引用展示都要用。
 
 ### 2.5 生成层
 
@@ -1271,12 +1669,41 @@ vectors = embedder.embed_documents(texts)
 对应代码：
 
 - `app/services/knowledge_base.py`
-- `chat()` 链路
+- `answer()` / `stream_answer()` 链路
+- `_prepare_answer(...)`
+- `_build_context(...)`
+- `_chat_completion(...)`
+- `_chat_completion_with_tools(...)`
+- `_stream_completion_with_tools(...)`
+- `app/services/llm_provider_adapter.py`
+- `app/services/llm_provider_mapping.py`
+- `app/services/llm_streaming.py`
+- `app/services/tools.py`
 
 底层模型：
 
 - DeepSeek / Qwen / OpenAI 等 OpenAI-compatible provider
 - 当前默认主模型：`DEEPSEEK_MODEL=deepseek-v4-flash`
+- `llm_provider_adapter.py` 负责 provider 调用、Chat Completions / Responses API、fallback
+- `llm_provider_mapping.py` 负责模型能力、provider 参数和能力降级判断
+- `llm_streaming.py` 负责统一正文、思考、工具、usage、diagnostics 等流式事件
+- `tools.py` 负责只读工具注册和 tool calling 执行
+- `model_diagnostics` 负责回传实际 provider、model、联网、思考、工具、图片、Responses 和 fallback 信息
+
+现在生成层已经不是简单“调用 DeepSeek 得到一段文本”，而是：
+
+```text
+生成层
+├─ 解析模型和 provider
+├─ 解析 ModelCapability
+├─ 处理 message_parts
+├─ 按能力决定是否启用图片输入
+├─ 按能力决定是否启用 tool calling
+├─ 按能力决定是否启用 Qwen Responses API
+├─ 调用 provider adapter
+├─ 流式时统一成 StreamingEvent
+└─ 把 model_diagnostics 返回前端和落库
+```
 
 ### 2.6 API 层
 
@@ -1288,9 +1715,13 @@ vectors = embedder.embed_documents(texts)
 
 典型接口：
 
+- 登录 / 注册 / 当前用户：`/api/auth/*`
+- 文档列表、上传、文件夹、文件移动 / 重命名 / 删除
 - 上传与建索引
 - 搜索
 - 聊天
+- 聊天配置：`/api/chat/options`
+- 会话列表与消息列表：`/api/chat/conversations`
 - ONLYOFFICE 保存回调后的索引更新
 
 ### 2.7 聊天记忆层
@@ -1343,7 +1774,18 @@ vectors = embedder.embed_documents(texts)
 ```text
 原始文件
 ├─ 文件来源
-│  └─ 新文档库存储目录：data/user_docs
+│  ├─ 业务元数据：kop_document_file / kop_document_folder
+│  └─ 新文档库存储目录：data/user_docs/{user_id}/{folder_id}
+├─ 当前用户
+│  └─ app/main.py::CurrentUserContextMiddleware
+│     ├─ 已登录：解析 kop_session 对应 user_id
+│     └─ 未登录：回落到游客用户 local-user
+├─ 文档库元数据服务
+│  └─ app/services/document_library.py::DocumentLibraryService
+│     ├─ 上传时写入 kop_document_file
+│     ├─ 文件夹写入 kop_document_folder
+│     ├─ 返回 file_id / folder_id / display_path
+│     └─ 建索引时提供 user_id / file_id / folder_id / kb_id / workspace_key
 ├─ 文件扫描器
 │  └─ app/services/files.py::iter_source_files()
 │     └─ 找到受支持的扩展名，交给后面的解析器
@@ -1365,6 +1807,10 @@ vectors = embedder.embed_documents(texts)
 │     │  └─ 先调用 LibreOffice soffice 转成 pptx，再走 pptx 解析
 │     └─ doc
 │        └─ 先尽力用 antiword/catdoc/ole 兜底抽取，再生成 Document
+├─ 索引 metadata 合并
+│  └─ app/services/knowledge_base.py::_attach_index_metadata(...)
+│     ├─ 从 DocumentLibraryService.get_index_metadata_by_storage_path(...) 读取 DB 元数据
+│     └─ 合并 user_id / file_id / folder_id / kb_id / workspace_key / display_path 等字段
 ├─ Document 为什么一定要先出现？
 │  └─ 因为后面的切片器、向量化器、Chroma 写入接口，输入都按 Document 这个统一结构来接
 ├─ 切片器
@@ -1398,16 +1844,27 @@ vectors = embedder.embed_documents(texts)
 │     └─ 调用 self.vector_store.add_documents(...)
 │        └─ Chroma 自动完成：文本 -> 向量 -> 持久化
 ├─ 检索
-│  └─ app/services/knowledge_base.py::retrieve(query, top_k)
-│     ├─ 直接把问题文本交给 Chroma
+│  └─ app/services/knowledge_base.py::retrieve(query, top_k, scope_type, scope_id, workspace_key)
+│     ├─ _current_user_filter(...) 先按 user_id 过滤
+│     ├─ scope_type=folder 时包含当前文件夹和所有子文件夹
+│     ├─ scope_type=kb 时按 kb_id 过滤
+│     ├─ scope_type=workspace 时按 workspace_key 过滤
 │     ├─ Chroma 内部先调用同一个 embedding_function 把 query 向量化
-│     ├─ 再做 cosine 相似度检索
-│     └─ 返回 top_k 个相关 chunk
+│     ├─ 再做相似度检索
+│     └─ 返回相关 chunk，并整理成 SearchHit
 └─ 生成回答
-   └─ app/services/knowledge_base.py::_build_context() + chat()
+   └─ app/services/knowledge_base.py::_build_context() + answer()/stream_answer()
       ├─ 把检索命中的 chunk 组装成上下文
-      ├─ 传给 DeepSeek / Qwen / OpenAI 等 LLM
-      └─ 由大模型负责最终回答生成
+      ├─ 解析 model -> provider -> ModelCapability
+      ├─ 处理 message_parts：text / image_url / file_ref
+      ├─ 如果模型支持图片，image_url 原样进入 provider message
+      ├─ 如果模型不支持图片，image_url 降级成文本摘要并写 warning
+      ├─ 如果模型支持工具调用，构建 ToolRegistry 只读工具
+      ├─ 如果模型是千问且启用 Responses API，可优先走 QwenResponsesProviderAdapter
+      ├─ 否则走 OpenAICompatibleProviderAdapter / Chat Completions
+      ├─ 流式输出时统一成 StreamingEvent
+      ├─ 由大模型负责最终回答生成
+      └─ 返回 answer / citations / usage / cost_estimate / model_diagnostics
 ```
 
 ### 补充：当前聊天问答入口新增的会话记忆链路
@@ -1461,17 +1918,21 @@ vectors = embedder.embed_documents(texts)
 └─ 回读最近消息窗口
 
 RAG 问答层
+├─ 归一化 message_parts
 ├─ 用历史改写检索问题
 ├─ 检索 Chroma
 ├─ 整理上下文
-└─ 调用 LLM 生成回答
+├─ 解析 provider / ModelCapability
+├─ 按能力决定图片、工具、Responses API 是否启用
+└─ 调用 LLMProviderAdapter 生成回答
 
 聊天记忆后置层
 ├─ 保存本轮 user / assistant 消息
+├─ 保存 message_parts / reasoning_parts / model_diagnostics
 └─ 刷新 Redis 最近窗口缓存
 ```
 
-### 3.1 这条链路里，每一步到底是谁在做什么？### 3.1 这条链路里，每一步到底是谁在做什么？
+### 3.1 这条链路里，每一步到底是谁在做什么？
 
 #### 1）文件扫描是谁做的？
 - `iter_source_files()` 负责扫描 `settings.user_docs_dir`
@@ -1612,20 +2073,26 @@ DeepSeek 不负责找 chunk。
 
 1. `data/user_docs`
    - 新文档库的真实文件存储目录
-   - 文件由 `DocumentLibraryService` 上传并记录到 `kop_doc_file`
+   - 当前真实路径一般是 `data/user_docs/{user_id}/{folder_id}/{stored_name}`
+   - 文件由 `DocumentLibraryService` 上传并记录到 `kop_document_file`
+   - 文件夹由 `DocumentLibraryService` 记录到 `kop_document_folder`
 
 对应代码：
 
 - `settings.user_docs_dir`
 - `iter_source_files()`
+- `DocumentLibraryService.save_uploaded_files(...)`
+- `DocumentLibraryService.list_documents()`
 
 这里先做的事情只是：
 
-- 扫描目录
-- 按扩展名过滤支持的文件
-- 返回 `Path` 列表
+- 上传阶段：先写 MySQL 元数据，再把真实文件写到 `data/user_docs/{user_id}/{folder_id}`
+- 建索引阶段：`iter_source_files()` 扫描受控目录，按扩展名过滤支持文件，返回 `Path` 列表
+- 每个 `Path` 会再反查 `kop_document_file`，拿到 `user_id`、`file_id`、`folder_id`、`kb_id`、`workspace_key` 等索引 metadata
 
 也就是说，`iter_source_files()` 还没有开始“解析内容”，它只是把候选文件找出来。
+
+真正决定“这个文件属于哪个用户、哪个文件夹、哪个知识库”的，是数据库元数据，而不是目录名本身。
 
 ### 4.2 真正把文件读成统一结构的是谁？
 
@@ -1686,6 +2153,31 @@ DeepSeek 不负责找 chunk。
 - `page`
 - `sheet_name`
 - `slide_name`
+
+第三阶段后，入库到 Chroma 前还会额外合并数据库元数据：
+
+- `user_id`
+- `file_id`
+- `folder_id`
+- `kb_id`
+- `workspace_id`
+- `workspace_key`
+- `original_name`
+- `stored_name`
+- `display_name`
+- `display_path`
+- `folder_path`
+- `file_path`
+- `source_type`
+
+这些字段的意义很大：
+
+- `user_id` 用于用户隔离
+- `file_id` 用于文件删除 / 移动 / 重命名后的精确删旧 chunk 和重建
+- `folder_id` 用于文件夹范围检索
+- `kb_id` 用于知识库范围检索
+- `workspace_key` 用于工作区范围检索
+- `display_path` / `display_name` 用于前端引用展示
 
 这里有个容易混淆的点要特别记住：
 
@@ -2561,9 +3053,12 @@ Chroma record
 
 1. 扫描所有 source files
 2. 每个文件 `load_documents_from_file()`
-3. 全部文档统一 `split_documents()`
-4. `reset_collection()` 清空旧集合
-5. `_upsert_chunks(chunks)` 全量写入
+3. 根据 `source path` 反查 `kop_document_file`，拿到当前文件的索引 metadata
+4. 把 `user_id` / `file_id` / `folder_id` / `kb_id` / `workspace_key` 等 metadata 合并到 `Document`
+5. 全部文档统一 `split_documents()`
+6. `reset_collection()` 清空旧集合
+7. `_upsert_chunks(chunks)` 全量写入
+8. 写入成功后更新 `kop_document_file.index_status` 和 `last_indexed_at`
 
 触发场景：
 
@@ -2577,15 +3072,17 @@ Chroma record
 对应函数：
 
 - `reindex_source_file(path)`
+- `reindex_document_files(file_ids, source_paths)`
 
-流程：
+`reindex_source_file(path)` 是旧一些、仍可用的路径型入口：
 
 1. 读取目标文件
-2. 抽取文本
-3. 切片
-4. 先确保 `vector_store` 能初始化
-5. 按 `source` 删除该文件原有 chunk
-6. 重新写入新 chunk
+2. 反查数据库 metadata
+3. 抽取文本
+4. 切片
+5. 先确保 `vector_store` 能初始化
+6. 按 `source` 删除该文件原有 chunk
+7. 重新写入新 chunk
 
 这个“先确保 vector_store 能初始化”是我们前面刚补的稳健性修复。
 
@@ -2599,17 +3096,53 @@ Chroma record
 - ONLYOFFICE 保存后的默认增量更新
 - 后续如果扩展成“单文件重建”按钮，也会走这条
 
+`reindex_document_files(file_ids, source_paths)` 是现在文档库 mutation 更推荐的入口：
+
+1. 先按 `file_id` 删除旧 chunk
+2. 再按新的 `source_paths` 读取真实文件
+3. 重新查询最新数据库 metadata
+4. 重新解析、切片、写入 Chroma
+5. 更新文件索引状态
+
+触发场景：
+
+- 文件重命名
+- 文件移动
+- 文件夹重命名
+- 文件夹移动
+- 文本编辑保存后重建
+
+这就是“移动 / 重命名文件之后，索引 metadata 更新策略”的当前落地方式：
+
+- 不直接在 Chroma 里原地改 metadata
+- 而是删除旧 `file_id` 对应 chunks
+- 再按最新数据库 metadata 重新写入
+
 ### 8.3 删除文件后的重建
 
 对应函数：
 
 - `delete_source_file_and_rebuild(path)`
+- `delete_chunks_by_file_ids(file_ids)`
 
-它会：
+`delete_source_file_and_rebuild(path)` 是路径型旧入口，它会：
 
 1. 删除源文件
 2. 必要时删预览 PDF 缓存
 3. 再做全量重建
+
+现在文件 / 文件夹删除更常走的是：
+
+```text
+DocumentLibraryService 删除 MySQL 记录和真实文件
+├─ 文件删除：返回 file_id
+└─ 文件夹删除：返回该文件夹及子文件夹下所有 file_ids
+
+KnowledgeBaseService.delete_chunks_by_file_ids(file_ids)
+└─ 按 Chroma metadata.file_id 删除对应 chunks
+```
+
+这样比全量重建更轻，也更符合现在的 DB 文档库结构。
 
 ---
 
@@ -2619,12 +3152,30 @@ Chroma record
 
 对应函数：
 
-- `retrieve(query, top_k)`
+- `retrieve(query, top_k, scope_type, scope_id, workspace_key)`
 
 做法：
 
-- 直接调用 `self.vector_store.similarity_search_with_relevance_scores(...)`
+- 先构造当前用户过滤条件
+- 再按 scope 追加过滤条件
+- 再调用 `self.vector_store.similarity_search_with_relevance_scores(...)`
 - 把结果整理成 `SearchHit`
+
+真实调用入口是：
+
+```text
+retrieve(...)
+└─ _similarity_search_for_current_user(...)
+   ├─ _current_user_filter(...)
+   └─ _similarity_search_with_recovery(...)
+      └─ vector_store.similarity_search_with_relevance_scores(...)
+```
+
+如果是 `folder` 范围，会先调用：
+
+- `DocumentLibraryService.get_descendant_folder_ids(folder_id)`
+
+也就是说，选中某个父文件夹时，检索会覆盖它自己和所有子文件夹。
 
 ### 9.2 检索结果里有什么？
 
@@ -2636,6 +3187,11 @@ Chroma record
 - `score`
 - `preview`
 - `content`
+- `file_id`
+- `folder_id`
+- `display_name`
+- `display_path`
+- `folder_path`
 
 ### 9.3 更复杂的候选检索逻辑
 
@@ -2649,6 +3205,8 @@ Chroma record
 2. 汇总不同 query 的命中
 3. 按 `(source, page, chunk_index)` 去重
 4. 保留分数更高的命中
+5. 对 overview / general / comparison / list 问题会尝试扩大候选数量
+6. 技术类问题会更宽松地保留代码密集片段
 
 说明当前项目不是只有“最朴素的 top_k 检索”，
 而是已经有一点工程化候选聚合思路了。
@@ -2706,6 +3264,36 @@ DeepSeek 负责的是：
 负责者：
 
 - DeepSeek / Qwen / OpenAI-compatible provider
+- `LLMProviderAdapter`
+- `ModelCapability`
+- `ToolRegistry`
+- `StreamingEvent`
+
+现在生成阶段可以拆成更细的几步：
+
+```text
+KnowledgeBaseService.answer() / stream_answer()
+├─ resolve_model(model)
+├─ _resolve_model_provider(model_name)
+├─ _resolve_model_capability(model_name, provider)
+├─ _prepare_answer(...)
+│  ├─ 归一化 message_parts
+│  ├─ 用文本和历史做检索 query
+│  ├─ 检索知识库上下文
+│  └─ 组织 provider messages
+├─ 按 capability 判断是否启用 ToolRegistry
+├─ _chat_completion_with_tools(...) 或 _stream_completion_with_tools(...)
+│  ├─ 可能先让模型请求工具
+│  ├─ 后端执行只读工具
+│  └─ 再让模型生成最终回答
+├─ LLMProviderAdapter 调用真实 provider
+│  ├─ OpenAICompatibleProviderAdapter
+│  └─ QwenResponsesProviderAdapter
+└─ 返回 answer / citations / usage / model_diagnostics
+```
+
+所以现在 DeepSeek / Qwen / OpenAI 仍然是“最终生成回答的模型”，
+但它们已经被包在一个更完整的模型能力兼容层里。
 
 ### 10.3 这也是为什么当前项目叫“显式检索 + 自定义 Prompt + 模型生成”
 
@@ -2722,6 +3310,20 @@ DeepSeek 负责的是：
 - 更可控
 - 更容易调试
 - 更适合工程扩展
+- 更容易接多 provider
+- 更容易做模型能力降级
+- 更容易把 tool calling / 多模态 / Responses API 接进来
+
+当前生成阶段已经不是“只调用一个模型接口”，而是：
+
+```text
+显式检索
+  -> 自定义上下文
+  -> 模型能力判断
+  -> provider adapter
+  -> tool calling / multimodal / streaming diagnostics
+  -> 最终回答
+```
 
 ### 10.4 最近新增：回答完成后还要保存聊天记录
 
@@ -2747,7 +3349,7 @@ LLM 生成回答
 
 ---
 
-## 11. 这条链路里有哪些“中间件”和“模型”？## 11. 这条链路里有哪些“中间件”和“模型”？
+## 11. 这条链路里有哪些“中间件”和“模型”？
 
 ### 11.1 主要模型
 
@@ -2758,6 +3360,27 @@ LLM 生成回答
 2. 生成模型
    - 当前默认 `deepseek-v4-flash`
    - 负责最终回答
+   - 通过 OpenAI-compatible client 调用
+   - 可以按 provider 路由到 DeepSeek / Qwen / OpenAI / 其他兼容网关
+
+3. 模型能力映射
+   - `app/services/llm_provider_mapping.py`
+   - 解析 `ModelCapability`
+   - 判断原生联网、工具调用、图片输入、Responses API、Responses 流式、思考参数是否可用
+   - 把统一的联网、深度思考、流式、温度、token 上限等参数转换成 provider 能接受的参数
+   - 如果 provider 不接受扩展参数，后端会去掉扩展参数重试，并写入 `model_diagnostics.warnings`
+
+4. provider adapter
+   - `app/services/llm_provider_adapter.py`
+   - `OpenAICompatibleProviderAdapter` 负责 Chat Completions 兼容接口
+   - `QwenResponsesProviderAdapter` 负责千问 Responses API
+   - `LLMProviderAdapterFactory` 根据 provider 和开关选择具体 adapter
+
+5. 流式事件和工具层
+   - `app/services/llm_streaming.py`
+   - `app/services/tools.py`
+   - `StreamingEvent` 把正文、思考、工具、usage、diagnostics 分开
+   - `ToolRegistry` 负责只读工具注册和执行
 
 ### 11.2 主要框架 / 中间件
 
@@ -2789,6 +3412,20 @@ LLM 生成回答
    - 缓存最近聊天窗口
    - 当前用于减少每次聊天都从 MySQL 回读最近消息的成本
 
+9. 前端 Vue 组件层
+   - `App.vue`：应用总壳、登录入口、主题、侧边栏、viewer / ONLYOFFICE 弹窗控制
+   - `AuthScreen.vue`：登录 / 注册界面
+   - `LeftSidebar.vue`：工作区导航、最近会话列表、范围标签、用户菜单
+   - `ChatWorkspace.vue`：聊天主界面
+   - `ChatComposer.vue`：模型、深度思考、联网、会话范围选择、发送入口
+   - `MessageList.vue` / `MessageItem.vue`：消息列表、引用、usage、cost、模型诊断展示
+   - `ModelHealthPanel.vue`：模型健康检查弹窗内容
+   - `DocumentsWorkspace.vue`：文档库文件系统式界面、文件夹树、文件 / 文件夹操作、ONLYOFFICE 健康弹窗
+   - `IndexWorkspace.vue`：索引概览和重建入口
+   - `SearchWorkspace.vue`：检索实验场
+   - `UnifiedFileViewer.vue`：普通文件 / PDF / Markdown / 表格预览
+   - `OnlyOfficeEditor.vue`：ONLYOFFICE 在线编辑器
+
 ---
 
 ## 12. 当前项目已经有的优化与暂时还没有的优化
@@ -2801,16 +3438,40 @@ LLM 生成回答
 - 中文 + 英文分隔符
 - 按 source 增量删除与重建
 - 保存后增量索引
+- 检索结果去重
+- 上下文分组与引用标签生成
+- 简单 code-heavy 片段识别
+- 多 query 候选召回和按问题类型扩展候选
 - file_id 优先的文档 mutation
+- `file_id` 级删除旧 chunk
+- 文件移动 / 重命名后的重新索引
+- 文件夹移动 / 重命名后的子文件批量重新索引
+- 文档库文件夹树和文件系统式列表
 - 会话作用域 `scope_type` / `scope_id` / `workspace_key`
 - 会话列表分页回显
 - 消息列表分页回显
 - `conversation_id` 前后端对齐
 - 默认游客用户 `local-user`
+- 登录 / 注册 / 退出
+- Redis session cookie：`kop_session`
 - `model_diagnostics` 随回答返回
+- 模型健康检查弹窗
+- `LLMProviderAdapter` 把 provider 调用从 RAG 主流程拆出来
+- `OpenAICompatibleProviderAdapter` 支持通用 Chat Completions 兼容 provider
+- `QwenResponsesProviderAdapter` 支持千问 Responses API 基础调用和基础流式
+- `StreamingEvent` 统一正文、思考、工具调用、usage、diagnostics、done 事件
+- `ToolRegistry` 接入只读工具调用闭环
+- 非流式 `/api/chat` 和流式 `/api/chat/stream` 都支持基础 tool calling
+- `ChatMessagePart` 支持 `text` / `image_url` / `file_ref`
+- 聊天输入支持图片 URL 和直接粘贴图片
+- `ModelCapability` 支持按模型能力自动判断图片、工具、Responses API 等能力
+- 模型不支持图片 / 工具 / Responses API 时可以自动降级并写入 warning
+- 助手消息可以展示 reasoning、tool calls、provider_api、warnings
+- ONLYOFFICE 健康检查弹窗
 - 检索时按当前用户过滤
 - 检索时按 scope 限定范围
 - folder scope 会自动包含子文件夹
+- 文档引用里带 `file_id` / `folder_id` / `display_path`，方便前端打开对应文件
 
 ### 12.2 暂时还没有明显看到的
 
@@ -2826,14 +3487,21 @@ LLM 生成回答
 - 长期记忆事实抽取
 - 更完整的权限模型 / 多租户隔离
 - 会话重命名 / 删除 / 归档接口
-- 文件移动 / 重命名后的索引 metadata 自动同步还可以继续收口
+- 细粒度角色权限，例如管理员、团队空间、共享知识库
+- 文件版本历史 / 回滚
+- 知识库对象的完整前端管理页，目前更多是文档库与 scope 选择先落地
+- 图片上传到后端 / 对象存储并生成公网 URL，目前粘贴图片先走 data URL
+- 更完整的多模态输入，例如音频、视频、provider 原生 file input
+- Responses API 原生复杂事件完整解析，例如结构化引用、web_extractor、code_interpreter
+- 高风险写入类工具，例如编辑文件、删除文件、写数据库；这些需要权限、审计和人工确认
+- 模型能力配置中心，目前主要靠 `.env` 和 `MODEL_CAPABILITIES_JSON`
 
 所以当前项目已经不是“最原始 demo”，
 但也还没走到“高级检索架构”的阶段。
 
 ---
 
-## 13. 失败点和排查思路## 13. 失败点和排查思路
+## 13. 失败点和排查思路
 
 ### 13.1 文件抽取失败
 
@@ -2906,28 +3574,194 @@ LLM 生成回答
 - `.env` 里的 `REDIS_HOST` / `REDIS_PORT`
 - Docker 中间件是否启动
 - `requirements.txt` 里的 `SQLAlchemy` / `PyMySQL` / `redis` 是否安装到 `.venv311`
-- `KOP` 数据库里是否已经执行 `业务逻辑解析/KOP聊天记忆建表.sql`
+- `KOP` 数据库是否已经执行当前版本的初始化 SQL，例如 `sql/KOP_v1_init.sql`
+
+### 13.6 登录态 / 游客用户失败
+
+影响：
+
+- `/api/auth/me` 异常
+- 文档列表、聊天会话、索引统计无法按用户隔离
+- 未登录游客模式无法自动创建 `local-user`
+
+排查：
+
+- `app/services/auth.py::UserAuthService`
+- `app/main.py::CurrentUserContextMiddleware`
+- `kop_user` 是否有默认用户，或是否允许自动创建
+- Redis 是否能保存 `kop_session`
+- 浏览器请求是否携带 cookie
+
+### 13.7 文档库 metadata 与 Chroma metadata 不一致
+
+影响：
+
+- 文件移动 / 重命名后引用路径不对
+- 文件夹范围检索不完整
+- 删除文件后旧 chunk 还被召回
+
+排查：
+
+- `kop_document_file.file_path` / `folder_id` 是否正确
+- `DocumentLibraryService.get_index_metadata_by_storage_path(...)` 是否能查到 metadata
+- `KnowledgeBaseService.reindex_document_files(...)` 是否被触发
+- 删除时是否调用 `delete_chunks_by_file_ids(file_ids)`
+- Chroma metadata 里是否有 `user_id` / `file_id` / `folder_id` / `kb_id` / `workspace_key`
+
+### 13.8 模型诊断显示扩展参数失败
+
+影响：
+
+- 原生联网可能没有生效
+- 深度思考参数可能没有生效
+- 但不会自动换成另一个 provider / model
+
+排查：
+
+- `MessageItem.vue` 里的 `modelDiagnostics`
+- 后端返回的 `option_fallback_used`
+- `model_diagnostics.warnings`
+- `app/services/llm_provider_mapping.py`
+- `.env` 中模型 base_url、API key、模型名是否匹配 provider 要求
+
+### 13.9 图片输入没有生效
+
+影响：
+
+- 用户粘贴图片或添加图片 URL 后，模型仍然像没看到图片
+- 或者 `model_diagnostics.warnings` 提示图片已降级成文本引用
+
+排查：
+
+- 当前模型的 `supports_multimodal_input` 是否为 true
+- 模型健康检查弹窗里“图片输入”标签是否为“是”
+- 当前模型是否属于视觉模型，例如 `qwen3.7-plus`、`qwen-vl-plus`、`gpt-4o-mini`
+- 如果是 `qwen-max` 这类文本模型，系统默认不会把它当成视觉模型
+- `.env` 里的 `MODEL_CAPABILITIES_JSON` 是否需要覆盖
+- 粘贴图片是否超过前端 2MB 限制
+- provider 是否支持 `data:image/...;base64,...`；如果不支持，需要后续改成图片上传后生成公网 URL
+
+### 13.10 工具调用没有触发
+
+影响：
+
+- 模型没有调用知识库搜索 / 网页搜索工具
+- 助手消息下方没有 tool calls 折叠区
+
+排查：
+
+- 当前模型的 `supports_tool_calling` 是否为 true
+- 模型健康检查弹窗里“工具调用”标签是否为“是”
+- `model_diagnostics.tool_calls` 是否为空
+- `model_diagnostics.warnings` 是否提示模型不支持工具调用
+- 当前是否启用了千问 Responses API 原生联网；这种情况下会优先让 Responses API 的 `web_search` 接管，不再同时塞本地 `ToolRegistry`
+- `app/services/tools.py` 里的工具是否注册成功
+
+### 13.11 千问 Responses API 没有走
+
+影响：
+
+- 明明选择了千问模型和原生联网，但 `provider_api` 仍然是 `chat_completions`
+
+排查：
+
+- `.env` 是否设置 `QWEN_RESPONSES_API_ENABLED=true`
+- 当前模型的 `supports_responses_api` 是否为 true
+- 流式请求还要看 `supports_responses_streaming`
+- 前端是否打开“模型原生联网”
+- `model_diagnostics.provider_api` 是否是 `qwen_responses` / `qwen_responses_stream`
+- `model_diagnostics.warnings` 是否提示 Responses API 回退到 Chat Completions
+- 当前 Qwen `base_url` 是否支持 Responses API
+
+### 13.12 流式思考 / 工具事件没有展示
+
+影响：
+
+- 后端实际可能返回了 reasoning 或 tool call，但前端看不到折叠区
+- 或者 UI 显示“思考：deep”，但没有“思考片段”折叠区
+
+排查：
+
+- 先区分两个概念：`thinking=deep` 表示用户选择了深度模式；“思考片段”只有 provider 返回 reasoning 内容时才会展示
+- 当前模型是否声明支持原生思考参数：`supports_thinking_budget` 或 `supports_reasoning_effort`
+- `qwen-max` 当前按通用文本模型处理，可以 deep 回答，但不承诺有可展示 reasoning；`qwen3.7-plus` 这类 `qwen3*` 模型才按千问 thinking 模型处理
+- 后端是否发出 `reasoning_delta` / `tool_call_delta`
+- `app/services/llm_streaming.py` 的事件类型是否正确
+- `routes.py::_streaming_event_payload(...)` 是否正确把内部事件转成 SSE payload
+- `frontend/src/api.ts::chatStream(...)` 是否接住对应事件
+- `frontend/src/composables/useChatWorkspace.ts` 是否把事件写入当前 `UiMessage`
+- `MessageItem.vue` 是否展示 reasoning / tool calls 折叠区
+- 如果 `model_diagnostics.warnings` 提示“当前模型未声明支持原生深度思考参数”，说明后端没有强行传 provider thinking 参数
 
 ---
 
+### 13.13 最近一轮模型能力 Bug 修复记录
+
+这轮修了几类容易混淆的问题：
+
+1. 思考片段一字一行
+   - 原因：流式 `reasoning_delta` 每个小片段都被前端渲染成单独段落
+   - 修复：`MessageItem.vue` 合并 `reasoningParts` 成 `assistantReasoningText` 展示，并加换行/溢出保护
+
+2. `qwen-max` 没有思考片段
+   - 原因：原来把整个 `qwen` provider 都当成支持 thinking budget
+   - 修复：`llm_provider_mapping.py` 改为只对 `qwen3*`、`qwq*`、`qvq*` 开启千问 thinking 参数
+   - 结论：`qwen-max` 可以 deep 回答，但不承诺返回可展开的原生思考片段
+
+3. `qwen-max` 图片输入为“否”
+   - 原因：图片能力是模型级能力，不是 provider 级能力；官方图像示例使用的是 `qwen3.7-plus`
+   - 修复：`.env` / `.env.example` 增加 `qwen3.7-plus`，并由 `ModelCapability` 自动识别图片能力
+
+4. 粘贴图片显示超长 base64
+   - 原因：用户消息回显直接展示了 `data:image/...`
+   - 修复：`MessageItem.vue` 对 data URL 显示“粘贴图片”
+
+5. 千问天气问题没有联网结果
+   - 原因：请求诊断里 `nativeWeb=off, externalWeb=off` 时表示实际没联网；并且原来没有外部搜索配置时也注册了 `search_web` 假工具
+   - 修复：支持原生联网的模型默认开启 native web；`ToolRegistry` 只有外部搜索可用时才注册 `search_web`；千问 Chat Completions 原生联网会带 `enable_search` 和 `forced_search`
+
+6. 流式回答正文结束后仍卡在模型诊断区
+   - 原因：`stream_answer()` 在 provider 流式正文结束后，又同步调用 `_polish_answer(...)` 做二次润色；这次调用不会继续吐字，前端只能等待最终 `done`
+   - 为什么深度思考更明显：`thinking=deep` 时 `_should_polish_answer(...)` 更容易触发，所以尾部等待时间更长
+   - 修复：流式 `/api/chat/stream` 不再做结束后的二次润色；provider stream 结束后直接发送 `done`，非流式 `/api/chat` 的润色逻辑保留
+
+涉及文件：
+
+- `frontend/src/components/chat/MessageItem.vue`
+- `frontend/src/composables/useChatWorkspace.ts`
+- `app/services/knowledge_base.py`
+- `app/services/llm_provider_mapping.py`
+- `app/services/tools.py`
+- `.env`
+- `.env.example`
+- `业务逻辑解析/模型能力思考.md`
+
 ## 14. 一句话记忆版
 
-你可以把这套项目的 RAG 链路记成下面这 8 句话：
+你可以把这套项目的 RAG 链路记成下面这几句话：
 
-1. 文件先由 `files.py` 抽取成统一 `Document`
-2. `knowledge_base.py` 用 `RecursiveCharacterTextSplitter` 切 chunk
-3. `embeddings.py` 用本地 sentence-transformers 模型做向量化
-4. Chroma 存 chunk、向量和 metadata
-5. 用户提问时，也先转成向量
-6. Chroma 按向量相似度找最相关 chunk
-7. `knowledge_base.py` 再把命中结果整理成上下文
-8. DeepSeek 最后根据上下文生成回答
+1. `CurrentUserContextMiddleware` 先解析当前用户；未登录时回落到游客用户 `local-user`
+2. `DocumentLibraryService` 管文件夹、文件、`file_id`、`folder_id` 和真实存储路径
+3. 文件内容由 `files.py` 抽取成统一 `Document`
+4. `KnowledgeBaseService` 给 `Document` 合并数据库 metadata
+5. `knowledge_base.py` 用 `RecursiveCharacterTextSplitter` 切 chunk
+6. `embeddings.py` 用本地 sentence-transformers 模型做向量化
+7. Chroma 存 chunk、向量和 metadata
+8. 用户提问时，也先转成向量
+9. Chroma 按当前用户和 scope 过滤后，再按向量相似度找最相关 chunk
+10. `knowledge_base.py` 再把命中结果整理成上下文和引用
+11. `message_parts` 让用户消息可以携带文本、图片、文件引用
+12. `ModelCapability` 判断当前模型是否支持图片、工具、Responses API、思考参数
+13. `ToolRegistry` 在模型需要时执行只读工具调用
+14. `LLMProviderAdapter` 负责真正调用 DeepSeek / Qwen / OpenAI-compatible provider
+15. `StreamingEvent` 把正文、思考、工具调用、usage、diagnostics 分开返回
+16. `model_diagnostics` 告诉前端这次实际 provider、model、联网、思考、工具、图片和 fallback 是否生效
 
 如果把最近新增的聊天记忆也一起放进去，可以继续记成：
 
-9. `ChatMemoryService` 先回读最近会话窗口
-10. `routes.py` 把最近窗口交给 `KnowledgeBaseService`
-11. 回答结束后，把本轮 user / assistant 消息写回 MySQL，并刷新 Redis 缓存
+17. `ChatMemoryService` 先按当前用户和 `conversation_id` 回读最近会话窗口
+18. `routes.py` 把最近窗口和当前 scope 交给 `KnowledgeBaseService`
+19. 回答结束后，把本轮 user / assistant 消息、引用、usage、模型诊断、message_parts 写回 MySQL，并刷新 Redis 缓存
 
 ---
 
@@ -2936,21 +3770,29 @@ LLM 生成回答
 ### 第一层：先看总入口
 
 - `app/services/knowledge_base.py`
+- `app/api/routes.py`
+- `app/main.py::CurrentUserContextMiddleware`
 
 ### 第二层：看三个核心函数
 
 - `load_documents_from_file()`
 - `split_documents()`
-- `retrieve()` / `_retrieve_candidates()`
+- `retrieve()` / `_retrieve_candidates()` / `_similarity_search_for_current_user()`
 
 ### 第三层：看两个外部依赖接入点
 
 - `app/services/embeddings.py`
 - `Chroma(...)` 初始化
+- `app/services/llm_provider_adapter.py`
+- `app/services/llm_provider_mapping.py`
+- `app/services/llm_streaming.py`
+- `app/services/tools.py`
 
-### 第四层：再看 API 怎么触发这些链路
+### 第四层：再看文档库和用户怎么接入这些链路
 
-- `app/api/routes.py`
+- `app/services/document_library.py`
+- `app/services/auth.py`
+- `app/core/request_context.py`
 
 ### 第五层：再看聊天记忆怎么接入
 
@@ -2959,13 +3801,27 @@ LLM 生成回答
 - `app/core/redis_client.py`
 - `frontend/src/composables/useChatWorkspace.ts`
 
+### 第六层：最后看前端怎么把这些能力展示出来
+
+- `frontend/src/App.vue`
+- `frontend/src/components/chat/ChatComposer.vue`
+- `frontend/src/components/chat/MessageItem.vue`
+- `frontend/src/components/chat/ModelHealthPanel.vue`
+- `frontend/src/components/sidebar/LeftSidebar.vue`
+- `frontend/src/components/workspaces/DocumentsWorkspace.vue`
+- `frontend/src/components/workspaces/SearchWorkspace.vue`
+
 ---
 
 ## 16. 当前项目最准确的定位
 
 如果你要给这套项目下一个很准确的定义，我建议你记成：
 
-**这是一个“本地文件解析 + LangChain 切片接口 + sentence-transformers 向量化 + Chroma 向量检索 + DeepSeek 生成回答”的工程化 RAG 项目。**
+**这是一个“用户隔离文档库 + 本地文件解析 + LangChain 切片接口 + sentence-transformers 向量化 + Chroma 向量检索 + OpenAI-compatible LLM 生成回答”的工程化 RAG 项目。**
+
+如果按现在已经补上的模型能力层再说得更完整一点，可以记成：
+
+**这是一个“用户隔离文档库 + 会话范围检索 + 本地向量索引 + OpenAI-compatible 多 provider 生成 + 模型能力自动匹配 + 基础工具调用 + 基础多模态输入”的工程化 RAG 工作台。**
 
 它不是：
 
@@ -2985,21 +3841,20 @@ ONLYOFFICE 和 LibreOffice 都只是“文档生态配套能力”，
 
 如果从完整聊天产品链路看，现在还额外包括：
 
+- 登录 / 注册 / 游客用户回落
+- 文档库文件夹化和 `file_id` 优先操作
+- 会话范围选择：全部 / 文件夹 / 知识库 / 工作区
 - MySQL 聊天记录持久化
 - Redis 最近消息窗口缓存
 - 前后端 `conversation_id` 会话续接
-
-
-
-
-
-
-
-
-
-
-
-
+- 模型调用诊断和健康检查弹窗
+- `LLMProviderAdapter` provider 适配层
+- `StreamingEvent` 流式事件分层
+- `ToolRegistry` 只读工具调用闭环
+- `ChatMessagePart` 多模态消息片段
+- 图片 URL / 直接粘贴图片输入
+- `ModelCapability` 模型能力自动匹配与降级
+- 千问 Responses API 基础 adapter
 
 ---
 
@@ -3100,7 +3955,12 @@ LLM 的上下文长度有限，意思是：
 
 ### 17.5 聊天记录要怎么存，后面才好和用户关联？
 
-这个我建议你提前分三张表思考，而不是只做一张大表。
+这个问题现在已经不只是“建议”了，第三阶段已经把核心表落地了。
+
+现在可以分成两层看：
+
+1. 已经实际使用的主链路表
+2. 后续为摘要和长期记忆预留的扩展表
 
 当前项目已经实际落地的表名是：
 
@@ -3115,16 +3975,16 @@ LLM 的上下文长度有限，意思是：
 - 会话列表接口会补一个 `scope_name`，前端就能直接显示“全部 / 文件夹 / 知识库 / 工作区”
 - `kop_chat_message` 会把原始消息、引用和诊断信息都保留下来，方便回显和排查
 
-当前项目已经预留但还没有正式启用完整业务逻辑的是：
+当前项目已经预留、但还没有正式接入完整摘要 / 长期记忆业务逻辑的是：
 
 - `kop_chat_conversation_summary`
 - `kop_chat_memory_fact`
 
 对应建表脚本是：
 
-- `业务逻辑解析/KOP聊天记忆建表.sql`
+- `sql/KOP_v1_init.sql`
 
-#### 表 1：`chat_conversation`
+#### 表 1：`kop_chat_conversation`
 保存“会话本身”。
 
 适合放：
@@ -3146,7 +4006,7 @@ LLM 的上下文长度有限，意思是：
 - 这个会话属于哪个用户
 - 这个会话现在属于哪个范围
 
-#### 表 2：`chat_message`
+#### 表 2：`kop_chat_message`
 保存“每一条消息”。
 
 适合放：
@@ -3167,7 +4027,7 @@ LLM 的上下文长度有限，意思是：
 - 一段会话里每一轮具体说了什么
 - 方便回放、导出、追踪上下文
 
-#### 表 3：`chat_conversation_summary` 或 `conversation_memory`
+#### 表 3：`kop_chat_conversation_summary` 或 `kop_chat_memory_fact`
 保存“摘要记忆”。
 
 适合放：
@@ -3185,14 +4045,11 @@ LLM 的上下文长度有限，意思是：
 
 所以摘要是很有用的中间层。
 
-### 17.6 一个比较稳的 MySQL 建表方向
+### 17.6 当前 MySQL 结构和通用设计名的关系
 
-下面是一个偏实用的结构思路，你后面如果准备上 Docker 里的 MySQL，可以按这个方向预留：
+这段现在可以理解成“通用设计名”和“当前实际表名”的对应关系。
 
-这段现在可以分成两层看：
-
-1. 下面是通用设计思路
-2. 当前项目实际落地时，把表名前缀统一成了 `kop_`
+当前项目实际落地时，把表名前缀统一成了 `kop_`：
 
 ```text
 通用设计名                  当前项目实际表名
@@ -3204,7 +4061,9 @@ chat_memory_fact          -> kop_chat_memory_fact
 ```
 
 #### `sys_user`
-如果你后面有登录系统，建议先有用户表。
+对应当前项目的 `kop_user`。
+
+这张表现在已经接入登录 / 注册 / 游客用户。
 
 字段大致包括：
 
@@ -3218,34 +4077,49 @@ chat_memory_fact          -> kop_chat_memory_fact
 
 #### `chat_conversation`
 
-字段建议：
+对应当前项目的 `kop_chat_conversation`。
+
+当前字段大致包括：
 
 - `id`
 - `user_id`
 - `title`
-- `scene`
+- `workspace_key`
+- `model_name`
+- `scope_type`
+- `scope_id`
+- `summary`
+- `summary_updated_at`
+- `status`
 - `created_at`
 - `updated_at`
 - `last_message_at`
-- `is_archived`
 
 #### `chat_message`
 
-字段建议：
+对应当前项目的 `kop_chat_message`。
+
+当前字段大致包括：
 
 - `id`
 - `conversation_id`
-- `user_id`
+- `sender_user_id`
 - `role`
 - `content`
-- `token_count`
+- `seq_no`
 - `model`
+- `token_prompt`
+- `token_completion`
+- `token_total`
+- `citations_json`
+- `meta_json`
 - `created_at`
-- `parent_message_id`（可选，预留多分支对话）
 
 #### `chat_conversation_summary`
 
-字段建议：
+对应当前项目的 `kop_chat_conversation_summary`，目前属于后续摘要能力预留。
+
+字段大致包括：
 
 - `id`
 - `conversation_id`
@@ -3255,9 +4129,9 @@ chat_memory_fact          -> kop_chat_memory_fact
 - `created_at`
 - `updated_at`
 
-### 17.7 为什么我建议你预留 `user_id` 和 `conversation_id`？
+### 17.7 为什么 `user_id` 和 `conversation_id` 现在是核心字段？
 
-因为后面你大概率会遇到这些需求：
+因为当前项目已经开始围绕它们组织业务：
 
 - 按用户查历史
 - 按会话继续问
@@ -3265,7 +4139,22 @@ chat_memory_fact          -> kop_chat_memory_fact
 - 按用户统计使用量
 - 按会话做导出 / 删除 / 归档
 
-如果一开始不预留，后面再补会很痛。
+现在 `user_id` 已经同时进入：
+
+- `kop_user`
+- `kop_document_folder`
+- `kop_document_file`
+- `kop_chat_conversation`
+- Chroma metadata
+
+`conversation_id` 已经同时进入：
+
+- `/api/chat` / `/api/chat/stream` 请求响应
+- `kop_chat_conversation`
+- `kop_chat_message`
+- 前端 `ChatSession.backendConversationId`
+
+所以这两个字段已经不是“以后可能需要”，而是当前用户隔离、会话续接、刷新回显的基本骨架。
 
 ### 17.8 向量库要不要也存聊天记录？
 
@@ -3289,13 +4178,17 @@ chat_memory_fact          -> kop_chat_memory_fact
 3. 再做 `chat_conversation_summary`
 4. 最后再考虑把“长期记忆”单独向量化
 
-当前项目已经完成了前两步：
+当前项目已经完成并扩展了前两步：
 
 - `kop_chat_conversation`
 - `kop_chat_message`
 - Redis 最近消息窗口缓存
 - 前后端 `conversation_id` 对齐
 - `.env` / `.env.example` 已加入 MySQL、Redis、聊天窗口配置
+- 登录 / 注册 / 游客用户回落
+- 会话范围字段：`scope_type` / `scope_id` / `workspace_key`
+- 会话列表和消息列表分页回显
+- 回答消息保存引用、usage、模型诊断
 
 这样比较稳，不会一开始就把架构做得太重。
 
@@ -3314,7 +4207,7 @@ chat_memory_fact          -> kop_chat_memory_fact
 ### 17.11 最后给你一句最好记的话
 
 - **上下文长度靠“分层 + 截断 + 摘要 + 检索”来控制，不是靠把所有历史都塞进 prompt**
-- **聊天记录最好落 MySQL，并提前预留 `user_id` / `conversation_id`**
+- **聊天记录已经落 MySQL，`user_id` / `conversation_id` 是当前会话体系的骨架**
 - **长期记忆如果后面要做，再考虑摘要表和向量化检索**
 - **当前项目已经把第一阶段落地成：MySQL 存原始消息，Redis 缓存最近窗口，前端用 `conversation_id` 续接会话**
 

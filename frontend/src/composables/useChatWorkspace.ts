@@ -9,8 +9,10 @@ import {
   type ChatOptionsResponse,
   type ChatConversationSummary,
   type ChatMessageRecord,
+  type ChatMessagePart,
   type ChatModelOption,
   type KnowledgeBaseScopeOption,
+  type ModelDiagnostics,
   type ChatStreamDoneEvent,
   type HistoryItem,
   type WorkspaceScopeOption,
@@ -21,6 +23,7 @@ import type { ChatSession, UiMessage } from "../types/chat";
 const CONVERSATION_PAGE_SIZE = 20;
 const MESSAGE_PAGE_SIZE = 30;
 type ChatScopeType = "all" | "folder" | "kb" | "workspace";
+type UiToolCall = NonNullable<UiMessage["toolCalls"]>[number];
 
 function createId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -73,6 +76,61 @@ function parseTimestamp(value?: string | null) {
   return Number.isFinite(timestamp) ? timestamp : Date.now();
 }
 
+function parseToolArguments(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function normalizeToolCall(payload: Record<string, unknown>): UiToolCall | null {
+  const functionPayload =
+    payload.function && typeof payload.function === "object" && !Array.isArray(payload.function)
+      ? (payload.function as Record<string, unknown>)
+      : {};
+  const id = String(payload.id ?? "").trim();
+  const name = String(payload.name ?? functionPayload.name ?? "").trim();
+  const args = parseToolArguments(payload.arguments ?? functionPayload.arguments);
+
+  if (!id && !name) {
+    return null;
+  }
+  return {
+    ...(id ? { id } : {}),
+    ...(name ? { name } : {}),
+    ...(args ? { arguments: args } : {}),
+  };
+}
+
+function toolCallsFromDiagnostics(diagnostics?: ModelDiagnostics | null): UiToolCall[] {
+  return (diagnostics?.tool_calls ?? [])
+    .map((item) => normalizeToolCall(item))
+    .filter((item): item is UiToolCall => item !== null);
+}
+
+function applyDiagnosticsToMessage(target: UiMessage, diagnostics?: ModelDiagnostics | null) {
+  if (!diagnostics) {
+    return;
+  }
+  target.modelDiagnostics = diagnostics;
+  target.providerApi = diagnostics.provider_api ?? target.providerApi ?? null;
+  const toolCalls = toolCallsFromDiagnostics(diagnostics);
+  if (toolCalls.length) {
+    target.toolCalls = toolCalls;
+  }
+}
+
 function conversationToSession(item: ChatConversationSummary): ChatSession {
   return {
     id: `db-${item.id}`,
@@ -105,9 +163,13 @@ function messageRecordToUiMessage(record: ChatMessageRecord): UiMessage | null {
     createdAt: parseTimestamp(record.created_at),
     sources: record.sources ?? [],
     citations: record.citations ?? [],
+    messageParts: record.message_parts ?? [],
     model: record.model ?? undefined,
     usage: record.usage ?? undefined,
     modelDiagnostics: record.model_diagnostics ?? undefined,
+    providerApi: record.model_diagnostics?.provider_api ?? null,
+    toolCalls: toolCallsFromDiagnostics(record.model_diagnostics),
+    reasoningParts: record.reasoning_parts ?? [],
   };
 }
 
@@ -133,6 +195,7 @@ export function useChatWorkspace(topK: Ref<number>) {
   const activeSessionId = ref("");
   const loading = ref(false);
   const composer = ref("");
+  const messageParts = ref<ChatMessagePart[]>([]);
   const errorMessage = ref("");
   const messageViewport = ref<HTMLElement | null>(null);
   const availableModels = ref<string[]>([]);
@@ -239,6 +302,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     sessions.value = [];
     activeSessionId.value = "";
     composer.value = "";
+    messageParts.value = [];
     errorMessage.value = "";
     scopeType.value = "all";
     scopeId.value = null;
@@ -265,6 +329,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     sessions.value.unshift(session);
     activeSessionId.value = session.id;
     composer.value = "";
+    messageParts.value = [];
     clearError();
     void scrollToBottom();
   }
@@ -400,7 +465,9 @@ export function useChatWorkspace(topK: Ref<number>) {
   function setSelectedModel(model: string) {
     selectedModel.value = model;
     const nextOption = modelOptions.value.find((item) => item.model === model);
-    if (!nextOption?.supports_native_web_search) {
+    if (nextOption?.supports_native_web_search) {
+      nativeWebSearchEnabled.value = true;
+    } else {
       nativeWebSearchEnabled.value = false;
     }
   }
@@ -431,8 +498,28 @@ export function useChatWorkspace(topK: Ref<number>) {
     target.model = payload.model ?? undefined;
     target.usage = payload.usage ?? undefined;
     target.costEstimate = payload.cost_estimate ?? undefined;
-    target.modelDiagnostics = payload.model_diagnostics ?? undefined;
+    target.reasoningParts = payload.reasoning_parts ?? target.reasoningParts ?? [];
+    applyDiagnosticsToMessage(target, payload.model_diagnostics);
     target.streaming = false;
+  }
+
+  function setMessageParts(parts: ChatMessagePart[]) {
+    messageParts.value = parts;
+  }
+
+  function buildRequestMessageParts(question: string): ChatMessagePart[] {
+    const parts = messageParts.value
+      .map((part) => ({ ...part }))
+      .filter((part) => {
+        if (part.type === "image_url") {
+          return Boolean(part.image_url?.trim());
+        }
+        if (part.type === "file_ref") {
+          return Boolean(part.file_id || part.file_name?.trim());
+        }
+        return Boolean(part.text?.trim());
+      });
+    return [{ type: "text", text: question }, ...parts];
   }
 
   async function sendChat() {
@@ -464,12 +551,15 @@ export function useChatWorkspace(topK: Ref<number>) {
     }
 
     clearError();
+    const requestMessageParts = buildRequestMessageParts(question);
     composer.value = "";
+    messageParts.value = [];
 
     const userMessage = reactive<UiMessage>({
       id: createId(),
       role: "user",
       content: question,
+      messageParts: requestMessageParts,
       createdAt: Date.now(),
       sources: [],
       citations: [],
@@ -492,6 +582,9 @@ export function useChatWorkspace(topK: Ref<number>) {
       createdAt: Date.now(),
       sources: [],
       citations: [],
+      reasoningParts: [],
+      toolCalls: [],
+      providerApi: null,
       streaming: true,
     });
     session.messages.push(assistantMessage);
@@ -504,6 +597,7 @@ export function useChatWorkspace(topK: Ref<number>) {
       await chatStream(
         {
           question,
+          message_parts: requestMessageParts,
           conversation_id: session.backendConversationId ?? undefined,
           history,
           top_k: topK.value,
@@ -519,6 +613,26 @@ export function useChatWorkspace(topK: Ref<number>) {
         {
           onDelta: async (delta) => {
             await appendDeltaSmoothly(assistantMessage, delta);
+          },
+          onReasoningDelta: (delta) => {
+            const normalized = delta.trim();
+            if (!normalized) {
+              return;
+            }
+            assistantMessage.reasoningParts = [...(assistantMessage.reasoningParts ?? []), delta];
+          },
+          onToolCallDelta: (payload) => {
+            const toolCall = normalizeToolCall(payload);
+            if (!toolCall) {
+              return;
+            }
+            assistantMessage.toolCalls = [...(assistantMessage.toolCalls ?? []), toolCall];
+          },
+          onUsage: (usage) => {
+            assistantMessage.usage = usage ?? undefined;
+          },
+          onDiagnostics: (diagnostics) => {
+            applyDiagnosticsToMessage(assistantMessage, diagnostics);
           },
           onDone: async (donePayload) => {
             if (donePayload.conversation_id) {
@@ -656,7 +770,9 @@ export function useChatWorkspace(topK: Ref<number>) {
       }
 
       const currentOption = modelOptions.value.find((item) => item.model === selectedModel.value);
-      if (!currentOption?.supports_native_web_search) {
+      if (currentOption?.supports_native_web_search) {
+        nativeWebSearchEnabled.value = true;
+      } else {
         nativeWebSearchEnabled.value = false;
       }
       if (sessions.value.length) {
@@ -706,6 +822,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     messages,
     loading,
     composer,
+    messageParts,
     errorMessage,
     starterPrompts,
     newChat,
@@ -717,6 +834,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     sendChat,
     initialize,
     clearError,
+    setMessageParts,
     setViewport,
     scrollToBottom,
     availableModels,

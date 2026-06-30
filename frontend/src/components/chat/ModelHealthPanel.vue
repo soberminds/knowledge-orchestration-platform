@@ -126,6 +126,18 @@ function thinkingStyleLabel(style?: string | null) {
           <span class="check-pill neutral">
             {{ t("model_health.native_search", { value: option.supports_native_web_search ? t("model_health.yes") : t("model_health.no") }) }}
           </span>
+          <span class="check-pill neutral">
+            {{ t("model_health.tool_calling", { value: option.supports_tool_calling ? t("model_health.yes") : t("model_health.no") }) }}
+          </span>
+          <span class="check-pill neutral">
+            {{ t("model_health.multimodal_input", { value: option.supports_multimodal_input ? t("model_health.yes") : t("model_health.no") }) }}
+          </span>
+          <span class="check-pill neutral">
+            {{ t("model_health.responses_api", { value: option.supports_responses_api ? t("model_health.yes") : t("model_health.no") }) }}
+          </span>
+          <span class="check-pill neutral">
+            {{ t("model_health.responses_streaming", { value: option.supports_responses_streaming ? t("model_health.yes") : t("model_health.no") }) }}
+          </span>
         </div>
 
         <p class="base-url">

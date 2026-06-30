@@ -1,4 +1,4 @@
-import type { CitationRef, CostEstimate, ModelDiagnostics, SourceHit, TokenUsage } from "../api";
+import type { ChatMessagePart, CitationRef, CostEstimate, ModelDiagnostics, SourceHit, TokenUsage } from "../api";
 
 export type WorkspaceTab = "chat" | "documents" | "index" | "search";
 
@@ -14,6 +14,10 @@ export interface UiMessage {
   seqNo?: number;
   role: "user" | "assistant";
   content: string;
+  messageParts?: ChatMessagePart[];
+  reasoningParts?: string[];
+  toolCalls?: Array<{ id?: string; name?: string; arguments?: Record<string, unknown> }>;
+  providerApi?: string | null;
   createdAt: number;
   sources: SourceHit[];
   citations: CitationRef[];

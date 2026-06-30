@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { ChatModelOption, KnowledgeBaseScopeOption, WorkspaceScopeOption } from "../../api";
+import type { ChatMessagePart, ChatModelOption, DocumentInfo, KnowledgeBaseScopeOption, WorkspaceScopeOption } from "../../api";
 import type { UiMessage } from "../../types/chat";
 import { useI18n } from "../../composables/useI18n";
 import type { FolderScopeNode } from "../../utils/documentTree";
@@ -13,6 +13,7 @@ const props = defineProps<{
   messages: UiMessage[];
   loading: boolean;
   composer: string;
+  messageParts: ChatMessagePart[];
   topK: number;
   starterPrompts: string[];
   availableModels: string[];
@@ -26,6 +27,7 @@ const props = defineProps<{
   folderScopeTree: FolderScopeNode[];
   knowledgeBaseOptions: KnowledgeBaseScopeOption[];
   workspaceOptions: WorkspaceScopeOption[];
+  documents: DocumentInfo[];
   nativeWebSearchEnabled: boolean;
   nativeWebSearchSupported: boolean;
   externalWebSearchEnabled: boolean;
@@ -36,6 +38,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: "update:composer", value: string): void;
+  (event: "update:messageParts", value: ChatMessagePart[]): void;
   (event: "update:topK", value: number): void;
   (event: "update:selectedModel", value: string): void;
   (event: "update:thinkingMode", value: "quick" | "deep"): void;
@@ -149,6 +152,7 @@ const modelGroups = computed<ModelGroup[]>(() => {
 
     <ChatComposer
       :model-value="composer"
+      :message-parts="messageParts"
       :loading="loading"
       :starter-prompts="starterPrompts"
       :show-starters="showStarters"
@@ -162,6 +166,7 @@ const modelGroups = computed<ModelGroup[]>(() => {
       :folder-scope-tree="folderScopeTree"
       :knowledge-base-options="knowledgeBaseOptions"
       :workspace-options="workspaceOptions"
+      :documents="documents"
       :native-web-search-enabled="nativeWebSearchEnabled"
       :native-web-search-supported="nativeWebSearchSupported"
       :external-web-search-enabled="externalWebSearchEnabled"
@@ -170,6 +175,7 @@ const modelGroups = computed<ModelGroup[]>(() => {
       :options-loading="optionsLoading"
       :model-health-visible="modelHealthVisible"
       @update:model-value="emit('update:composer', $event)"
+      @update:message-parts="emit('update:messageParts', $event)"
       @update:top-k="emit('update:topK', $event)"
       @update:selected-model="emit('update:selectedModel', $event)"
       @update:thinking-mode="emit('update:thinkingMode', $event)"

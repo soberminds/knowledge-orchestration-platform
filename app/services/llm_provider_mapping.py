@@ -26,6 +26,10 @@ class ModelCapability:
     """Capability snapshot for one model at runtime."""
 
     supports_native_web_search: bool = False
+    supports_tool_calling: bool = True
+    supports_multimodal_input: bool = False
+    supports_responses_api: bool = False
+    supports_responses_streaming: bool = False
     thinking_style: ThinkingStyle = "none"
     supports_reasoning_effort: bool = False
     deep_reasoning_effort: str = "high"
@@ -38,6 +42,10 @@ class CapabilityRegistry:
 
     _ALLOWED_OVERRIDE_KEYS = {
         "supports_native_web_search",
+        "supports_tool_calling",
+        "supports_multimodal_input",
+        "supports_responses_api",
+        "supports_responses_streaming",
         "thinking_style",
         "supports_reasoning_effort",
         "deep_reasoning_effort",
@@ -52,9 +60,14 @@ class CapabilityRegistry:
         qwen_deep_thinking_budget: int,
         deepseek_deep_reasoning_effort: str,
     ) -> None:
+        self._qwen_deep_thinking_budget = max(1, qwen_deep_thinking_budget)
         self._provider_defaults: dict[str, ModelCapability] = {
             "deepseek": ModelCapability(
                 supports_native_web_search=False,
+                supports_tool_calling=True,
+                supports_multimodal_input=False,
+                supports_responses_api=False,
+                supports_responses_streaming=False,
                 thinking_style="deepseek",
                 supports_reasoning_effort=True,
                 deep_reasoning_effort=deepseek_deep_reasoning_effort or "high",
@@ -63,11 +76,15 @@ class CapabilityRegistry:
             ),
             "qwen": ModelCapability(
                 supports_native_web_search=True,
-                thinking_style="qwen",
+                supports_tool_calling=True,
+                supports_multimodal_input=False,
+                supports_responses_api=False,
+                supports_responses_streaming=False,
+                thinking_style="none",
                 supports_reasoning_effort=False,
                 deep_reasoning_effort="high",
-                supports_thinking_budget=True,
-                deep_thinking_budget=max(1, qwen_deep_thinking_budget),
+                supports_thinking_budget=False,
+                deep_thinking_budget=None,
             ),
         }
         self._overrides = self._parse_overrides(capability_overrides_json)
@@ -76,6 +93,11 @@ class CapabilityRegistry:
         provider_token = provider.strip().lower()
         model_token = model_name.strip().lower()
         base = self._provider_defaults.get(provider_token, ModelCapability())
+        base = self._apply_known_model_defaults(
+            base=base,
+            provider_token=provider_token,
+            model_token=model_token,
+        )
 
         override = self._match_override(model_token)
         if not override:
@@ -110,6 +132,10 @@ class CapabilityRegistry:
                     continue
                 if field_name in {
                     "supports_native_web_search",
+                    "supports_tool_calling",
+                    "supports_multimodal_input",
+                    "supports_responses_api",
+                    "supports_responses_streaming",
                     "supports_reasoning_effort",
                     "supports_thinking_budget",
                 }:
@@ -162,6 +188,63 @@ class CapabilityRegistry:
         payload.update(override)
         return ModelCapability(**payload)
 
+    def _apply_known_model_defaults(
+        self,
+        *,
+        base: ModelCapability,
+        provider_token: str,
+        model_token: str,
+    ) -> ModelCapability:
+        payload = asdict(base)
+
+        if provider_token == "qwen":
+            qwen_visual_prefixes = (
+                "qwen-vl",
+                "qwen-omni",
+                "qwen3-omni",
+                "qwen3.5-omni",
+                "qwen3.6-omni",
+                "qvq",
+                "qwen3.7-plus",
+                "qwen3.7-max",
+            )
+            if model_token.startswith(qwen_visual_prefixes):
+                payload["supports_multimodal_input"] = True
+            qwen_responses_prefixes = (
+                "qwen3.7-plus",
+                "qwen3.7-max",
+                "qwen3.6-plus",
+                "qwen3.6-flash",
+                "qwen3.5-plus",
+                "qwen3.5-flash",
+                "qwen3-max",
+            )
+            if model_token.startswith(qwen_responses_prefixes):
+                payload["supports_responses_api"] = True
+                payload["supports_responses_streaming"] = True
+            qwen_thinking_prefixes = (
+                "qwen3",
+                "qwq",
+                "qvq",
+            )
+            if model_token.startswith(qwen_thinking_prefixes):
+                payload["thinking_style"] = "qwen"
+                payload["supports_thinking_budget"] = True
+                payload["deep_thinking_budget"] = self._qwen_deep_thinking_budget
+
+        if provider_token == "openai":
+            openai_visual_prefixes = (
+                "gpt-4o",
+                "gpt-4.1",
+                "gpt-5",
+                "o3",
+                "o4",
+            )
+            if model_token.startswith(openai_visual_prefixes):
+                payload["supports_multimodal_input"] = True
+
+        return ModelCapability(**payload)
+
 
 class ProviderOptionsAdapter:
     """Build provider-specific request options from canonical intent."""
@@ -204,6 +287,10 @@ class DeepSeekOptionsAdapter(ProviderOptionsAdapter):
 
         if canonical.native_web_search and capability.supports_native_web_search:
             extra_body["enable_search"] = True
+            extra_body["search_options"] = {
+                "forced_search": True,
+                "enable_search_extension": True,
+            }
 
         if extra_body:
             options["extra_body"] = extra_body
@@ -222,15 +309,19 @@ class QwenOptionsAdapter(ProviderOptionsAdapter):
         options = super().build(canonical=canonical, capability=capability)
         extra_body: dict[str, Any] = {}
 
-        if canonical.thinking_mode == "deep":
+        if canonical.thinking_mode == "deep" and capability.supports_thinking_budget:
             extra_body["enable_thinking"] = True
-            if capability.supports_thinking_budget and capability.deep_thinking_budget:
+            if capability.deep_thinking_budget:
                 extra_body["thinking_budget"] = capability.deep_thinking_budget
-        else:
+        elif capability.supports_thinking_budget:
             extra_body["enable_thinking"] = False
 
         if canonical.native_web_search and capability.supports_native_web_search:
             extra_body["enable_search"] = True
+            extra_body["search_options"] = {
+                "forced_search": True,
+                "enable_search_extension": True,
+            }
 
         if extra_body:
             options["extra_body"] = extra_body

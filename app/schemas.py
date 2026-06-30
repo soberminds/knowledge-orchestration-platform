@@ -14,10 +14,22 @@ class ChatHistoryItem(BaseModel):
     content: str = Field(min_length=1)
 
 
+class ChatMessagePart(BaseModel):
+    """One multimodal message part used by chat requests."""
+
+    type: Literal["text", "image_url", "file_ref"] = "text"
+    text: str | None = Field(default=None, max_length=4000)
+    image_url: str | None = Field(default=None, max_length=3_000_000)
+    file_id: int | None = Field(default=None, ge=1)
+    file_name: str | None = Field(default=None, max_length=255)
+    mime_type: str | None = Field(default=None, max_length=128)
+
+
 class ChatRequest(BaseModel):
     """Request payload for /api/chat and /api/chat/stream."""
 
     question: str = Field(min_length=1, max_length=4000)
+    message_parts: list[ChatMessagePart] = Field(default_factory=list, max_length=20)
     conversation_id: int | None = Field(default=None, ge=1)
     history: list[ChatHistoryItem] = Field(default_factory=list)
     top_k: int | None = Field(default=None, ge=1, le=20)
@@ -106,8 +118,11 @@ class ModelDiagnostics(BaseModel):
     native_web_search_used: bool = False
     external_web_search_used: bool = False
     thinking_mode: str | None = None
+    provider_api: str | None = None
     option_fallback_used: bool = False
     warnings: list[str] = Field(default_factory=list)
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    capabilities: dict[str, Any] | None = None
 
 
 class ChatResponse(BaseModel):
@@ -130,6 +145,10 @@ class ChatModelOption(BaseModel):
     model: str
     provider: str
     supports_native_web_search: bool = False
+    supports_tool_calling: bool = True
+    supports_multimodal_input: bool = False
+    supports_responses_api: bool = False
+    supports_responses_streaming: bool = False
     thinking_style: str | None = None
     deep_reasoning_effort: str | None = None
     deep_thinking_budget: int | None = None
@@ -228,6 +247,7 @@ class ChatMessageRecord(BaseModel):
     sender_user_id: int | None = None
     role: Literal["system", "user", "assistant", "tool"]
     content: str
+    message_parts: list[ChatMessagePart] = Field(default_factory=list)
     seq_no: int
     created_at: str
     model: str | None = None
@@ -235,6 +255,7 @@ class ChatMessageRecord(BaseModel):
     sources: list[SourceHit] = Field(default_factory=list)
     usage: TokenUsage | None = None
     model_diagnostics: ModelDiagnostics | None = None
+    reasoning_parts: list[str] = Field(default_factory=list)
 
 
 class ChatMessagePageResponse(BaseModel):

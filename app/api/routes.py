@@ -170,8 +170,17 @@ def _to_model_diagnostics(payload: dict | None) -> ModelDiagnostics | None:
             native_web_search_used=bool(payload.get("native_web_search_used", False)),
             external_web_search_used=bool(payload.get("external_web_search_used", False)),
             thinking_mode=str(payload.get("thinking_mode") or "") or None,
+            provider_api=str(payload.get("provider_api") or "") or None,
             option_fallback_used=bool(payload.get("option_fallback_used", False)),
             warnings=[str(item) for item in payload.get("warnings", []) if item],
+            tool_calls=[
+                dict(item)
+                for item in payload.get("tool_calls", [])
+                if isinstance(item, dict)
+            ],
+            capabilities=dict(payload.get("capabilities"))
+            if isinstance(payload.get("capabilities"), dict)
+            else None,
         )
     except Exception:
         return None
@@ -417,14 +426,68 @@ def _save_chat_memory_turn(
             question=request.question,
             answer=str(result.get("answer") or ""),
             model_name=str(result.get("model") or request.model or "") or None,
+            message_parts=[item.model_dump(exclude_none=True) for item in request.message_parts],
             citations=_citation_refs_payload(result.get("citations", [])),
             usage=result.get("usage"),
             model_diagnostics=result.get("model_diagnostics"),
+            reasoning_parts=[str(item) for item in result.get("reasoning_parts", []) if str(item).strip()],
             rewritten_question=str(result.get("rewritten_question") or ""),
             question_mode=str(result.get("question_mode") or "") or None,
         )
     except Exception as exc:
         logger.warning("Failed to save chat memory turn: %s", exc)
+
+
+def _streaming_event_payload(
+    event: dict[str, Any],
+    *,
+    conversation_id: int | None,
+    request: ChatRequest,
+    service: KnowledgeBaseService,
+) -> dict[str, Any]:
+    event_type = str(event.get("type") or "")
+
+    # Backward-compatible SSE event for the current frontend.
+    if event_type == "content_delta":
+        return {"type": "delta", "delta": str(event.get("content_delta") or "")}
+
+    if event_type == "reasoning_delta":
+        return {"type": "reasoning_delta", "delta": str(event.get("reasoning_delta") or "")}
+
+    if event_type == "tool_call_delta":
+        return {
+            "type": "tool_call_delta",
+            "tool_call_delta": event.get("tool_call_delta") or {},
+        }
+
+    if event_type == "usage":
+        usage = _to_token_usage(event.get("usage"))
+        return {"type": "usage", "usage": usage.model_dump() if usage else None}
+
+    if event_type == "diagnostics":
+        return {"type": "diagnostics", "model_diagnostics": event.get("diagnostics")}
+
+    if event_type == "done":
+        usage = _to_token_usage(event.get("usage"))
+        cost_estimate = _to_cost_estimate(event.get("cost_estimate"))
+        return {
+            "type": "done",
+            "answer": event.get("answer", ""),
+            "conversation_id": conversation_id,
+            "rewritten_question": event.get("rewritten_question", ""),
+            "sources": _source_hits_payload(event.get("hits", [])),
+            "citations": _citation_refs_payload(event.get("citations", [])),
+            "model": event.get("model", request.model or service.settings.deepseek_model),
+            "usage": usage.model_dump() if usage else None,
+            "cost_estimate": cost_estimate.model_dump() if cost_estimate else None,
+            "model_diagnostics": event.get("model_diagnostics"),
+            "reasoning_parts": [str(item) for item in event.get("reasoning_parts", []) if str(item).strip()],
+        }
+
+    if event_type == "error":
+        return {"type": "error", "error": str(event.get("error") or "Stream error.")}
+
+    return {"type": "error", "error": f"Unknown stream event type: {event_type or '(empty)'}"}
 
 
 def _resolve_file_path(path_value: str) -> Path:
@@ -1493,17 +1556,18 @@ async def chat(
     try:
         result = await run_in_threadpool(
             service.answer,
-            request.question,
-            effective_history,
-            request.top_k,
-            request.model,
-            request.thinking_mode,
-            request.web_search,
-            request.native_web_search,
-            request.external_web_search,
-            request.scope_type,
-            request.scope_id,
-            request.workspace_key,
+            question=request.question,
+            history=effective_history,
+            top_k=request.top_k,
+            model=request.model,
+            thinking_mode=request.thinking_mode,
+            web_search=request.web_search,
+            native_web_search=request.native_web_search,
+            external_web_search=request.external_web_search,
+            scope_type=request.scope_type,
+            scope_id=request.scope_id,
+            workspace_key=request.workspace_key,
+            message_parts=request.message_parts,
         )
     except ModelUnavailableError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1545,33 +1609,26 @@ async def chat_stream(
     def event_stream() -> Iterator[str]:
         try:
             for event in service.stream_answer(
-                request.question,
-                effective_history,
-                request.top_k,
-                request.model,
-                request.thinking_mode,
-                request.web_search,
-                request.native_web_search,
-                request.external_web_search,
-                request.scope_type,
-                request.scope_id,
-                request.workspace_key,
+                question=request.question,
+                history=effective_history,
+                top_k=request.top_k,
+                model=request.model,
+                thinking_mode=request.thinking_mode,
+                web_search=request.web_search,
+                native_web_search=request.native_web_search,
+                external_web_search=request.external_web_search,
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+                workspace_key=request.workspace_key,
+                message_parts=request.message_parts,
             ):
+                payload = _streaming_event_payload(
+                    event,
+                    conversation_id=conversation_id,
+                    request=request,
+                    service=service,
+                )
                 if event.get("type") == "done":
-                    usage = _to_token_usage(event.get("usage"))
-                    cost_estimate = _to_cost_estimate(event.get("cost_estimate"))
-                    payload = {
-                        "type": "done",
-                        "answer": event.get("answer", ""),
-                        "conversation_id": conversation_id,
-                        "rewritten_question": event.get("rewritten_question", ""),
-                        "sources": _source_hits_payload(event.get("hits", [])),
-                        "citations": _citation_refs_payload(event.get("citations", [])),
-                        "model": event.get("model", request.model or service.settings.deepseek_model),
-                        "usage": usage.model_dump() if usage else None,
-                        "cost_estimate": cost_estimate.model_dump() if cost_estimate else None,
-                        "model_diagnostics": event.get("model_diagnostics"),
-                    }
                     _save_chat_memory_turn(
                         chat_memory,
                         conversation_id=conversation_id,
@@ -1583,11 +1640,10 @@ async def chat_stream(
                             "model": payload["model"],
                             "usage": event.get("usage"),
                             "model_diagnostics": event.get("model_diagnostics"),
+                            "reasoning_parts": event.get("reasoning_parts", []),
                         },
                     )
-                    yield _sse_payload(payload)
-                    continue
-                yield _sse_payload(event)
+                yield _sse_payload(payload)
         except ModelUnavailableError as exc:
             yield _sse_payload({"type": "error", "error": str(exc)})
         except Exception as exc:

@@ -92,6 +92,7 @@ class Settings:
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     qwen_api_key: str = os.getenv("QWEN_API_KEY", "")
     qwen_base_url: str = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    qwen_responses_api_enabled: bool = _env_bool("QWEN_RESPONSES_API_ENABLED", False)
     zai_api_key: str = os.getenv("ZAI_API_KEY", "")
     zai_base_url: str = os.getenv("ZAI_BASE_URL", "https://api.z.ai/api/paas/v4")
     kimi_api_key: str = os.getenv("KIMI_API_KEY", "")

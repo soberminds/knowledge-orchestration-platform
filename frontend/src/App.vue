@@ -200,7 +200,7 @@ function handleUserMenuCommand(command: string | number | object) {
     return;
   }
   if (command === "contact") {
-    ElMessage.info("联系客服：微信 ");
+    ElMessage.info("联系客服：微信 Starry-Stream");
   }
 }
 
@@ -654,7 +654,7 @@ onMounted(async () => {
                   </el-dropdown-item>
                   <el-dropdown-item command="contact" disabled>
                     <el-icon><Service /></el-icon>
-                    联系客服：微信 
+                    联系客服：微信 Starry-Stream
                   </el-dropdown-item>
                   <el-dropdown-item command="logout" :disabled="auth.loading.value" divided class="is-logout">
                     <el-icon><Switch /></el-icon>
@@ -677,6 +677,7 @@ onMounted(async () => {
         :messages="chatWorkspace.messages.value"
         :loading="chatWorkspace.loading.value"
         :composer="chatWorkspace.composer.value"
+        :message-parts="chatWorkspace.messageParts.value"
         :top-k="topK"
         :starter-prompts="chatWorkspace.starterPrompts.value"
         :available-models="chatWorkspace.availableModels.value"
@@ -690,6 +691,7 @@ onMounted(async () => {
         :folder-scope-tree="dashboard.folderScopeTree.value"
         :knowledge-base-options="chatWorkspace.knowledgeBaseOptions.value"
         :workspace-options="chatWorkspace.workspaceOptions.value"
+        :documents="dashboard.documents.value"
         :native-web-search-enabled="chatWorkspace.nativeWebSearchEnabled.value"
         :native-web-search-supported="chatWorkspace.selectedModelSupportsNativeSearch.value"
         :external-web-search-enabled="chatWorkspace.externalWebSearchEnabled.value"
@@ -697,6 +699,7 @@ onMounted(async () => {
         :options-loading="chatWorkspace.optionsLoading.value"
         :options-last-checked-at="chatWorkspace.optionsLastCheckedAt.value"
         @update:composer="chatWorkspace.composer.value = $event"
+        @update:message-parts="chatWorkspace.setMessageParts($event)"
         @update:top-k="setTopK"
         @update:selected-model="chatWorkspace.setSelectedModel($event)"
         @update:thinking-mode="chatWorkspace.thinkingMode.value = $event"

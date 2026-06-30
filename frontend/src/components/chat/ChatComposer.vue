@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { ChatModelOption, KnowledgeBaseScopeOption, WorkspaceScopeOption } from "../../api";
+import { computed, ref } from "vue";
+import { Close, Link, Paperclip, Picture } from "@element-plus/icons-vue";
+import type { ChatMessagePart, ChatModelOption, DocumentInfo, KnowledgeBaseScopeOption, WorkspaceScopeOption } from "../../api";
 import { useI18n } from "../../composables/useI18n";
 import type { FolderScopeNode } from "../../utils/documentTree";
 
 type ChatScopeType = "all" | "folder" | "kb" | "workspace";
+const MAX_PASTED_IMAGE_BYTES = 2 * 1024 * 1024;
 
 interface ModelGroup {
   provider: string;
@@ -13,6 +15,7 @@ interface ModelGroup {
 
 const props = defineProps<{
   modelValue: string;
+  messageParts: ChatMessagePart[];
   loading: boolean;
   starterPrompts: string[];
   showStarters: boolean;
@@ -26,6 +29,7 @@ const props = defineProps<{
   folderScopeTree: FolderScopeNode[];
   knowledgeBaseOptions: KnowledgeBaseScopeOption[];
   workspaceOptions: WorkspaceScopeOption[];
+  documents: DocumentInfo[];
   nativeWebSearchEnabled: boolean;
   nativeWebSearchSupported: boolean;
   externalWebSearchEnabled: boolean;
@@ -37,6 +41,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: "update:modelValue", value: string): void;
+  (event: "update:message-parts", value: ChatMessagePart[]): void;
   (event: "update:top-k", value: number): void;
   (event: "update:selected-model", value: string): void;
   (event: "update:thinking-mode", value: "quick" | "deep"): void;
@@ -53,6 +58,8 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const imageUrlDraft = ref("");
+const pastedImageError = ref("");
 
 const totalModelCount = computed(() => props.modelGroups.reduce((sum, group) => sum + group.models.length, 0));
 const availableModelCount = computed(() =>
@@ -124,6 +131,60 @@ const webSummary = computed(() => {
   const enabled = props.nativeWebSearchEnabled || props.externalWebSearchEnabled;
   return enabled ? t("chat.web_on") : t("chat.web_off");
 });
+
+const fileOptions = computed(() =>
+  props.documents
+    .filter((item) => !item.is_directory)
+    .map((item) => ({
+      ...item,
+      label: item.display_path || item.path || item.name || `#${item.id ?? ""}`,
+    })),
+);
+
+const selectedFileIds = computed(() =>
+  props.messageParts
+    .filter((part) => part.type === "file_ref" && part.file_id != null)
+    .map((part) => Number(part.file_id)),
+);
+
+const attachmentSummary = computed(() => {
+  const count = props.messageParts.filter((part) => part.type !== "text").length;
+  return count > 0 ? t("chat.attachments_count", { count }) : t("chat.attachments");
+});
+
+const attachmentChips = computed(() =>
+  props.messageParts
+    .filter((part) => part.type !== "text")
+    .map((part, index) => ({
+      key: buildAttachmentKey(part, index),
+      label:
+        part.type === "file_ref"
+          ? part.file_name || `#${part.file_id ?? ""}`
+          : formatImagePartLabel(part.image_url || ""),
+      type: part.type,
+      index,
+    })),
+);
+
+function buildAttachmentKey(part: ChatMessagePart, index: number): string {
+  if (part.type === "file_ref") {
+    return `${part.type}-${part.file_id ?? part.file_name ?? index}`;
+  }
+  if (part.type === "image_url" && part.image_url?.startsWith("data:image/")) {
+    return `${part.type}-pasted-${index}-${part.image_url.length}`;
+  }
+  return `${part.type}-${part.image_url ?? index}`;
+}
+
+function formatImagePartLabel(imageUrl: string): string {
+  if (!imageUrl) {
+    return t("chat.attachment_image");
+  }
+  if (imageUrl.startsWith("data:image/")) {
+    return t("chat.attachment_pasted_image");
+  }
+  return imageUrl;
+}
 
 function modelDescription(model: ChatModelOption): string {
   if (!model.available) {
@@ -224,6 +285,90 @@ function normalizeTopK(value: unknown): number {
   }
   return Math.max(1, Math.min(10, Math.round(parsed)));
 }
+
+function emitParts(parts: ChatMessagePart[]) {
+  emit("update:message-parts", parts);
+}
+
+function handleFileRefsChange(value: unknown) {
+  const ids = Array.isArray(value)
+    ? value.map((item) => Number(item)).filter((item) => Number.isFinite(item) && item > 0)
+    : [];
+  const nonFileParts = props.messageParts.filter((part) => part.type !== "file_ref");
+  const fileParts = ids
+    .map((id) => fileOptions.value.find((item) => item.id === id))
+    .filter((item): item is DocumentInfo & { label: string } => Boolean(item))
+    .map((item) => ({
+      type: "file_ref" as const,
+      file_id: item.id ?? null,
+      file_name: item.display_path || item.path || item.name || null,
+      mime_type: item.extension || null,
+    }));
+  emitParts([...nonFileParts, ...fileParts]);
+}
+
+function addImageUrl() {
+  const imageUrl = imageUrlDraft.value.trim();
+  if (!imageUrl) {
+    return;
+  }
+  emitParts([...props.messageParts, { type: "image_url", image_url: imageUrl }]);
+  imageUrlDraft.value = "";
+  pastedImageError.value = "";
+}
+
+function addPastedImage(file: File) {
+  pastedImageError.value = "";
+  if (!file.type.startsWith("image/")) {
+    return;
+  }
+  if (file.size > MAX_PASTED_IMAGE_BYTES) {
+    pastedImageError.value = t("chat.attachment_paste_too_large", { size: "2MB" });
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = typeof reader.result === "string" ? reader.result : "";
+    if (!dataUrl) {
+      pastedImageError.value = t("chat.attachment_paste_failed");
+      return;
+    }
+    emitParts([...props.messageParts, { type: "image_url", image_url: dataUrl }]);
+  };
+  reader.onerror = () => {
+    pastedImageError.value = t("chat.attachment_paste_failed");
+  };
+  reader.readAsDataURL(file);
+}
+
+function handlePaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files ?? []);
+  const imageFile = files.find((file) => file.type.startsWith("image/"));
+  if (!imageFile) {
+    return;
+  }
+  event.preventDefault();
+  addPastedImage(imageFile);
+}
+
+function removeAttachment(indexInFiltered: number) {
+  const attachments = attachmentChips.value;
+  const target = attachments[indexInFiltered];
+  if (!target) {
+    return;
+  }
+  let currentAttachmentIndex = -1;
+  emitParts(
+    props.messageParts.filter((part) => {
+      if (part.type === "text") {
+        return true;
+      }
+      currentAttachmentIndex += 1;
+      return currentAttachmentIndex !== indexInFiltered;
+    }),
+  );
+}
 </script>
 
 <template>
@@ -247,9 +392,84 @@ function normalizeTopK(value: unknown): number {
         :placeholder="t('chat.input_placeholder')"
         @update:model-value="$emit('update:modelValue', String($event))"
         @keydown.enter.exact.prevent="$emit('send')"
+        @paste="handlePaste"
       />
+      <div v-if="attachmentChips.length" class="attachment-strip">
+        <span
+          v-for="(chip, index) in attachmentChips"
+          :key="chip.key"
+          class="attachment-chip"
+          :title="chip.label"
+        >
+          <el-icon v-if="chip.type === 'file_ref'"><Paperclip /></el-icon>
+          <el-icon v-else><Picture /></el-icon>
+          <span>{{ chip.label }}</span>
+          <button type="button" :aria-label="t('chat.remove_attachment')" @click="removeAttachment(index)">
+            <el-icon><Close /></el-icon>
+          </button>
+        </span>
+      </div>
       <div class="composer-actions">
-        <span class="helper-text">{{ t("chat.helper_text") }}</span>
+        <div class="composer-left-actions">
+          <el-popover placement="top-start" :width="380" trigger="click" popper-class="chat-settings-popper">
+            <template #reference>
+              <button class="composer-tool-button" type="button">
+                <el-icon><Paperclip /></el-icon>
+                <span>{{ attachmentSummary }}</span>
+              </button>
+            </template>
+            <section class="settings-panel attachment-panel">
+              <header class="settings-head">
+                <strong>{{ t("chat.attachments") }}</strong>
+              </header>
+
+              <div class="attachment-field">
+                <label>{{ t("chat.attachment_files") }}</label>
+                <el-select
+                  :model-value="selectedFileIds"
+                  multiple
+                  filterable
+                  clearable
+                  collapse-tags
+                  collapse-tags-tooltip
+                  size="small"
+                  class="scope-select"
+                  :placeholder="t('chat.attachment_files_placeholder')"
+                  @update:model-value="handleFileRefsChange"
+                >
+                  <el-option
+                    v-for="item in fileOptions"
+                    :key="item.id ?? item.path"
+                    :label="item.label"
+                    :value="item.id"
+                    :disabled="item.id == null"
+                  />
+                </el-select>
+                <p class="hint-line">{{ t("chat.attachment_files_hint") }}</p>
+              </div>
+
+              <div class="attachment-field">
+                <label>{{ t("chat.attachment_image_url") }}</label>
+                <div class="attachment-image-row">
+                  <el-input
+                    v-model="imageUrlDraft"
+                    size="small"
+                    clearable
+                    :placeholder="t('chat.attachment_image_placeholder')"
+                    @keydown.enter.prevent="addImageUrl"
+                  />
+                  <el-button size="small" class="link-btn" @click="addImageUrl">
+                    <el-icon><Link /></el-icon>
+                    {{ t("chat.attachment_add") }}
+                  </el-button>
+                </div>
+                <p class="hint-line">{{ t("chat.attachment_image_hint") }}</p>
+                <p v-if="pastedImageError" class="hint-line error-line">{{ pastedImageError }}</p>
+              </div>
+            </section>
+          </el-popover>
+          <span class="helper-text">{{ t("chat.helper_text") }}</span>
+        </div>
         <el-button class="send-btn" :loading="loading" @click="$emit('send')">
           {{ t("chat.send") }}
         </el-button>
@@ -533,9 +753,80 @@ function normalizeTopK(value: unknown): number {
   gap: 12px;
 }
 
+.composer-left-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .helper-text {
   color: var(--text-muted);
   font-size: 0.84rem;
+}
+
+.composer-tool-button {
+  border: 1px solid var(--border);
+  background: var(--surface-solid);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 6px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.composer-tool-button:hover {
+  border-color: var(--accent-border);
+  background: var(--surface-hover);
+  color: var(--accent-strong);
+}
+
+.attachment-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 2px 2px;
+}
+
+.attachment-chip {
+  max-width: min(320px, 100%);
+  border: 1px solid var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-radius: 999px;
+  padding: 4px 6px 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+}
+
+.attachment-chip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip button {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.attachment-chip button:hover {
+  background: rgba(15, 118, 110, 0.14);
 }
 
 .send-btn {
@@ -681,6 +972,27 @@ function normalizeTopK(value: unknown): number {
   line-height: 1.2;
 }
 
+.attachment-panel {
+  gap: 14px;
+}
+
+.attachment-field {
+  display: grid;
+  gap: 8px;
+}
+
+.attachment-field label {
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.attachment-image-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
 .settings-models {
   border-top: 1px solid var(--border);
   padding-top: 10px;
@@ -762,6 +1074,10 @@ function normalizeTopK(value: unknown): number {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.8rem;
+}
+
+.error-line {
+  color: #b14242;
 }
 
 @media (max-width: 720px) {

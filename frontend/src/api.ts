@@ -3,6 +3,17 @@ export interface HistoryItem {
   content: string;
 }
 
+export type ChatMessagePartType = "text" | "image_url" | "file_ref";
+
+export interface ChatMessagePart {
+  type: ChatMessagePartType;
+  text?: string | null;
+  image_url?: string | null;
+  file_id?: number | null;
+  file_name?: string | null;
+  mime_type?: string | null;
+}
+
 export interface UserProfile {
   id: number;
   username: string;
@@ -91,8 +102,18 @@ export interface ModelDiagnostics {
   native_web_search_used: boolean;
   external_web_search_used: boolean;
   thinking_mode?: string | null;
+  provider_api?: string | null;
   option_fallback_used: boolean;
   warnings: string[];
+  tool_calls?: Record<string, unknown>[];
+  capabilities?: {
+    supports_native_web_search?: boolean;
+    supports_tool_calling?: boolean;
+    supports_multimodal_input?: boolean;
+    supports_responses_api?: boolean;
+    supports_responses_streaming?: boolean;
+    thinking_style?: string | null;
+  } | null;
 }
 
 export type ThinkingMode = "quick" | "deep";
@@ -101,6 +122,10 @@ export interface ChatModelOption {
   model: string;
   provider: string;
   supports_native_web_search?: boolean;
+  supports_tool_calling?: boolean;
+  supports_multimodal_input?: boolean;
+  supports_responses_api?: boolean;
+  supports_responses_streaming?: boolean;
   thinking_style?: string | null;
   deep_reasoning_effort?: string | null;
   deep_thinking_budget?: number | null;
@@ -167,6 +192,7 @@ export interface ChatMessageRecord {
   sender_user_id?: number | null;
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+  message_parts?: ChatMessagePart[];
   seq_no: number;
   created_at: string;
   model?: string | null;
@@ -174,6 +200,7 @@ export interface ChatMessageRecord {
   sources: SourceHit[];
   usage?: TokenUsage | null;
   model_diagnostics?: ModelDiagnostics | null;
+  reasoning_parts?: string[];
 }
 
 export interface ChatMessagePageResponse {
@@ -187,6 +214,7 @@ export interface ChatMessagePageResponse {
 
 export interface ChatRequestPayload {
   question: string;
+  message_parts?: ChatMessagePart[];
   conversation_id?: number | null;
   history: HistoryItem[];
   top_k?: number;
@@ -344,6 +372,7 @@ export interface ChatStreamDoneEvent {
   usage?: TokenUsage | null;
   cost_estimate?: CostEstimate | null;
   model_diagnostics?: ModelDiagnostics | null;
+  reasoning_parts?: string[];
 }
 
 interface ChatStreamErrorEvent {
@@ -351,10 +380,41 @@ interface ChatStreamErrorEvent {
   error: string;
 }
 
-type ChatStreamEvent = ChatStreamDeltaEvent | ChatStreamDoneEvent | ChatStreamErrorEvent;
+export interface ChatStreamReasoningDeltaEvent {
+  type: "reasoning_delta";
+  delta: string;
+}
+
+export interface ChatStreamToolCallDeltaEvent {
+  type: "tool_call_delta";
+  tool_call_delta: Record<string, unknown>;
+}
+
+export interface ChatStreamUsageEvent {
+  type: "usage";
+  usage?: TokenUsage | null;
+}
+
+export interface ChatStreamDiagnosticsEvent {
+  type: "diagnostics";
+  model_diagnostics?: ModelDiagnostics | null;
+}
+
+type ChatStreamEvent =
+  | ChatStreamDeltaEvent
+  | ChatStreamDoneEvent
+  | ChatStreamErrorEvent
+  | ChatStreamReasoningDeltaEvent
+  | ChatStreamToolCallDeltaEvent
+  | ChatStreamUsageEvent
+  | ChatStreamDiagnosticsEvent;
 
 export interface ChatStreamHandlers {
   onDelta?: (delta: string) => void | Promise<void>;
+  onReasoningDelta?: (delta: string) => void | Promise<void>;
+  onToolCallDelta?: (payload: Record<string, unknown>) => void | Promise<void>;
+  onUsage?: (usage?: TokenUsage | null) => void | Promise<void>;
+  onDiagnostics?: (diagnostics?: ModelDiagnostics | null) => void | Promise<void>;
   onDone?: (payload: ChatStreamDoneEvent) => void | Promise<void>;
   onError?: (message: string) => void | Promise<void>;
 }
@@ -596,6 +656,22 @@ export async function chatStream(
       if (event.type === "done") {
         receivedDone = true;
         await handlers.onDone?.(event);
+        continue;
+      }
+      if (event.type === "reasoning_delta") {
+        await handlers.onReasoningDelta?.(event.delta);
+        continue;
+      }
+      if (event.type === "tool_call_delta") {
+        await handlers.onToolCallDelta?.(event.tool_call_delta);
+        continue;
+      }
+      if (event.type === "usage") {
+        await handlers.onUsage?.(event.usage);
+        continue;
+      }
+      if (event.type === "diagnostics") {
+        await handlers.onDiagnostics?.(event.model_diagnostics);
         continue;
       }
       await handlers.onError?.(event.error);

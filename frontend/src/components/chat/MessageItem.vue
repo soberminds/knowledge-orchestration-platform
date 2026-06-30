@@ -29,6 +29,53 @@ const officeViewerRef = ref<InstanceType<typeof OnlyOfficeEditor> | null>(null);
 
 const { t } = useI18n();
 
+const assistantReasoningParts = computed(() => (props.message.role === "assistant" ? props.message.reasoningParts ?? [] : []));
+function normalizeReasoningMarkdown(text: string) {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/([：:])\s+(\d+\.\s+\*\*)/g, "$1\n\n$2")
+    .replace(/([^\n])\s+(\d+\.\s+\*\*)/g, "$1\n\n$2")
+    .replace(/\n[ \t]{2,}([*-]\s+)/g, "\n$1")
+    .trim();
+}
+
+const assistantReasoningText = computed(() => {
+  const parts = assistantReasoningParts.value
+    .map((part) => String(part || ""))
+    .filter((part) => part.trim().length > 0);
+  if (!parts.length) {
+    return "";
+  }
+  return normalizeReasoningMarkdown(parts.join(""));
+});
+const assistantToolCalls = computed(() => (props.message.role === "assistant" ? props.message.toolCalls ?? [] : []));
+const userAttachments = computed(() =>
+  props.message.role === "user" ? (props.message.messageParts ?? []).filter((part) => part.type !== "text") : [],
+);
+const assistantProviderApi = computed(() => {
+  if (props.message.role !== "assistant") {
+    return "";
+  }
+  return props.message.providerApi || props.message.modelDiagnostics?.provider_api || "";
+});
+const assistantDiagnosticsChips = computed(() => {
+  if (props.message.role !== "assistant") {
+    return [];
+  }
+  const chips: string[] = [];
+  if (assistantProviderApi.value) {
+    chips.push(t("message.provider_api", { api: assistantProviderApi.value }));
+  }
+  if (props.message.modelDiagnostics?.option_fallback_used) {
+    chips.push(t("message.diagnostics_fallback"));
+  }
+  if (props.message.modelDiagnostics?.thinking_mode) {
+    chips.push(t("message.diagnostics_thinking", { mode: props.message.modelDiagnostics.thinking_mode }));
+  }
+  return chips;
+});
+
 const citationItems = computed<CitationRef[]>(() => {
   if (props.message.citations.length) {
     return props.message.citations;
@@ -131,6 +178,24 @@ const diagnosticsWarnings = computed(() => {
   return props.message.modelDiagnostics.warnings;
 });
 
+function formatToolArguments(argumentsValue?: Record<string, unknown>) {
+  if (!argumentsValue || !Object.keys(argumentsValue).length) {
+    return "";
+  }
+  try {
+    return JSON.stringify(argumentsValue, null, 2);
+  } catch {
+    return "";
+  }
+}
+
+function toolCallTitle(index: number, name?: string) {
+  return t("message.tool_call_item", {
+    index: index + 1,
+    name: name || t("message.tool_call_unknown"),
+  });
+}
+
 function citationElementId(label: string) {
   return `${props.message.id}-cite-${label}`;
 }
@@ -141,6 +206,17 @@ function citationDisplayPath(citation: CitationRef) {
 
 function sourceDisplayPath(source: { display_path?: string | null; source: string }) {
   return source.display_path || source.source;
+}
+
+function attachmentLabel(part: { type: string; file_id?: number | null; file_name?: string | null; image_url?: string | null }) {
+  if (part.type === "file_ref") {
+    return part.file_name || `#${part.file_id ?? ""}`;
+  }
+  const imageUrl = String(part.image_url || "");
+  if (imageUrl.startsWith("data:image/")) {
+    return t("chat.attachment_pasted_image");
+  }
+  return imageUrl || t("message.attachment_image");
 }
 
 function resetTextViewerState() {
@@ -225,6 +301,15 @@ async function focusCitation(label: string) {
         </template>
         <template v-else>
           <p class="user-text">{{ message.content }}</p>
+          <div v-if="userAttachments.length" class="user-attachment-strip">
+            <span
+              v-for="(part, index) in userAttachments"
+              :key="`${message.id}-attachment-${index}`"
+              class="user-attachment-chip"
+            >
+              {{ attachmentLabel(part) }}
+            </span>
+          </div>
         </template>
         <span v-if="message.streaming" class="stream-cursor">|</span>
       </div>
@@ -240,9 +325,32 @@ async function focusCitation(label: string) {
         <span v-if="(costSummary || costHintSummary) && diagnosticsSummary">{{ t("message.separator") }}</span>
         <span v-if="diagnosticsSummary">{{ diagnosticsSummary }}</span>
       </p>
+      <div v-if="assistantDiagnosticsChips.length" class="diagnostics-strip">
+        <span v-for="chip in assistantDiagnosticsChips" :key="chip" class="diagnostics-chip">{{ chip }}</span>
+      </div>
       <ul v-if="diagnosticsWarnings.length" class="diagnostics-warnings">
         <li v-for="warning in diagnosticsWarnings" :key="warning">{{ warning }}</li>
       </ul>
+
+      <details v-if="assistantReasoningText" class="analysis-details">
+        <summary>{{ t("message.reasoning_summary", { count: assistantReasoningParts.length }) }}</summary>
+        <div class="analysis-body">
+          <MarkdownRenderer :content="assistantReasoningText" />
+        </div>
+      </details>
+
+      <details v-if="assistantToolCalls.length" class="analysis-details">
+        <summary>{{ t("message.tool_calls_summary", { count: assistantToolCalls.length }) }}</summary>
+        <ul class="tool-call-list">
+          <li v-for="(toolCall, index) in assistantToolCalls" :key="`${message.id}-tool-${index}`" class="tool-call-item">
+            <div class="tool-call-head">
+              <strong>{{ toolCallTitle(index, toolCall.name) }}</strong>
+              <span v-if="toolCall.id" class="tool-call-id">ID {{ toolCall.id }}</span>
+            </div>
+            <pre v-if="formatToolArguments(toolCall.arguments)" class="tool-call-args">{{ formatToolArguments(toolCall.arguments) }}</pre>
+          </li>
+        </ul>
+      </details>
 
       <details v-if="message.sources.length" ref="sourceDetailsRef" class="source-details">
         <summary>{{ t("message.sources_count", { count: message.sources.length }) }}</summary>
@@ -399,6 +507,26 @@ async function focusCitation(label: string) {
   white-space: pre-wrap;
 }
 
+.user-attachment-strip {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.user-attachment-chip {
+  max-width: min(360px, 100%);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .stream-cursor {
   display: inline-block;
   margin-left: 2px;
@@ -417,11 +545,138 @@ async function focusCitation(label: string) {
   font-size: 0.8rem;
 }
 
+.diagnostics-strip {
+  margin: 0.4rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.diagnostics-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(20, 184, 166, 0.1);
+  color: #0f766e;
+  border: 1px solid rgba(20, 184, 166, 0.16);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
 .diagnostics-warnings {
   margin: 0.35rem 0 0;
   padding-left: 1rem;
   color: #b45309;
   font-size: 0.8rem;
+}
+
+.analysis-details {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(20, 184, 166, 0.12);
+  border-radius: 12px;
+  background: rgba(236, 253, 249, 0.45);
+}
+
+.analysis-details summary {
+  cursor: pointer;
+  color: #0f766e;
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.analysis-body {
+  margin-top: 8px;
+  color: var(--text);
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.analysis-body :deep(.markdown-body) {
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.72;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.analysis-body :deep(.markdown-body p) {
+  margin: 0.22rem 0;
+}
+
+.analysis-body :deep(.markdown-body ul),
+.analysis-body :deep(.markdown-body ol) {
+  margin: 0.32rem 0;
+  padding-left: 1.25rem;
+}
+
+.analysis-body :deep(.markdown-body li) {
+  margin: 0.18rem 0;
+}
+
+.analysis-body :deep(.markdown-body strong) {
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.analysis-body :deep(.markdown-body pre) {
+  margin: 0.45rem 0;
+  padding: 0.6rem 0.7rem;
+  background: rgba(15, 118, 110, 0.06);
+}
+
+.analysis-body :deep(.markdown-body code) {
+  font-size: 0.84em;
+}
+
+.tool-call-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.tool-call-item {
+  padding-top: 8px;
+  border-top: 1px dashed rgba(15, 118, 110, 0.18);
+}
+
+.tool-call-item:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.tool-call-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.tool-call-head strong {
+  color: var(--text);
+}
+
+.tool-call-id {
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: rgba(15, 23, 42, 0.05);
+}
+
+.tool-call-args {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: rgba(15, 23, 42, 0.04);
+  border-radius: 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  line-height: 1.55;
 }
 
 .source-details {
