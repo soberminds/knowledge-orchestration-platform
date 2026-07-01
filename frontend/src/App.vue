@@ -29,7 +29,6 @@ import type { NavTab, WorkspaceTab } from "./types/chat";
 import { isOnlyOfficeDocument } from "./utils/documentRouting";
 
 const THEME_STORAGE_KEY = "kop.theme";
-const ENTRY_MODE_STORAGE_KEY = "kop.entry_mode";
 
 function readInitialDarkMode() {
   if (typeof window === "undefined") {
@@ -43,14 +42,6 @@ function readInitialDarkMode() {
     return false;
   }
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
-}
-
-function readInitialEntryMode() {
-  if (typeof window === "undefined") {
-    return "app" as const;
-  }
-  const stored = window.localStorage.getItem(ENTRY_MODE_STORAGE_KEY);
-  return stored === "auth" ? ("auth" as const) : ("app" as const);
 }
 
 const { locale, localeOptions, setLocale, t } = useI18n();
@@ -76,7 +67,8 @@ const officeEditorFullscreen = ref(false);
 const officeEditorMode = ref<"edit" | "view">("edit");
 const officeEditorRef = ref<InstanceType<typeof OnlyOfficeEditor> | null>(null);
 const authScreenMode = ref<"login" | "register">("login");
-const authEntryMode = ref<"auth" | "app">(readInitialEntryMode());
+const authEntryMode = ref<"auth" | "app">("auth");
+const authBootstrapped = ref(false);
 const sidebarCollapsed = ref(false);
 const isDarkMode = ref(readInitialDarkMode());
 
@@ -124,7 +116,7 @@ const currentLocaleName = computed(() => localeDisplayName(locale.value));
 const userMenuPopperClass = computed(() =>
   ["user-dropdown-popper", isDarkMode.value ? "is-dark-mode" : ""].filter(Boolean).join(" "),
 );
-const showAuthScreen = computed(() => !isAuthenticated.value && authEntryMode.value === "auth");
+const showAuthScreen = computed(() => authBootstrapped.value && !isAuthenticated.value && authEntryMode.value === "auth");
 
 const activeErrorMessage = computed(() => {
   if (auth.errorMessage.value) {
@@ -204,21 +196,18 @@ function handleUserMenuCommand(command: string | number | object) {
   }
 }
 
-function persistEntryMode(value: "auth" | "app") {
+function setEntryMode(value: "auth" | "app") {
   authEntryMode.value = value;
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(ENTRY_MODE_STORAGE_KEY, value);
-  }
 }
 
 function openAuthScreen(mode: "login" | "register") {
   authScreenMode.value = mode;
-  persistEntryMode("auth");
+  setEntryMode("auth");
   auth.clearError();
 }
 
 async function continueAsGuest() {
-  persistEntryMode("app");
+  setEntryMode("app");
   auth.clearError();
   await refreshDataAfterAuthChange();
 }
@@ -271,7 +260,7 @@ async function submitAuthDialog(payload: { username: string; password: string; n
       });
       ElMessage.success(t("sidebar.login_success"));
     }
-    persistEntryMode("app");
+    setEntryMode("app");
     await refreshDataAfterAuthChange();
   } catch {
     // auth.errorMessage is already shown in sidebar and dialog.
@@ -283,8 +272,8 @@ async function handleLogout() {
     await auth.logout();
     ElMessage.success(t("sidebar.logout_success"));
     authScreenMode.value = "login";
-    persistEntryMode("app");
-    await refreshDataAfterAuthChange();
+    setEntryMode("auth");
+    resetWorkspaceForUserChange();
     await syncCurrentUser();
   } catch {
     // auth.errorMessage is already shown in sidebar and dialog.
@@ -528,18 +517,19 @@ watch(isDarkMode, (value) => {
 }, { immediate: true });
 
 watch(
-  () => auth.currentUser.value?.authenticated,
+  () => isAuthenticated.value,
   (authenticated) => {
     if (authenticated) {
-      persistEntryMode("app");
+      setEntryMode("app");
     }
   },
 );
 
 onMounted(async () => {
   await syncCurrentUser();
-  if (auth.currentUser.value?.authenticated || authEntryMode.value === "app") {
-    persistEntryMode("app");
+  authBootstrapped.value = true;
+  if (isAuthenticated.value || authEntryMode.value === "app") {
+    setEntryMode("app");
     await chatWorkspace.initialize();
     try {
       await dashboard.refreshDashboard({ retries: 2 });
@@ -561,6 +551,14 @@ onMounted(async () => {
     @submit="submitAuthDialog"
     @continue-guest="continueAsGuest"
   />
+
+  <section v-else-if="!authBootstrapped" class="app-boot-screen">
+    <div class="app-boot-card">
+      <span class="app-boot-mark">K</span>
+      <strong>知识编排平台</strong>
+      <small>正在确认登录状态...</small>
+    </div>
+  </section>
 
   <main v-else class="app-shell" :class="{ 'is-sidebar-collapsed': sidebarCollapsed, 'is-dark-mode': isDarkMode }">
     <LeftSidebar
@@ -863,6 +861,54 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.app-boot-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(at 40% 20%, rgba(20, 184, 166, 0.12) 0px, transparent 50%),
+    radial-gradient(at 80% 0%, rgba(6, 182, 212, 0.08) 0px, transparent 50%),
+    radial-gradient(at 0% 50%, rgba(20, 184, 166, 0.08) 0px, transparent 50%),
+    var(--bg);
+}
+
+.app-boot-card {
+  min-width: 220px;
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.app-boot-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  background: #0f766e;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 1.16rem;
+  box-shadow: 0 12px 22px rgba(20, 184, 166, 0.18);
+}
+
+.app-boot-card strong {
+  font-size: 1rem;
+}
+
+.app-boot-card small {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
 .workspace-topbar {
   min-height: 72px;
   padding: 14px 28px;
