@@ -463,6 +463,7 @@ def _to_agent_confirmation_response(payload: dict[str, Any]) -> AgentToolConfirm
         expires_at=str(payload.get("expires_at") or ""),
         result=dict(payload.get("result")) if isinstance(payload.get("result"), dict) else None,
         error=str(payload.get("error") or "") or None,
+        assistant_followup=str(payload.get("assistant_followup") or "") or None,
         confirmed_at=str(payload.get("confirmed_at") or "") or None,
         cancelled_at=str(payload.get("cancelled_at") or "") or None,
     )
@@ -473,11 +474,11 @@ def _persist_tool_confirmation_state(
     *,
     conversation_id: int | None,
     payload: dict[str, Any],
-) -> None:
+) -> str | None:
     if conversation_id is None:
-        return
+        return None
     try:
-        chat_memory.update_tool_confirmation_state(
+        assistant_followup = chat_memory.update_tool_confirmation_state(
             conversation_id=int(conversation_id),
             confirmation_id=str(payload.get("confirmation_id") or ""),
             status=str(payload.get("status") or ""),
@@ -486,8 +487,12 @@ def _persist_tool_confirmation_state(
             confirmed_at=str(payload.get("confirmed_at") or "") or None,
             cancelled_at=str(payload.get("cancelled_at") or "") or None,
         )
+        if assistant_followup:
+            payload["assistant_followup"] = assistant_followup
+        return assistant_followup
     except Exception:
         logger.exception("Failed to persist agent tool confirmation state.")
+        return None
 
 
 def _streaming_event_payload(

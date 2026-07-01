@@ -852,20 +852,20 @@ class ChatMemoryService:
         error: str | None = None,
         confirmed_at: str | None = None,
         cancelled_at: str | None = None,
-    ) -> bool:
+    ) -> str | None:
         if text is None:
             raise DatabaseUnavailableError("SQLAlchemy is not installed.")
 
         confirmation_id = str(confirmation_id or "").strip()
         if not confirmation_id:
-            return False
+            return None
 
         with session_scope() as session:
             user_id = self._get_or_create_default_user_id(session)
             rows = session.execute(
                 text(
                     """
-                    SELECT m.id, m.meta_json
+                    SELECT m.id, m.meta_json, m.content
                     FROM kop_chat_message m
                     INNER JOIN kop_chat_conversation c ON c.id = m.conversation_id
                     WHERE m.conversation_id = :conversation_id
@@ -880,6 +880,7 @@ class ChatMemoryService:
 
             target_message_id: int | None = None
             target_meta: dict[str, Any] | None = None
+            target_content = ""
             target_tool_call: dict[str, Any] | None = None
             for row in rows:
                 meta = self._parse_json_value(row[1], {})
@@ -898,13 +899,14 @@ class ChatMemoryService:
                         continue
                     target_message_id = int(row[0])
                     target_meta = meta
+                    target_content = str(row[2] or "")
                     target_tool_call = tool_call
                     break
                 if target_tool_call is not None:
                     break
 
             if target_message_id is None or target_meta is None or target_tool_call is None:
-                return False
+                return None
 
             normalized_status = str(status or "").strip()
             target_tool_call["confirmation_status"] = normalized_status
@@ -926,17 +928,23 @@ class ChatMemoryService:
             if cancelled_at:
                 target_tool_call["cancelled_at"] = cancelled_at
             target_tool_call["summary"] = self._tool_confirmation_summary(target_tool_call, normalized_status)
+            assistant_followup = self._tool_confirmation_followup(target_tool_call, normalized_status)
+            if assistant_followup:
+                target_tool_call["assistant_followup"] = assistant_followup
+            updated_content = self._append_confirmation_followup(target_content, assistant_followup)
 
             session.execute(
                 text(
                     """
                     UPDATE kop_chat_message
-                    SET meta_json = :meta_json,
+                    SET content = :content,
+                        meta_json = :meta_json,
                         updated_at = :updated_at
                     WHERE id = :message_id
                     """
                 ),
                 {
+                    "content": updated_content,
                     "meta_json": json.dumps(target_meta, ensure_ascii=False),
                     "updated_at": self._now(),
                     "message_id": target_message_id,
@@ -944,7 +952,46 @@ class ChatMemoryService:
             )
 
         self._delete_recent_history_cache(conversation_id)
-        return True
+        return assistant_followup
+
+    def _append_confirmation_followup(self, content: str, followup: str | None) -> str:
+        followup_text = str(followup or "").strip()
+        if not followup_text:
+            return content
+        if followup_text in content:
+            return content
+        separator = "\n\n" if str(content or "").strip() else ""
+        return f"{content.rstrip()}{separator}{followup_text}"
+
+    def _tool_confirmation_followup(self, tool_call: dict[str, Any], status: str) -> str:
+        name = str(tool_call.get("name") or "")
+        if status == "confirmed":
+            result = tool_call.get("result")
+            if isinstance(result, dict) and name == "send_email":
+                to_value = result.get("to")
+                if isinstance(to_value, list):
+                    recipients = "、".join(str(item).strip() for item in to_value if str(item).strip())
+                else:
+                    recipients = str(to_value or "").strip()
+                subject = str(result.get("subject") or "邮件").strip()
+                sent_at = str(result.get("sent_at") or "").strip()
+                tail = f"发送时间：{sent_at}。" if sent_at else ""
+                return f"✅ 邮件已发送成功。收件人：{recipients or '未记录'}；主题：{subject}。{tail}".strip()
+            if isinstance(result, dict) and name == "rebuild_file_index":
+                display_path = str(result.get("display_path") or result.get("path") or result.get("file_id") or "文件")
+                chunks_indexed = result.get("chunks_indexed")
+                try:
+                    chunk_label = f"，写入 {int(chunks_indexed)} 个切片"
+                except Exception:
+                    chunk_label = ""
+                return f"✅ 文件索引已重建完成：{display_path}{chunk_label}。"
+            return "✅ 操作已确认并执行完成。"
+        if status == "cancelled":
+            return "已取消该待确认操作，未执行工具。"
+        if status == "failed" or tool_call.get("error"):
+            error_text = str(tool_call.get("error") or "").strip()
+            return f"⚠️ 待确认操作执行失败：{error_text or '请查看工具结果详情。'}"
+        return ""
 
     def _tool_confirmation_summary(self, tool_call: dict[str, Any], status: str) -> str:
         if status == "confirmed":

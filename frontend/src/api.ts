@@ -125,6 +125,7 @@ export interface AgentToolConfirmationResponse {
   expires_at: string;
   result?: Record<string, unknown> | null;
   error?: string | null;
+  assistant_followup?: string | null;
   confirmed_at?: string | null;
   cancelled_at?: string | null;
 }

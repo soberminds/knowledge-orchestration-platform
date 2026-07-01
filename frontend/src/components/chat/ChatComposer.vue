@@ -91,6 +91,7 @@ const scopeOptions = computed(() => [
 ]);
 
 const thinkingSummary = computed(() => (props.thinkingMode === "deep" ? t("chat.mode_deep") : t("chat.mode_quick")));
+const usesRetrievalControls = computed(() => props.runMode !== "chat");
 const runModeSummary = computed(() => {
   if (props.runMode === "chat") {
     return t("chat.run_mode_chat");
@@ -554,7 +555,7 @@ function removeAttachment(indexInFiltered: number) {
         </section>
       </el-popover>
 
-      <el-popover placement="top-start" :width="360" trigger="click" popper-class="chat-settings-popper">
+      <el-popover v-if="usesRetrievalControls" placement="top-start" :width="360" trigger="click" popper-class="chat-settings-popper">
         <template #reference>
           <button class="option-pill" :class="{ 'option-pill--active': scopeType !== 'all' }" type="button">
             <span class="option-dot option-dot--scope" />
@@ -703,7 +704,7 @@ function removeAttachment(indexInFiltered: number) {
         </section>
       </el-popover>
 
-      <el-popover placement="top-start" :width="280" trigger="click">
+      <el-popover v-if="usesRetrievalControls" placement="top-start" :width="280" trigger="click">
         <template #reference>
           <button class="option-pill" type="button">{{ t("chat.topk_prefix") }}: {{ topK }}</button>
         </template>

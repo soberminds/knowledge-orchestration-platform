@@ -151,6 +151,7 @@ class AgentToolConfirmationResponse(BaseModel):
     expires_at: str
     result: dict[str, Any] | None = None
     error: str | None = None
+    assistant_followup: str | None = None
     confirmed_at: str | None = None
     cancelled_at: str | None = None
 

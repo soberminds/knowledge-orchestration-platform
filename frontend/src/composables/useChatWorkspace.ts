@@ -205,6 +205,18 @@ function applyToolConfirmationResponse(toolCall: UiToolCall, response: AgentTool
   };
 }
 
+function appendAssistantFollowup(content: string, followup?: string | null) {
+  const text = String(followup || "").trim();
+  if (!text) {
+    return content;
+  }
+  if (content.includes(text)) {
+    return content;
+  }
+  const separator = content.trim() ? "\n\n" : "";
+  return `${content.trimEnd()}${separator}${text}`;
+}
+
 function markToolConfirmationRunning(toolCall: UiToolCall): UiToolCall {
   return {
     ...toolCall,
@@ -789,6 +801,27 @@ export function useChatWorkspace(topK: Ref<number>) {
     return false;
   }
 
+  function appendToolConfirmationFollowup(payload: ToolConfirmationUiPayload, followup?: string | null): boolean {
+    const text = String(followup || "").trim();
+    if (!text) {
+      return false;
+    }
+    for (const session of sessions.value) {
+      const message = session.messages.find((item) => item.id === payload.messageId);
+      if (!message) {
+        continue;
+      }
+      const nextContent = appendAssistantFollowup(message.content, text);
+      if (nextContent === message.content) {
+        return false;
+      }
+      message.content = nextContent;
+      session.updatedAt = Date.now();
+      return true;
+    }
+    return false;
+  }
+
   function findConversationIdByMessageId(messageId: string): number | null {
     for (const session of sessions.value) {
       if (session.messages.some((message) => message.id === messageId)) {
@@ -810,6 +843,7 @@ export function useChatWorkspace(topK: Ref<number>) {
         conversation_id: findConversationIdByMessageId(payload.messageId),
       });
       updateToolCall(payload, (toolCall) => applyToolConfirmationResponse(toolCall, response));
+      appendToolConfirmationFollowup(payload, response.assistant_followup);
     } catch (error) {
       const message = error instanceof Error ? error.message : t("error.chat_request_failed");
       errorMessage.value = message;
@@ -828,6 +862,7 @@ export function useChatWorkspace(topK: Ref<number>) {
         conversation_id: findConversationIdByMessageId(payload.messageId),
       });
       updateToolCall(payload, (toolCall) => applyToolConfirmationResponse(toolCall, response));
+      appendToolConfirmationFollowup(payload, response.assistant_followup);
     } catch (error) {
       const message = error instanceof Error ? error.message : t("error.chat_request_failed");
       errorMessage.value = message;
