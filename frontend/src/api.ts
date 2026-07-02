@@ -110,6 +110,9 @@ export interface ToolCallDiagnostic {
   confirmation_id?: string | null;
   confirmation_message?: string | null;
   confirmation_status?: string | null;
+  assistant_followup?: string | null;
+  confirmed_at?: string | null;
+  cancelled_at?: string | null;
   result?: Record<string, unknown> | null;
 }
 

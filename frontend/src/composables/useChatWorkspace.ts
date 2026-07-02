@@ -117,6 +117,9 @@ function normalizeToolCall(payload: Record<string, unknown> | ToolCallDiagnostic
   const confirmationId = String(payloadRecord.confirmation_id ?? "").trim();
   const confirmationMessage = String(payloadRecord.confirmation_message ?? "").trim();
   const confirmationStatus = String(payloadRecord.confirmation_status ?? "").trim();
+  const assistantFollowup = String(payloadRecord.assistant_followup ?? "").trim();
+  const confirmedAt = String(payloadRecord.confirmed_at ?? "").trim();
+  const cancelledAt = String(payloadRecord.cancelled_at ?? "").trim();
   const result =
     payloadRecord.result && typeof payloadRecord.result === "object" && !Array.isArray(payloadRecord.result)
       ? (payloadRecord.result as Record<string, unknown>)
@@ -144,6 +147,9 @@ function normalizeToolCall(payload: Record<string, unknown> | ToolCallDiagnostic
     ...(confirmationId ? { confirmation_id: confirmationId } : {}),
     ...(confirmationMessage ? { confirmation_message: confirmationMessage } : {}),
     ...(confirmationStatus ? { confirmation_status: confirmationStatus } : {}),
+    ...(assistantFollowup ? { assistant_followup: assistantFollowup } : {}),
+    ...(confirmedAt ? { confirmed_at: confirmedAt } : {}),
+    ...(cancelledAt ? { cancelled_at: cancelledAt } : {}),
     ...(result ? { result } : {}),
   };
 }
@@ -152,6 +158,55 @@ function toolCallsFromDiagnostics(diagnostics?: ModelDiagnostics | null): UiTool
   return (diagnostics?.tool_calls ?? [])
     .map((item) => normalizeToolCall(item))
     .filter((item): item is UiToolCall => item !== null);
+}
+
+function toolCallKey(toolCall: UiToolCall) {
+  return String(toolCall.confirmation_id || toolCall.id || `${toolCall.name || ""}:${JSON.stringify(toolCall.arguments ?? {})}`);
+}
+
+function isTerminalConfirmationStatus(status?: string | null) {
+  return ["running", "confirmed", "cancelled", "failed"].includes(String(status || ""));
+}
+
+function mergeToolCallWithLocalState(incoming: UiToolCall, existing?: UiToolCall): UiToolCall {
+  if (!existing) {
+    return incoming;
+  }
+  const existingConfirmationStatus = String(existing.confirmation_status || "");
+  if (!isTerminalConfirmationStatus(existingConfirmationStatus)) {
+    return {
+      ...existing,
+      ...incoming,
+      result: incoming.result ?? existing.result,
+      error: incoming.error ?? existing.error,
+      confirmation_status: incoming.confirmation_status ?? existing.confirmation_status,
+    };
+  }
+  return {
+    ...existing,
+    ...incoming,
+    status: existing.status ?? incoming.status,
+    confirmation_status: existing.confirmation_status,
+    summary: existing.summary || incoming.summary,
+    error: existing.error ?? incoming.error,
+    result: existing.result ?? incoming.result,
+    assistant_followup: existing.assistant_followup ?? incoming.assistant_followup,
+    confirmed_at: existing.confirmed_at ?? incoming.confirmed_at,
+    cancelled_at: existing.cancelled_at ?? incoming.cancelled_at,
+  };
+}
+
+function mergeToolCallsWithLocalState(existingCalls: UiToolCall[] | undefined, incomingCalls: UiToolCall[]) {
+  if (!existingCalls?.length) {
+    return incomingCalls;
+  }
+  const existingByKey = new Map(existingCalls.map((toolCall) => [toolCallKey(toolCall), toolCall]));
+  const merged = incomingCalls.map((toolCall) => mergeToolCallWithLocalState(toolCall, existingByKey.get(toolCallKey(toolCall))));
+  const incomingKeys = new Set(incomingCalls.map((toolCall) => toolCallKey(toolCall)));
+  const localOnly = existingCalls.filter(
+    (toolCall) => !incomingKeys.has(toolCallKey(toolCall)) && isTerminalConfirmationStatus(toolCall.confirmation_status),
+  );
+  return [...merged, ...localOnly];
 }
 
 function confirmationSuccessSummary(toolCall: UiToolCall, result?: Record<string, unknown> | null) {
@@ -169,6 +224,48 @@ function confirmationSuccessSummary(toolCall: UiToolCall, result?: Record<string
   return "已确认并执行。";
 }
 
+function formatFollowupRecipients(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean).join("、");
+  }
+  return String(value || "").trim();
+}
+
+function buildToolConfirmationFollowup(toolCall: UiToolCall, response: AgentToolConfirmationResponse) {
+  const explicit = String(response.assistant_followup || "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  const status = String(response.status || "");
+  const toolName = String(response.tool_name || toolCall.name || "");
+  const result = response.result ?? toolCall.result ?? null;
+  const args = parseToolArguments(response.arguments) ?? parseToolArguments(toolCall.arguments) ?? {};
+
+  if (status === "confirmed") {
+    if (toolName === "send_email") {
+      const recipients = formatFollowupRecipients(result?.to ?? args.to);
+      const subject = String(result?.subject ?? args.subject ?? "邮件").trim();
+      const sentAt = String(result?.sent_at ?? "").trim();
+      const sentAtText = sentAt ? `发送时间：${sentAt}。` : "";
+      return `邮件已发送成功。收件人：${recipients || "未记录"}；主题：${subject || "邮件"}。${sentAtText}`.trim();
+    }
+    if (toolName === "rebuild_file_index") {
+      const displayPath = String(result?.display_path || result?.path || result?.file_id || args.display_path || args.file_id || "文件");
+      const chunksIndexed = Number(result?.chunks_indexed);
+      const chunkLabel = Number.isFinite(chunksIndexed) ? `，写入 ${chunksIndexed} 个切片` : "";
+      return `文件索引已重建完成：${displayPath}${chunkLabel}。`;
+    }
+    return "操作已确认并执行完成。";
+  }
+  if (status === "cancelled") {
+    return "已取消该待确认操作，未执行工具。";
+  }
+  if (status === "failed" || response.error) {
+    return `待确认操作执行失败：${response.error || "请查看工具结果详情。"}`;
+  }
+  return "";
+}
+
 function applyDiagnosticsToMessage(target: UiMessage, diagnostics?: ModelDiagnostics | null) {
   if (!diagnostics) {
     return;
@@ -177,7 +274,7 @@ function applyDiagnosticsToMessage(target: UiMessage, diagnostics?: ModelDiagnos
   target.providerApi = diagnostics.provider_api ?? target.providerApi ?? null;
   const toolCalls = toolCallsFromDiagnostics(diagnostics);
   if (toolCalls.length) {
-    target.toolCalls = toolCalls;
+    target.toolCalls = mergeToolCallsWithLocalState(target.toolCalls, toolCalls);
   }
 }
 
@@ -195,6 +292,8 @@ function applyToolConfirmationResponse(toolCall: UiToolCall, response: AgentTool
         ? "确认执行失败。"
         : toolCall.summary;
 
+  const assistantFollowup = buildToolConfirmationFollowup(toolCall, response) || toolCall.assistant_followup || null;
+
   return {
     ...toolCall,
     status: isConfirmed ? "success" : isFailed ? "error" : isCancelled ? "cancelled" : toolCall.status,
@@ -202,6 +301,9 @@ function applyToolConfirmationResponse(toolCall: UiToolCall, response: AgentTool
     summary,
     error: response.error ?? null,
     result,
+    assistant_followup: assistantFollowup,
+    confirmed_at: response.confirmed_at ?? toolCall.confirmed_at ?? null,
+    cancelled_at: response.cancelled_at ?? toolCall.cancelled_at ?? null,
   };
 }
 
@@ -215,6 +317,16 @@ function appendAssistantFollowup(content: string, followup?: string | null) {
   }
   const separator = content.trim() ? "\n\n" : "";
   return `${content.trimEnd()}${separator}${text}`;
+}
+
+function collectToolConfirmationFollowups(message: UiMessage) {
+  return (message.toolCalls ?? [])
+    .map((toolCall) => String(toolCall.assistant_followup || "").trim())
+    .filter((text, index, list) => Boolean(text) && list.indexOf(text) === index);
+}
+
+function appendAssistantFollowups(content: string, followups: string[]) {
+  return followups.reduce((nextContent, followup) => appendAssistantFollowup(nextContent, followup), content);
 }
 
 function markToolConfirmationRunning(toolCall: UiToolCall): UiToolCall {
@@ -599,7 +711,8 @@ export function useChatWorkspace(topK: Ref<number>) {
 
   function applyDonePayload(target: UiMessage, payload: ChatStreamDoneEvent) {
     // Always use the final done payload. It may contain a polished/expanded answer.
-    target.content = payload.answer ?? target.content;
+    const localFollowups = collectToolConfirmationFollowups(target);
+    target.content = appendAssistantFollowups(payload.answer ?? target.content, localFollowups);
     target.sources = payload.sources ?? [];
     target.citations = payload.citations ?? [];
     target.model = payload.model ?? undefined;
@@ -607,6 +720,7 @@ export function useChatWorkspace(topK: Ref<number>) {
     target.costEstimate = payload.cost_estimate ?? undefined;
     target.reasoningParts = payload.reasoning_parts ?? target.reasoningParts ?? [];
     applyDiagnosticsToMessage(target, payload.model_diagnostics);
+    target.content = appendAssistantFollowups(target.content, collectToolConfirmationFollowups(target));
     target.streaming = false;
   }
 
@@ -755,6 +869,9 @@ export function useChatWorkspace(topK: Ref<number>) {
             session.workspaceKey = workspaceKey.value;
             session.scopeName = scopeName.value;
             applyDonePayload(assistantMessage, donePayload);
+            if (session.backendConversationId) {
+              await syncToolConfirmationStatesForMessage(assistantMessage, session.backendConversationId);
+            }
             session.messagesLoaded = true;
             session.hasMoreMessages = Boolean(session.hasMoreMessages);
             await scrollToBottom();
@@ -801,6 +918,17 @@ export function useChatWorkspace(topK: Ref<number>) {
     return false;
   }
 
+  function findToolCallByConfirmationId(payload: ToolConfirmationUiPayload): UiToolCall | null {
+    for (const session of sessions.value) {
+      const message = session.messages.find((item) => item.id === payload.messageId);
+      const toolCall = message?.toolCalls?.find((item) => item.confirmation_id === payload.confirmationId);
+      if (toolCall) {
+        return toolCall;
+      }
+    }
+    return null;
+  }
+
   function appendToolConfirmationFollowup(payload: ToolConfirmationUiPayload, followup?: string | null): boolean {
     const text = String(followup || "").trim();
     if (!text) {
@@ -831,9 +959,35 @@ export function useChatWorkspace(topK: Ref<number>) {
     return activeSession.value?.backendConversationId ?? null;
   }
 
+  async function syncToolConfirmationStatesForMessage(message: UiMessage, conversationId: number) {
+    const toolCalls = message.toolCalls ?? [];
+    for (const toolCall of toolCalls) {
+      const confirmationId = String(toolCall.confirmation_id || "").trim();
+      const status = String(toolCall.confirmation_status || "");
+      if (!confirmationId || (status !== "confirmed" && status !== "cancelled")) {
+        continue;
+      }
+      try {
+        const response =
+          status === "confirmed"
+            ? await confirmAgentToolConfirmation(confirmationId, { conversation_id: conversationId })
+            : await cancelAgentToolConfirmation(confirmationId, { conversation_id: conversationId });
+        const payload = { messageId: message.id, confirmationId };
+        updateToolCall(payload, (currentToolCall) => applyToolConfirmationResponse(currentToolCall, response));
+        appendToolConfirmationFollowup(payload, buildToolConfirmationFollowup(toolCall, response));
+      } catch {
+        // The user already sees the local tool result. This late sync only keeps history persistence in step.
+      }
+    }
+  }
+
   async function confirmToolCall(payload: ToolConfirmationUiPayload) {
     const confirmationId = payload.confirmationId.trim();
     if (!confirmationId) {
+      return;
+    }
+    const currentToolCall = findToolCallByConfirmationId(payload);
+    if (isTerminalConfirmationStatus(currentToolCall?.confirmation_status)) {
       return;
     }
     clearError();
@@ -842,8 +996,9 @@ export function useChatWorkspace(topK: Ref<number>) {
       const response = await confirmAgentToolConfirmation(confirmationId, {
         conversation_id: findConversationIdByMessageId(payload.messageId),
       });
+      const followup = buildToolConfirmationFollowup(currentToolCall ?? ({ confirmation_id: confirmationId } as UiToolCall), response);
       updateToolCall(payload, (toolCall) => applyToolConfirmationResponse(toolCall, response));
-      appendToolConfirmationFollowup(payload, response.assistant_followup);
+      appendToolConfirmationFollowup(payload, followup);
     } catch (error) {
       const message = error instanceof Error ? error.message : t("error.chat_request_failed");
       errorMessage.value = message;
@@ -858,11 +1013,13 @@ export function useChatWorkspace(topK: Ref<number>) {
     }
     clearError();
     try {
+      const currentToolCall = findToolCallByConfirmationId(payload);
       const response = await cancelAgentToolConfirmation(confirmationId, {
         conversation_id: findConversationIdByMessageId(payload.messageId),
       });
+      const followup = buildToolConfirmationFollowup(currentToolCall ?? ({ confirmation_id: confirmationId } as UiToolCall), response);
       updateToolCall(payload, (toolCall) => applyToolConfirmationResponse(toolCall, response));
-      appendToolConfirmationFollowup(payload, response.assistant_followup);
+      appendToolConfirmationFollowup(payload, followup);
     } catch (error) {
       const message = error instanceof Error ? error.message : t("error.chat_request_failed");
       errorMessage.value = message;

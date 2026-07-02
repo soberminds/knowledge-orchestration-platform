@@ -43,11 +43,14 @@ class CurrentUserContextMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Build the index once when the app starts."""
-    service = get_knowledge_base_service()
-    try:
-        await run_in_threadpool(service.rebuild_index)
-    except Exception as exc:  # pragma: no cover
-        logger.warning("Initial index build skipped: %s", exc)
+    if settings.rebuild_index_on_startup:
+        service = get_knowledge_base_service()
+        try:
+            await run_in_threadpool(service.rebuild_index)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Initial index build skipped: %s", exc)
+    else:
+        logger.info("Initial index build skipped because REBUILD_INDEX_ON_STARTUP=false.")
     yield
 
 

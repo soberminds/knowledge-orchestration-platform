@@ -178,6 +178,7 @@ class Settings:
     temperature: float = _env_float("TEMPERATURE", 0.2)
     max_tokens: int = _env_int("MAX_TOKENS", 1024)
     max_upload_mb: int = _env_int("MAX_UPLOAD_MB", 20)
+    rebuild_index_on_startup: bool = _env_bool("REBUILD_INDEX_ON_STARTUP", True)
     preview_convert_timeout_sec: int = _env_int("PREVIEW_CONVERT_TIMEOUT_SEC", 120)
     soffice_bin: str = os.getenv("SOFFICE_BIN", "").strip()
     public_backend_url: str = os.getenv("PUBLIC_BACKEND_URL", "http://127.0.0.1:8000").strip().rstrip("/")

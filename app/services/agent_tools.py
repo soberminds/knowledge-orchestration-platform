@@ -103,24 +103,41 @@ class AgentToolConfirmationService:
             return item
 
     def cancel(self, confirmation_id: str, *, user_id: int | None = None) -> ToolConfirmation:
-        item = self._require_pending_for_user(confirmation_id, user_id=user_id)
         with self._lock:
+            item = self.get(confirmation_id)
+            if item is None:
+                raise KeyError(f"Confirmation not found: {confirmation_id}")
+            if user_id is not None and item.user_id is not None and item.user_id != user_id:
+                raise PermissionError("Confirmation does not belong to current user.")
+            if item.status == "cancelled":
+                return item
+            if item.status != "pending":
+                raise ValueError(f"Confirmation is not pending: {item.status}")
             item.status = "cancelled"
             item.cancelled_at = datetime.now()
         return item
 
     def confirm(self, confirmation_id: str, *, user_id: int | None = None) -> ToolConfirmation:
-        item = self._require_pending_for_user(confirmation_id, user_id=user_id)
         with self._lock:
+            item = self.get(confirmation_id)
+            if item is None:
+                raise KeyError(f"Confirmation not found: {confirmation_id}")
+            if user_id is not None and item.user_id is not None and item.user_id != user_id:
+                raise PermissionError("Confirmation does not belong to current user.")
+            if item.status == "confirmed":
+                return item
+            if item.status == "running":
+                return item
+            if item.status != "pending":
+                raise ValueError(f"Confirmation is not pending: {item.status}")
+
             executor = self._executors.get(item.tool_name)
-        if executor is None:
-            with self._lock:
+            if executor is None:
                 item.status = "failed"
                 item.error = f"No executor registered for tool: {item.tool_name}"
-            return item
-
-        with self._lock:
+                return item
             item.status = "running"
+
         try:
             result = executor(dict(item.arguments or {}))
         except Exception as exc:
