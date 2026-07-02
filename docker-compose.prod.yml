@@ -2,6 +2,7 @@ name: knowledge-orchestration-platform
 
 services:
   backend:
+    image: kop-backend:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -27,6 +28,7 @@ services:
       - middleware
 
   frontend:
+    image: kop-frontend:latest
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -50,4 +52,3 @@ networks:
 
 volumes:
   app_data:
-
