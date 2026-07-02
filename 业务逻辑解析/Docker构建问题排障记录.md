@@ -476,7 +476,227 @@ args:
   TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
 ```
 
-## 11. 推荐排障顺序
+## 11. 镜像上传服务器后的启动问题
+
+本节记录 2026-07-02 本地构建镜像、上传服务器、服务器 `docker load` 后启动业务容器时遇到的问题。
+
+### 11.1 上传到 `/opt` 目录 Permission denied
+
+### 现象
+
+Windows PowerShell 执行：
+
+```powershell
+scp -i "C:\Users\30372\.ssh\jackysource1.pem" .\kop-images.tar ubuntu@服务器公网IP:/opt/knowledge-orchestration-platform/
+```
+
+报错：
+
+```text
+remote mkdir "/opt/knowledge-orchestration-platform/": Permission denied
+```
+
+### 原因
+
+`ubuntu` 用户没有权限直接在 `/opt` 下创建目录。`scp` 不能自动使用 `sudo` 创建远端目录。
+
+### 解决方案
+
+先用 SSH 登录服务器执行目录创建和授权：
+
+```powershell
+ssh -i "C:\Users\30372\.ssh\jackysource1.pem" ubuntu@服务器公网IP "sudo mkdir -p /opt/knowledge-orchestration-platform && sudo chown -R ubuntu:ubuntu /opt/knowledge-orchestration-platform"
+```
+
+再重新上传：
+
+```powershell
+scp -i "C:\Users\30372\.ssh\jackysource1.pem" .\kop-images.tar ubuntu@服务器公网IP:/opt/knowledge-orchestration-platform/
+```
+
+### 11.2 Compose 找不到 `.env.prod`
+
+### 现象
+
+服务器执行：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml config
+```
+
+报错：
+
+```text
+Couldn't find env file: /opt/knowledge-orchestration-platform/.env.prod
+```
+
+### 原因
+
+服务器目录里只上传了 `kop-images.tar` 或 compose 文件，但没有上传 `.env.prod`。
+
+启动业务容器至少需要：
+
+```text
+/opt/knowledge-orchestration-platform/.env.prod
+/opt/knowledge-orchestration-platform/docker-compose.prod.yml
+```
+
+如果是本地镜像上传部署，还需要已经执行过：
+
+```bash
+docker load -i kop-images.tar
+```
+
+### 解决方案
+
+从本地 PowerShell 上传 `.env.prod` 和 `docker-compose.prod.yml`：
+
+```powershell
+scp -i "C:\Users\30372\.ssh\jackysource1.pem" .\.env.prod ubuntu@服务器公网IP:/opt/knowledge-orchestration-platform/.env.prod
+scp -i "C:\Users\30372\.ssh\jackysource1.pem" .\docker-compose.prod.yml ubuntu@服务器公网IP:/opt/knowledge-orchestration-platform/docker-compose.prod.yml
+```
+
+服务器检查文件：
+
+```bash
+cd /opt/knowledge-orchestration-platform
+ls -la
+```
+
+应看到：
+
+```text
+.env.prod
+docker-compose.prod.yml
+kop-images.tar
+```
+
+收紧 `.env.prod` 权限：
+
+```bash
+chmod 600 .env.prod
+```
+
+### 11.3 不要把完整 `docker compose config` 输出外发
+
+### 原因
+
+`docker compose config` 会把 compose 配置渲染出来，可能包含环境变量。生产 `.env.prod` 里有 API Key、SMTP 授权码、数据库密码等敏感信息。
+
+### 推荐命令
+
+只做静默校验：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml config --quiet
+```
+
+结果判断：
+
+```text
+无输出、无报错 = 配置解析通过
+有报错 = 按错误信息修配置
+```
+
+### 11.4 已经 `docker load` 后启动不要重新构建
+
+### 场景
+
+本次部署路径是：
+
+```text
+本地构建镜像 -> docker save 导出 tar -> scp 上传服务器 -> docker load 加载镜像 -> compose 启动
+```
+
+这种场景服务器已经有：
+
+```text
+kop-backend:latest
+kop-frontend:latest
+```
+
+启动时应使用：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-build
+```
+
+不要使用：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+```
+
+否则服务器会尝试重新构建镜像，失去本地构建上传的意义，也可能再次遇到 Docker Hub、apt、pip 网络问题。
+
+### 11.5 本次成功结果记录
+
+服务器镜像加载后检查：
+
+```bash
+docker images | grep kop-
+```
+
+实际结果：
+
+```text
+kop-backend   latest   2.25GB
+kop-frontend  latest   52MB
+```
+
+配置检查：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml config --quiet
+```
+
+结果：
+
+```text
+无输出、无报错
+```
+
+启动命令：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-build
+```
+
+启动结果：
+
+```text
+Network kop_app created
+Volume knowledge-orchestration-platform_app_data created
+Container kop-backend started
+Container kop-frontend started
+```
+
+容器状态：
+
+```text
+kop-backend   Up   127.0.0.1:8000->8000/tcp
+kop-frontend  Up   0.0.0.0:80->80/tcp
+```
+
+后端日志关键结果：
+
+```text
+Initial index build skipped because REBUILD_INDEX_ON_STARTUP=false.
+Application startup complete.
+Uvicorn running on http://0.0.0.0:8000
+```
+
+前端日志关键结果：
+
+```text
+nginx/1.27.5
+Configuration complete; ready for start up
+start worker processes
+```
+
+结论：业务容器已经成功启动，前端暴露 `80` 端口，后端仅绑定服务器本机 `127.0.0.1:8000`，由前端 Nginx 代理 `/api` 访问后端。
+
+## 12. 推荐排障顺序
 
 后续如果 Docker 构建失败，按这个顺序排查：
 
@@ -487,6 +707,9 @@ args:
 5. `pip install` 普通包失败，检查 `PIP_INDEX_URL`。
 6. 出现 `nvidia-*` / `cuda-*`，检查 `TORCH_VERSION=2.3.1+cpu` 是否生效。
 7. 构建成功后运行第 9 节验证命令。
+8. 上传服务器失败，先检查 `/opt/knowledge-orchestration-platform` 目录是否存在且属于 `ubuntu` 用户。
+9. `config` 提示找不到 `.env.prod`，上传 `.env.prod` 和 `docker-compose.prod.yml`。
+10. 已经 `docker load` 的部署方式，启动必须用 `up -d --no-build`。
 
 核心原则：
 
@@ -494,4 +717,5 @@ args:
 先拉通基础镜像，再构建业务镜像。
 先判断失败发生在哪一层，再改对应配置。
 不要反复无目的地切换代理和镜像源。
+本地镜像上传部署时，不要在服务器重复构建。
 ```

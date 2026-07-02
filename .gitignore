@@ -23,4 +23,5 @@ frontend/dist/
 *.log
 .dev-processes.json
 .dev-processes.json
+*.tar
 

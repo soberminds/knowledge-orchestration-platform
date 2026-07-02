@@ -17,3 +17,4 @@ data/uploads
 data/user_docs
 .git
 *.log
+*.tar
