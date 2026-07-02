@@ -696,7 +696,113 @@ start worker processes
 
 结论：业务容器已经成功启动，前端暴露 `80` 端口，后端仅绑定服务器本机 `127.0.0.1:8000`，由前端 Nginx 代理 `/api` 访问后端。
 
-## 12. 推荐排障顺序
+## 12. 线上上传 / 重建索引卡在 Hugging Face 模型下载
+
+### 现象
+
+生产环境上传小文件、加载文档或重建索引很慢，后端日志出现类似内容：
+
+```text
+HEAD https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/main/config.json
+Retrying in 2s
+Network is unreachable
+```
+
+前端表现通常是上传或文档加载一直转圈，刷新后文件记录可能已经存在，但索引没有及时完成。
+
+### 原因
+
+后端首次执行向量化时会加载 embedding 模型：
+
+```env
+EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+```
+
+如果模型没有缓存，`sentence-transformers` 会从 Hugging Face 下载模型文件。国内服务器访问 `huggingface.co` 不稳定时，会导致上传、解析、索引链路被模型下载阻塞。
+
+如果缓存目录没有放进 Docker volume，容器重建后还会重复下载。
+
+### 解决
+
+当前 env 已增加模型缓存目录：
+
+```env
+HF_HOME=data/huggingface
+SENTENCE_TRANSFORMERS_HOME=data/sentence-transformers
+```
+
+代码使用点：
+
+```text
+app/core/settings.py        读取并解析 HF_HOME / SENTENCE_TRANSFORMERS_HOME
+app/services/embeddings.py  创建缓存目录，并把 SENTENCE_TRANSFORMERS_HOME 显式传给 SentenceTransformer(cache_folder=...)
+```
+
+生产 compose 已挂载：
+
+```yaml
+volumes:
+  - app_data:/app/data
+```
+
+后端容器工作目录是 `/app`，所以这两个相对路径实际会落到：
+
+```text
+/app/data/huggingface
+/app/data/sentence-transformers
+```
+
+这两个目录位于 `app_data` volume 中，容器重建后仍然保留。
+
+如果服务器访问 Hugging Face 慢，可以在服务器 `.env.prod` 中临时把镜像站作为主地址：
+
+```env
+HF_ENDPOINT=https://hf-mirror.com
+HF_FALLBACK_ENDPOINT=https://huggingface.co
+```
+
+修改服务器 `.env.prod` 后重建后端容器，让新环境变量生效：
+
+```bash
+cd /opt/knowledge-orchestration-platform
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --force-recreate --no-build backend
+```
+
+### 验证
+
+确认应用解析后的缓存路径：
+
+```bash
+docker exec -it kop-backend python -c "from app.core.settings import settings; print('hf_endpoint=', settings.hf_endpoint); print('hf_home=', settings.hf_home); print('sentence_transformers_home=', settings.sentence_transformers_home)"
+```
+
+测试镜像站是否能访问：
+
+```bash
+docker exec -it kop-backend python -c "import urllib.request; print(urllib.request.urlopen('https://hf-mirror.com', timeout=10).status)"
+```
+
+预下载 embedding 模型：
+
+```bash
+docker exec -it kop-backend python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-zh-v1.5', device='cpu'); print('embedding model ready')"
+```
+
+确认模型缓存已经写入持久卷：
+
+```bash
+docker exec -it kop-backend sh -lc "du -sh /app/data/huggingface /app/data/sentence-transformers 2>/dev/null || find /app/data -maxdepth 3 -type d | grep -Ei 'huggingface|sentence'"
+```
+
+再次上传文件或重建索引时，后端日志不应继续反复出现：
+
+```text
+huggingface.co
+Network is unreachable
+Retrying in ...
+```
+
+## 13. 推荐排障顺序
 
 后续如果 Docker 构建失败，按这个顺序排查：
 
@@ -710,6 +816,7 @@ start worker processes
 8. 上传服务器失败，先检查 `/opt/knowledge-orchestration-platform` 目录是否存在且属于 `ubuntu` 用户。
 9. `config` 提示找不到 `.env.prod`，上传 `.env.prod` 和 `docker-compose.prod.yml`。
 10. 已经 `docker load` 的部署方式，启动必须用 `up -d --no-build`。
+11. 上传、解析或重建索引长时间转圈，检查第 12 节的 Hugging Face 模型下载和缓存目录。
 
 核心原则：
 

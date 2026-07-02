@@ -79,6 +79,14 @@ def _env_csv_tuple(name: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in os.getenv(name, "").split(",") if item.strip())
 
 
+def _env_path(name: str, default: str) -> Path:
+    raw = os.getenv(name, default).strip() or default
+    path = Path(raw)
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    return path
+
+
 @dataclass(frozen=True)
 class Settings:
     """Centralized immutable settings object."""
@@ -148,6 +156,8 @@ class Settings:
     embedding_device: str = os.getenv("EMBEDDING_DEVICE", "cpu")
     hf_endpoint: str = os.getenv("HF_ENDPOINT", "https://huggingface.co").strip().rstrip("/")
     hf_fallback_endpoint: str = os.getenv("HF_FALLBACK_ENDPOINT", "https://hf-mirror.com").strip().rstrip("/")
+    hf_home: Path = _env_path("HF_HOME", "data/huggingface")
+    sentence_transformers_home: Path = _env_path("SENTENCE_TRANSFORMERS_HOME", "data/sentence-transformers")
 
     # Chat persistence settings.
     mysql_url: str = os.getenv("MYSQL_URL", "").strip()
@@ -247,3 +257,5 @@ class Settings:
 
 
 settings = Settings()
+os.environ["HF_HOME"] = str(settings.hf_home)
+os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(settings.sentence_transformers_home)

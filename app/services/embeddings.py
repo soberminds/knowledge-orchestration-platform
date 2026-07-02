@@ -21,6 +21,10 @@ class LocalSentenceTransformerEmbeddings(Embeddings):
 
         load_errors: list[str] = []
         previous_hf_endpoint = os.environ.get("HF_ENDPOINT")
+        cache_folder = str(settings.sentence_transformers_home)
+
+        settings.hf_home.mkdir(parents=True, exist_ok=True)
+        settings.sentence_transformers_home.mkdir(parents=True, exist_ok=True)
 
         try:
             # Prefer local cache so later reindex operations do not depend on network.
@@ -28,6 +32,7 @@ class LocalSentenceTransformerEmbeddings(Embeddings):
                 self._model = SentenceTransformer(
                     model_name,
                     device=device,
+                    cache_folder=cache_folder,
                     local_files_only=True,
                 )
                 return
@@ -43,7 +48,11 @@ class LocalSentenceTransformerEmbeddings(Embeddings):
             for endpoint in endpoints:
                 try:
                     os.environ["HF_ENDPOINT"] = endpoint
-                    self._model = SentenceTransformer(model_name, device=device)
+                    self._model = SentenceTransformer(
+                        model_name,
+                        device=device,
+                        cache_folder=cache_folder,
+                    )
                     return
                 except Exception as exc:
                     load_errors.append(f"{endpoint}: {exc}")
