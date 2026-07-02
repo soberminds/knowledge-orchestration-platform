@@ -278,6 +278,8 @@ export interface IngestResponse {
   documents_loaded: number;
   chunks_indexed: number;
   source_files: string[];
+  status?: "queued" | "running" | "success" | "failed" | string;
+  message?: string;
 }
 
 export interface DocumentInfo {
@@ -292,6 +294,10 @@ export interface DocumentInfo {
   folder_id?: number | null;
   name?: string | null;
   source_type?: string;
+  parse_status?: string | null;
+  index_status?: string | null;
+  parse_error?: string | null;
+  last_indexed_at?: string | null;
 }
 
 export interface CreateDocumentFolderResponse {

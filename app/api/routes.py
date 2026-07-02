@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.core.database import DatabaseUnavailableError
-from app.core.request_context import get_current_user_id, set_current_user_id
+from app.core.request_context import get_current_user_id, reset_current_user_id, set_current_user_id
 from app.core.settings import settings
 from app.dependencies import get_auth_service, get_chat_memory_service, get_document_library_service, get_knowledge_base_service
 from app.dependencies import get_agent_tool_confirmation_service
@@ -96,6 +96,9 @@ OFFICE_CALLBACK_SAVE_STATUSES = {2, 6}
 _office_callback_status_lock = threading.Lock()
 _office_callback_status_by_path: dict[str, dict[str, Any]] = {}
 SESSION_COOKIE_NAME = UserAuthService.SESSION_COOKIE_NAME
+_index_job_lock = threading.Lock()
+_index_job_running = False
+_index_job_queue: list[dict[str, Any]] = []
 
 
 def _to_source_hit(hit: SearchHit) -> SourceHit:
@@ -421,6 +424,127 @@ async def _reindex_mutated_document_files(
             parse_error=None,
         )
     return stats
+
+
+def _enqueue_index_job(
+    background_tasks: BackgroundTasks,
+    library: DocumentLibraryService,
+    service: KnowledgeBaseService,
+    *,
+    user_id: int | None,
+    kind: str,
+    file_ids: list[int] | None = None,
+    source_paths: list[str] | None = None,
+) -> None:
+    global _index_job_running
+
+    normalized_file_ids = sorted({int(item) for item in (file_ids or []) if item is not None})
+    normalized_source_paths = [str(item).strip() for item in (source_paths or []) if str(item).strip()]
+    job = {
+        "kind": kind,
+        "user_id": user_id,
+        "file_ids": normalized_file_ids,
+        "source_paths": normalized_source_paths,
+    }
+
+    should_start = False
+    with _index_job_lock:
+        _index_job_queue.append(job)
+        if not _index_job_running:
+            _index_job_running = True
+            should_start = True
+
+    if should_start:
+        background_tasks.add_task(_run_index_job_queue, library, service)
+
+
+def _pop_index_job() -> dict[str, Any] | None:
+    global _index_job_running
+
+    with _index_job_lock:
+        if not _index_job_queue:
+            _index_job_running = False
+            return None
+        return _index_job_queue.pop(0)
+
+
+def _run_index_job_queue(library: DocumentLibraryService, service: KnowledgeBaseService) -> None:
+    while True:
+        job = _pop_index_job()
+        if job is None:
+            return
+
+        user_id = job.get("user_id")
+        token = set_current_user_id(int(user_id) if user_id is not None else None)
+        try:
+            kind = str(job.get("kind") or "")
+            file_ids = [int(item) for item in job.get("file_ids", []) if item is not None]
+            source_paths = [str(item) for item in job.get("source_paths", []) if str(item).strip()]
+
+            if kind == "full":
+                file_ids = library.list_document_file_ids()
+                if file_ids:
+                    library.update_file_index_states(
+                        file_ids,
+                        index_status="running",
+                        parse_status="running",
+                        parse_error=None,
+                    )
+                logger.info("Starting queued full index rebuild. user_id=%s", user_id)
+                stats = service.rebuild_index()
+                logger.info(
+                    "Queued full index rebuild finished. documents=%s chunks=%s",
+                    stats.documents_loaded,
+                    stats.chunks_indexed,
+                )
+                continue
+
+            if kind == "files":
+                if file_ids:
+                    library.update_file_index_states(
+                        file_ids,
+                        index_status="running",
+                        parse_status="running",
+                        parse_error=None,
+                    )
+                logger.info("Starting queued file reindex. user_id=%s file_ids=%s", user_id, file_ids)
+                stats = service.reindex_document_files(file_ids=file_ids, source_paths=source_paths)
+                if file_ids:
+                    library.update_file_index_states(
+                        file_ids,
+                        index_status="success",
+                        parse_status="success",
+                        parse_error=None,
+                    )
+                logger.info(
+                    "Queued file reindex finished. documents=%s chunks=%s file_ids=%s",
+                    stats.documents_loaded,
+                    stats.chunks_indexed,
+                    file_ids,
+                )
+                continue
+
+            logger.warning("Unknown queued index job kind: %s", kind)
+        except Exception as exc:
+            file_ids = [int(item) for item in job.get("file_ids", []) if item is not None]
+            if not file_ids and str(job.get("kind") or "") == "full":
+                try:
+                    file_ids = library.list_document_file_ids()
+                except Exception:
+                    file_ids = []
+            if file_ids:
+                try:
+                    library.update_file_index_states(
+                        file_ids,
+                        index_status="failed",
+                        parse_status="failed",
+                        parse_error=str(exc),
+                    )
+                except Exception:
+                    logger.exception("Failed to mark queued index job as failed.")
+            logger.exception("Queued index job failed: %s", exc)
+        finally:
+            reset_current_user_id(token)
 
 
 def _save_chat_memory_turn(
@@ -967,6 +1091,10 @@ def _document_info_from_payload(item: dict[str, Any]) -> DocumentInfo:
         folder_id=int(item["folder_id"]) if item.get("folder_id") is not None else None,
         name=str(item.get("name") or "") or None,
         source_type=str(item.get("source_type") or "db"),
+        parse_status=str(item.get("parse_status") or "") or None,
+        index_status=str(item.get("index_status") or "") or None,
+        parse_error=str(item.get("parse_error") or "") or None,
+        last_indexed_at=str(item.get("last_indexed_at") or "") or None,
     )
 
 
@@ -1539,20 +1667,39 @@ async def file_page_text(
 
 
 @router.post("/ingest", response_model=IngestResponse)
-async def ingest(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> IngestResponse:
-    try:
-        stats = await run_in_threadpool(service.rebuild_index)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+async def ingest(
+    background_tasks: BackgroundTasks,
+    library: DocumentLibraryService = Depends(get_document_library_service),
+    service: KnowledgeBaseService = Depends(get_knowledge_base_service),
+) -> IngestResponse:
+    file_ids = await run_in_threadpool(library.list_document_file_ids)
+    if file_ids:
+        await run_in_threadpool(
+            library.update_file_index_states,
+            file_ids,
+            index_status="queued",
+            parse_status="queued",
+            parse_error=None,
+        )
+    _enqueue_index_job(
+        background_tasks,
+        library,
+        service,
+        user_id=get_current_user_id(),
+        kind="full",
+    )
     return IngestResponse(
-        documents_loaded=stats.documents_loaded,
-        chunks_indexed=stats.chunks_indexed,
-        source_files=stats.source_files,
+        documents_loaded=0,
+        chunks_indexed=0,
+        source_files=[],
+        status="queued",
+        message="Index rebuild has been queued and will run in the background.",
     )
 
 
 @router.post("/upload", response_model=IngestResponse)
 async def upload_files(
+    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     folder_path: str = Form(default=""),
     parent_id: int | None = Form(default=None),
@@ -1563,24 +1710,44 @@ async def upload_files(
         raise HTTPException(status_code=400, detail="Please upload at least one file.")
 
     try:
-        await library.save_uploaded_files(files, folder_path=folder_path, parent_id=parent_id)
+        saved_files = await library.save_uploaded_files(files, folder_path=folder_path, parent_id=parent_id)
     except DatabaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    try:
-        stats = await run_in_threadpool(service.rebuild_index)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    saved_file_ids = [int(item["id"]) for item in saved_files if item.get("id") is not None]
+    saved_paths = [str(item["path"]) for item in saved_files if item.get("path")]
+    if saved_file_ids:
+        try:
+            await run_in_threadpool(
+                library.update_file_index_states,
+                saved_file_ids,
+                index_status="queued",
+                parse_status="queued",
+                parse_error=None,
+            )
+        except Exception:
+            logger.exception("Failed to mark uploaded files as queued for indexing.")
+
+    _enqueue_index_job(
+        background_tasks,
+        library,
+        service,
+        user_id=get_current_user_id(),
+        kind="files",
+        file_ids=saved_file_ids,
+        source_paths=saved_paths,
+    )
 
     return IngestResponse(
-        documents_loaded=stats.documents_loaded,
-        chunks_indexed=stats.chunks_indexed,
-        source_files=stats.source_files,
+        documents_loaded=0,
+        chunks_indexed=0,
+        source_files=saved_paths,
+        status="queued",
+        message="Files uploaded. Indexing has been queued and will run in the background.",
     )
 
 

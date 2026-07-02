@@ -435,6 +435,39 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function shouldShowIndexStatus(status?: string | null) {
+  const normalized = String(status || "").trim().toLowerCase();
+  return Boolean(normalized && normalized !== "success");
+}
+
+function indexStatusLabel(status?: string | null) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "queued") {
+    return "排队中";
+  }
+  if (normalized === "running") {
+    return "索引中";
+  }
+  if (normalized === "failed") {
+    return "索引失败";
+  }
+  if (normalized === "pending") {
+    return "待索引";
+  }
+  return normalized || "待索引";
+}
+
+function indexStatusTagType(status?: string | null) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "failed") {
+    return "danger";
+  }
+  if (normalized === "running" || normalized === "queued") {
+    return "warning";
+  }
+  return "info";
+}
+
 function openDocument(path: string, fileId?: number | null) {
   emit("open-document", path, fileId ?? null);
 }
@@ -963,6 +996,15 @@ function toggleEditDialogFullscreen() {
                   <el-icon class="is-spinning"><Loading /></el-icon>
                   正在更新
                 </span>
+                <el-tag
+                  v-if="item.doc && shouldShowIndexStatus(item.doc.index_status)"
+                  size="small"
+                  effect="plain"
+                  :type="indexStatusTagType(item.doc.index_status)"
+                  class="index-status-tag"
+                >
+                  {{ indexStatusLabel(item.doc.index_status) }}
+                </el-tag>
               </div>
 
               <span class="explorer-date-cell">
@@ -1710,6 +1752,11 @@ function toggleEditDialogFullscreen() {
   color: #c2410c;
   font-size: 0.74rem;
   font-weight: 620;
+}
+
+.index-status-tag {
+  width: fit-content;
+  max-width: 100%;
 }
 
 .explorer-item-icon {

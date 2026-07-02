@@ -154,8 +154,8 @@ class Settings:
     # Local embedding model for retrieval.
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
     embedding_device: str = os.getenv("EMBEDDING_DEVICE", "cpu")
-    hf_endpoint: str = os.getenv("HF_ENDPOINT", "https://huggingface.co").strip().rstrip("/")
-    hf_fallback_endpoint: str = os.getenv("HF_FALLBACK_ENDPOINT", "https://hf-mirror.com").strip().rstrip("/")
+    hf_endpoint: str = os.getenv("HF_ENDPOINT", "https://hf-mirror.com").strip().rstrip("/")
+    hf_fallback_endpoint: str = os.getenv("HF_FALLBACK_ENDPOINT", "https://huggingface.co").strip().rstrip("/")
     hf_home: Path = _env_path("HF_HOME", "data/huggingface")
     sentence_transformers_home: Path = _env_path("SENTENCE_TRANSFORMERS_HOME", "data/sentence-transformers")
 
@@ -188,7 +188,7 @@ class Settings:
     temperature: float = _env_float("TEMPERATURE", 0.2)
     max_tokens: int = _env_int("MAX_TOKENS", 1024)
     max_upload_mb: int = _env_int("MAX_UPLOAD_MB", 20)
-    rebuild_index_on_startup: bool = _env_bool("REBUILD_INDEX_ON_STARTUP", True)
+    rebuild_index_on_startup: bool = _env_bool("REBUILD_INDEX_ON_STARTUP", False)
     preview_convert_timeout_sec: int = _env_int("PREVIEW_CONVERT_TIMEOUT_SEC", 120)
     soffice_bin: str = os.getenv("SOFFICE_BIN", "").strip()
     public_backend_url: str = os.getenv("PUBLIC_BACKEND_URL", "http://127.0.0.1:8000").strip().rstrip("/")

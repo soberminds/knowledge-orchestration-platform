@@ -6,7 +6,7 @@ import hashlib
 import mimetypes
 import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -583,6 +583,10 @@ class DocumentLibraryService:
             "folder_id": file_row.folder_id or None,
             "name": file_row.original_name,
             "source_type": file_row.source_type,
+            "parse_status": file_row.parse_status,
+            "index_status": file_row.index_status,
+            "parse_error": file_row.parse_error,
+            "last_indexed_at": file_row.last_indexed_at.isoformat(timespec="seconds") if file_row.last_indexed_at else None,
         }
 
     def _file_to_agent_payload(self, file_row: DocumentFileRow, folder_cache: str = "") -> dict[str, Any]:
@@ -793,8 +797,23 @@ class DocumentLibraryService:
         stored_name = f"{stem}_{sha256[:12]}{extension}"
         return stored_name, sha256
 
+    def _allocate_original_name(self, session, user_id: int, folder_id: int, original_name: str) -> str:
+        candidate = Path(original_name or "upload").name
+        if self._get_file_by_folder_and_name(session, user_id, folder_id, candidate) is None:
+            return candidate
+
+        path = Path(candidate)
+        stem = path.stem or "upload"
+        suffix = path.suffix
+        for index in range(1, 1000):
+            next_name = f"{stem} ({index}){suffix}"
+            if self._get_file_by_folder_and_name(session, user_id, folder_id, next_name) is None:
+                return next_name
+        raise FileExistsError(f"Could not allocate a unique file name for: {candidate}")
+
     def _store_file(self, session, user_id: int, folder_id: int, upload: UploadFile, content: bytes) -> dict[str, Any]:
-        original_name = Path(upload.filename or "upload").name
+        uploaded_name = Path(upload.filename or "upload").name
+        original_name = self._allocate_original_name(session, user_id, folder_id, uploaded_name)
         stored_name, sha256 = self._make_file_storage_name(original_name, content)
         extension = Path(original_name).suffix.lower()
         storage_dir = self._folder_storage_dir(user_id, folder_id or None)
@@ -917,6 +936,7 @@ class DocumentLibraryService:
         file_ids: list[int],
         *,
         index_status: str,
+        parse_status: str | None = None,
         last_indexed_at: datetime | None = None,
         parse_error: str | None = None,
     ) -> int:
@@ -938,6 +958,9 @@ class DocumentLibraryService:
         if index_status == "success" or last_indexed_at is not None:
             set_clauses.append("last_indexed_at = :last_indexed_at")
             params["last_indexed_at"] = now_value
+        if parse_status is not None:
+            set_clauses.append("parse_status = :parse_status")
+            params["parse_status"] = str(parse_status or "pending")
         if parse_error is None:
             if index_status in {"queued", "running", "success"}:
                 set_clauses.append("parse_error = NULL")
@@ -1079,6 +1102,7 @@ class DocumentLibraryService:
         self._ensure_sql()
         with session_scope() as session:
             user_id = self._get_or_create_default_user_id(session)
+            self._mark_stale_index_tasks_failed(session, user_id)
             payload: list[dict[str, Any]] = []
 
             folder_rows = self._list_user_folder_rows(session, user_id)
@@ -1099,6 +1123,37 @@ class DocumentLibraryService:
                     not bool(item.get("is_directory")),
                 ),
             )
+
+    def _mark_stale_index_tasks_failed(self, session, user_id: int) -> int:
+        cutoff = self._now() - timedelta(hours=2)
+        result = session.execute(
+            text(
+                """
+                UPDATE kop_document_file
+                SET index_status = 'failed',
+                    parse_status = 'failed',
+                    parse_error = :parse_error,
+                    updated_at = :updated_at
+                WHERE user_id = :user_id
+                  AND is_deleted = 0
+                  AND index_status IN ('queued', 'running')
+                  AND updated_at < :cutoff
+                """
+            ),
+            {
+                "user_id": user_id,
+                "cutoff": cutoff,
+                "updated_at": self._now(),
+                "parse_error": "Index task was interrupted or expired. Please queue index rebuild again.",
+            },
+        )
+        return int(result.rowcount or 0)
+
+    def list_document_file_ids(self) -> list[int]:
+        self._ensure_sql()
+        with session_scope() as session:
+            user_id = self._get_or_create_default_user_id(session)
+            return [row.id for row in self._list_user_file_rows(session, user_id)]
 
     def create_folder(self, parent_path: str | None, parent_id: int | None, name: str) -> dict[str, Any]:
         self._ensure_sql()
@@ -1470,7 +1525,7 @@ class DocumentLibraryService:
         uploads: list[UploadFile],
         folder_path: str | None = None,
         parent_id: int | None = None,
-    ) -> list[str]:
+    ) -> list[dict[str, Any]]:
         self._ensure_sql()
         self._ensure_user_docs_root()
         prepared_uploads: list[tuple[UploadFile, bytes]] = []
@@ -1486,7 +1541,7 @@ class DocumentLibraryService:
                 raise ValueError(f"File too large. Limit: {self.settings.max_upload_mb} MB")
             prepared_uploads.append((upload, content))
 
-        saved_paths: list[str] = []
+        saved_files: list[dict[str, Any]] = []
         with session_scope() as session:
             user_id = self._get_or_create_default_user_id(session)
             folder_row = self._resolve_folder_row(session, user_id, folder_path, parent_id)
@@ -1494,8 +1549,13 @@ class DocumentLibraryService:
 
             for upload, content in prepared_uploads:
                 payload = self._store_file(session, user_id, folder_id, upload, content)
-                saved_paths.append(str(payload["path"]))
-        return saved_paths
+                saved_files.append(
+                    {
+                        "id": payload.get("id"),
+                        "path": str(payload["path"]),
+                    }
+                )
+        return saved_files
 
     def delete_document(self, path_value: str) -> dict[str, Any]:
         self._ensure_sql()

@@ -320,6 +320,8 @@ class IngestResponse(BaseModel):
     documents_loaded: int
     chunks_indexed: int
     source_files: list[str]
+    status: str = "success"
+    message: str = ""
 
 
 class DocumentInfo(BaseModel):
@@ -336,6 +338,10 @@ class DocumentInfo(BaseModel):
     folder_id: int | None = None
     name: str | None = None
     source_type: str = "db"
+    parse_status: str | None = None
+    index_status: str | None = None
+    parse_error: str | None = None
+    last_indexed_at: str | None = None
 
 
 class CreateDocumentFolderRequest(BaseModel):

@@ -50,6 +50,7 @@ export function useDashboard() {
   const indexedChunks = computed(() => health.value?.indexed_chunks ?? 0);
   const documentCount = computed(() => documents.value.filter((item) => !item.is_directory).length);
   const folderScopeTree = computed<FolderScopeNode[]>(() => buildFolderScopeTree(documents.value));
+  let indexPollingTimer: number | undefined;
 
   function setSelectedFiles(files: File[]) {
     selectedFiles.value = files;
@@ -59,7 +60,38 @@ export function useDashboard() {
     errorMessage.value = "";
   }
 
+  function clearIndexPolling() {
+    if (indexPollingTimer !== undefined) {
+      window.clearTimeout(indexPollingTimer);
+      indexPollingTimer = undefined;
+    }
+  }
+
+  function scheduleIndexPolling(attempts = 8, delayMs = 3000) {
+    clearIndexPolling();
+    let remaining = attempts;
+
+    const tick = async () => {
+      indexPollingTimer = undefined;
+      if (remaining <= 0) {
+        return;
+      }
+      remaining -= 1;
+      try {
+        await refreshDashboard();
+      } catch {
+        // Keep polling best-effort; explicit errors still surface on direct actions.
+      }
+      if (remaining > 0) {
+        indexPollingTimer = window.setTimeout(tick, delayMs);
+      }
+    };
+
+    indexPollingTimer = window.setTimeout(tick, delayMs);
+  }
+
   function resetForUserChange() {
+    clearIndexPolling();
     health.value = null;
     officeHealth.value = null;
     documents.value = [];
@@ -131,7 +163,8 @@ export function useDashboard() {
     try {
       await uploadDocuments(selectedFiles.value, folderPath, parentId);
       selectedFiles.value = [];
-      await refreshDashboard();
+      await refreshDashboard({ retries: 1 });
+      scheduleIndexPolling();
     } catch (error) {
       errorMessage.value = error instanceof Error ? error.message : t("error.upload_failed");
       throw error;
@@ -252,7 +285,8 @@ export function useDashboard() {
     clearError();
     try {
       await rebuildIndex();
-      await refreshDashboard();
+      await refreshDashboard({ retries: 1 });
+      scheduleIndexPolling(10);
     } catch (error) {
       errorMessage.value = error instanceof Error ? error.message : t("error.rebuild_index_failed");
       throw error;

@@ -747,6 +747,7 @@ onMounted(async () => {
       <IndexWorkspace
         v-else-if="activeTab === 'index'"
         :health="dashboard.health.value"
+        :documents="dashboard.documents.value"
         :status-text="dashboard.statusText.value"
         :indexed-chunks="dashboard.indexedChunks.value"
         :ingesting="dashboard.ingesting.value"

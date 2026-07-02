@@ -345,3 +345,38 @@ services:
 `保存后的文件 -> 抽取文本 -> 切片 -> 向量化 -> 更新这个文件对应的向量索引`
 
 它不是“只保存文件名”，而是真的会重新抽取并刷新这个文件的检索内容。
+
+## 12. 上传和索引为什么要拆开
+
+上传文件和构建索引是两个不同阶段：
+
+- 上传：校验文件、保存原始文件、写入文档元数据
+- 索引：解析文本、切片、加载 embedding 模型、向量化、写入 Chroma
+
+以前 `/api/upload` 会在一次请求里完成这两件事：
+
+`上传文件 -> 保存文件 -> 重建索引 -> 返回前端`
+
+这会导致小文件上传也可能等待很久，因为真正耗时的不是网络上传，而是后面的解析、模型加载和向量化。
+
+现在改成：
+
+`上传文件 -> 保存文件 -> 标记 queued -> 立即返回前端 -> 后台索引`
+
+前端会短时间轮询文档列表，展示文件索引状态：
+
+- `pending`：待索引
+- `queued`：排队中
+- `running`：索引中
+- `success`：完成
+- `failed`：失败
+
+后端实现点：
+
+- `app/api/routes.py`：`/api/upload` 和 `/api/ingest` 只负责排队，不再同步等待索引完成
+- `app/api/routes.py`：进程内索引队列避免多个 rebuild 并发抢 Chroma / embedding 资源
+- `app/services/document_library.py`：文档列表返回 `index_status`
+- `frontend/src/composables/useDashboard.ts`：上传或重建后自动轮询状态
+- `frontend/src/components/workspaces/DocumentsWorkspace.vue`：文件列表显示排队、索引中、失败等状态
+
+这个方案适合当前单机 Docker 部署。后续如果并发用户多、索引任务多，再升级为 Redis 队列 / Celery / RQ 这类真正的任务系统。
