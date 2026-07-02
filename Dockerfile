@@ -9,6 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libreoffice-writer-nogui \
+        libreoffice-calc-nogui \
         libreoffice-impress-nogui \
         fonts-noto-cjk \
         fontconfig \
@@ -18,7 +19,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY data ./data
+RUN mkdir -p ./data/user_docs ./data/chroma_db ./data/preview_pdf
 
 EXPOSE 8000
 

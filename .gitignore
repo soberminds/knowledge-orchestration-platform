@@ -9,6 +9,10 @@
 venv/
 env/
 .env
+.env.prod
+.env.*
+!.env.example
+!.env.prod.example
 data/chroma_db/
 data/docs/
 data/preview_pdf/

@@ -1,0 +1,53 @@
+name: knowledge-orchestration-platform
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kop-backend
+    restart: unless-stopped
+    env_file:
+      - ${KOP_ENV_FILE:-.env.prod}
+    environment:
+      MYSQL_HOST: ${MYSQL_HOST:-middleware-mysql}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      REDIS_HOST: ${REDIS_HOST:-middleware-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      SOFFICE_BIN: /usr/bin/soffice
+      ONLYOFFICE_DOCUMENT_SERVER_INTERNAL_URL: ${ONLYOFFICE_DOCUMENT_SERVER_INTERNAL_URL:-http://middleware-onlyoffice}
+      PUBLIC_BACKEND_URL: ${PUBLIC_BACKEND_URL:-http://kop-backend:8000}
+      PUBLIC_BACKEND_INTERNAL_URL: ${PUBLIC_BACKEND_INTERNAL_URL:-http://127.0.0.1:8000}
+    ports:
+      - "127.0.0.1:${BACKEND_HTTP_PORT:-8000}:8000"
+    volumes:
+      - app_data:/app/data
+    networks:
+      - kop_app
+      - middleware
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+    container_name: kop-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_HTTP_PORT:-80}:80"
+    depends_on:
+      - backend
+    networks:
+      - kop_app
+
+networks:
+  kop_app:
+    name: kop_app
+  middleware:
+    name: ${MIDDLEWARE_DOCKER_NETWORK:-shared-middleware_default}
+    external: true
+
+volumes:
+  app_data:
+
