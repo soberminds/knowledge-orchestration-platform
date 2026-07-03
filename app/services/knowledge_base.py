@@ -11,7 +11,7 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -47,6 +47,7 @@ QuestionMode = Literal["overview", "technical", "comparison", "list", "general"]
 ThinkingMode = Literal["quick", "deep"]
 RunMode = Literal["chat", "rag", "agent"]
 logger = logging.getLogger(__name__)
+IndexProgressCallback = Callable[[dict[str, Any]], None]
 
 
 def _safe_int(value: Any) -> int | None:
@@ -876,10 +877,16 @@ class KnowledgeBaseService:
     def _relative_source_path(self, path: Path) -> str:
         return str(path.resolve().relative_to(self.settings.root_dir)).replace("\\", "/")
 
-    def _upsert_chunks(self, chunks: list[Document]) -> None:
+    def _upsert_chunks(
+        self,
+        chunks: list[Document],
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
         if not chunks:
             return
         batch_size = 64
+        total = len(chunks)
+        indexed = 0
         for start in range(0, len(chunks), batch_size):
             batch = chunks[start : start + batch_size]
             ids: list[str] = []
@@ -895,6 +902,9 @@ class KnowledgeBaseService:
                     raise
                 self._vector_store = self._build_vector_store()
                 self.vector_store.add_documents(documents=normalized_docs, ids=ids)
+            indexed += len(batch)
+            if progress_callback is not None:
+                progress_callback(indexed, total)
 
     def _delete_chunks_by_source(self, source_path: str) -> None:
         client = self._build_chroma_client()
@@ -999,8 +1009,15 @@ class KnowledgeBaseService:
                 source_files=[relative_source],
             )
 
-    def reindex_document_files(self, *, file_ids: list[int], source_paths: list[str]) -> IngestStats:
-        """Replace chunks for specific DB files and rebuild them from current metadata."""
+    def reindex_document_files(
+        self,
+        *,
+        file_ids: list[int],
+        source_paths: list[str],
+        reset_collection: bool = False,
+        progress_callback: IndexProgressCallback | None = None,
+    ) -> IngestStats:
+        """Replace chunks for DB files and rebuild them from current metadata."""
         with self._lock:
             self.ensure_directories()
             normalized_ids = sorted({int(file_id) for file_id in file_ids if file_id is not None})
@@ -1013,7 +1030,14 @@ class KnowledgeBaseService:
                 seen_sources.add(normalized)
                 normalized_sources.append(normalized)
 
-            if normalized_ids:
+            source_file_ids: dict[str, int] = {}
+            for index, source_path in enumerate(normalized_sources):
+                if index < len(normalized_ids):
+                    source_file_ids[source_path] = normalized_ids[index]
+
+            if reset_collection:
+                self.reset_collection()
+            elif normalized_ids:
                 self.delete_chunks_by_file_ids(normalized_ids)
 
             documents_loaded = 0
@@ -1021,36 +1045,145 @@ class KnowledgeBaseService:
             indexed_sources: list[str] = []
             indexed_file_ids: list[int] = []
             seen_file_ids: set[int] = set()
+
+            def emit(
+                file_id: int | None,
+                *,
+                status: str,
+                stage: str,
+                progress: int,
+                total_chunks: int | None = None,
+                indexed_chunks: int | None = None,
+                error_message: str | None = None,
+            ) -> None:
+                if progress_callback is None or file_id is None:
+                    return
+                try:
+                    progress_callback(
+                        {
+                            "file_id": file_id,
+                            "status": status,
+                            "stage": stage,
+                            "progress": progress,
+                            "total_chunks": total_chunks,
+                            "indexed_chunks": indexed_chunks,
+                            "error_message": error_message,
+                        }
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to record index progress. file_id=%s stage=%s error=%s", file_id, stage, exc)
+
             for source_path in normalized_sources:
+                fallback_file_id = source_file_ids.get(source_path)
                 target = (self.settings.root_dir / source_path).resolve()
                 if not target.exists() or not target.is_file():
                     logger.warning("Skip reindexing missing document source after metadata change: %s", source_path)
+                    if fallback_file_id is not None:
+                        try:
+                            self.document_library.update_file_index_states(
+                                [fallback_file_id],
+                                index_status="failed",
+                                parse_status="failed",
+                                parse_error=f"Stored file not found: {source_path}",
+                            )
+                        except Exception as exc:
+                            logger.warning("Failed to update missing file index state: %s", exc)
+                    emit(
+                        fallback_file_id,
+                        status="failed",
+                        stage="failed",
+                        progress=100,
+                        error_message=f"Stored file not found: {source_path}",
+                    )
                     continue
 
-                index_metadata = self._db_index_metadata_for_path(target)
-                documents = (
-                    self._attach_index_metadata(load_documents_from_file(target), index_metadata)
-                    if index_metadata is not None
-                    else []
-                )
-                chunks = self.split_documents(documents)
-                if chunks:
-                    _ = self.vector_store
-                self._delete_chunks_by_source(self._relative_source_path(target))
-                self._upsert_chunks(chunks)
-                for file_id in self._collect_file_ids_from_documents(documents):
-                    if file_id in seen_file_ids:
-                        continue
-                    seen_file_ids.add(file_id)
-                    indexed_file_ids.append(file_id)
+                file_id = fallback_file_id
+                try:
+                    emit(file_id, status="running", stage="loading", progress=5)
+                    index_metadata = self._db_index_metadata_for_path(target)
+                    metadata_file_id = _safe_int((index_metadata or {}).get("file_id"))
+                    file_id = metadata_file_id or file_id
+                    if index_metadata is None:
+                        raise RuntimeError(f"Document metadata not found for: {source_path}")
 
-                documents_loaded += len(documents)
-                chunks_indexed += len(chunks)
-                indexed_sources.append(source_path)
+                    emit(file_id, status="running", stage="parsing", progress=20)
+                    loaded_documents = load_documents_from_file(target)
+                    documents = self._attach_index_metadata(loaded_documents, index_metadata)
+
+                    emit(file_id, status="running", stage="splitting", progress=40)
+                    chunks = self.split_documents(documents)
+                    total_chunks = len(chunks)
+                    emit(
+                        file_id,
+                        status="running",
+                        stage="embedding",
+                        progress=55,
+                        total_chunks=total_chunks,
+                        indexed_chunks=0,
+                    )
+
+                    if chunks:
+                        _ = self.vector_store
+                    self._delete_chunks_by_source(self._relative_source_path(target))
+
+                    def on_chunk_batch(indexed: int, total: int) -> None:
+                        batch_progress = 60 + int((indexed / max(total, 1)) * 35)
+                        emit(
+                            file_id,
+                            status="running",
+                            stage="writing",
+                            progress=batch_progress,
+                            total_chunks=total,
+                            indexed_chunks=indexed,
+                        )
+
+                    self._upsert_chunks(chunks, progress_callback=on_chunk_batch)
+
+                    for collected_file_id in self._collect_file_ids_from_documents(documents):
+                        if collected_file_id in seen_file_ids:
+                            continue
+                        seen_file_ids.add(collected_file_id)
+                        indexed_file_ids.append(collected_file_id)
+
+                    documents_loaded += len(documents)
+                    chunks_indexed += total_chunks
+                    indexed_sources.append(source_path)
+                    emit(
+                        file_id,
+                        status="success",
+                        stage="success",
+                        progress=100,
+                        total_chunks=total_chunks,
+                        indexed_chunks=total_chunks,
+                    )
+                except Exception as exc:
+                    logger.exception("Failed to reindex document file. source=%s error=%s", source_path, exc)
+                    if file_id is not None:
+                        try:
+                            self.document_library.update_file_index_states(
+                                [file_id],
+                                index_status="failed",
+                                parse_status="failed",
+                                parse_error=str(exc),
+                            )
+                        except Exception as state_exc:
+                            logger.warning("Failed to update failed file index state: %s", state_exc)
+                    emit(
+                        file_id,
+                        status="failed",
+                        stage="failed",
+                        progress=100,
+                        error_message=str(exc),
+                    )
 
             if indexed_file_ids:
                 try:
-                    self.document_library.update_file_index_states(indexed_file_ids, index_status="success")
+                    self.document_library.update_file_index_states(
+                        indexed_file_ids,
+                        index_status="success",
+                        parse_status="success",
+                        parse_error=None,
+                    )
                 except Exception as exc:
                     logger.warning("Failed to update file index state after document reindex: %s", exc)
 
@@ -2038,14 +2171,38 @@ class KnowledgeBaseService:
         if not source_path:
             raise FileNotFoundError(f"File path not found for file_id={file_id}")
 
-        self.document_library.update_file_index_states([file_id], index_status="queued", parse_error=None)
-        self.document_library.update_file_index_states([file_id], index_status="running", parse_error=None)
+        index_job = self.document_library.create_index_job(job_type="files", file_ids=[file_id])
+        job_id = index_job.get("job_id")
+        source_paths = [str(item) for item in index_job.get("source_paths", [source_path]) if str(item).strip()]
+        self.document_library.start_index_job(int(job_id) if job_id is not None else None)
+
+        def progress_callback(event: dict[str, Any]) -> None:
+            self.document_library.update_index_job_file(
+                job_id=int(job_id) if job_id is not None else None,
+                file_id=event.get("file_id"),
+                status=event.get("status"),
+                stage=event.get("stage"),
+                progress=event.get("progress"),
+                total_chunks=event.get("total_chunks"),
+                indexed_chunks=event.get("indexed_chunks"),
+                error_message=event.get("error_message"),
+            )
+
         try:
-            stats = self.reindex_document_files(file_ids=[file_id], source_paths=[source_path])
+            stats = self.reindex_document_files(
+                file_ids=[file_id],
+                source_paths=source_paths or [source_path],
+                progress_callback=progress_callback,
+            )
         except Exception as exc:
             self.document_library.update_file_index_states([file_id], index_status="failed", parse_error=str(exc))
+            self.document_library.finish_index_job(
+                int(job_id) if job_id is not None else None,
+                status="failed",
+                error_message=str(exc),
+            )
             raise
-        self.document_library.update_file_index_states([file_id], index_status="success", parse_error=None)
+        self.document_library.finish_index_job(int(job_id) if job_id is not None else None)
         return {
             "file_id": file_id,
             "path": source_path,

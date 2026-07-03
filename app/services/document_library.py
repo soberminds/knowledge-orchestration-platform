@@ -569,9 +569,14 @@ class DocumentLibraryService:
             return base
         return f"{base}/{name}"
 
-    def _file_to_payload(self, file_row: DocumentFileRow, folder_cache: str = "") -> dict[str, Any]:
+    def _file_to_payload(
+        self,
+        file_row: DocumentFileRow,
+        folder_cache: str = "",
+        index_task: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         display_path = f"{folder_cache}/{file_row.original_name}" if folder_cache else file_row.original_name
-        return {
+        payload = {
             "id": file_row.id,
             "path": file_row.file_path,
             "display_path": display_path,
@@ -588,6 +593,9 @@ class DocumentLibraryService:
             "parse_error": file_row.parse_error,
             "last_indexed_at": file_row.last_indexed_at.isoformat(timespec="seconds") if file_row.last_indexed_at else None,
         }
+        if index_task:
+            payload.update(index_task)
+        return payload
 
     def _file_to_agent_payload(self, file_row: DocumentFileRow, folder_cache: str = "") -> dict[str, Any]:
         payload = self._file_to_payload(file_row, folder_cache=folder_cache)
@@ -931,6 +939,410 @@ class DocumentLibraryService:
             "source_type": "db",
         }
 
+    def _is_index_job_table_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "kop_index_job" in message or "kop_index_job_file" in message
+
+    def _clamp_progress(self, value: int | float | None) -> int:
+        try:
+            number = int(value or 0)
+        except Exception:
+            number = 0
+        return max(0, min(100, number))
+
+    def _dt_to_iso(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if hasattr(value, "isoformat"):
+            return value.isoformat(timespec="seconds")
+        return str(value)
+
+    def _index_task_payload_from_row(self, row) -> dict[str, Any]:
+        return {
+            "index_job_file_id": int(row[0]),
+            "index_job_id": int(row[1]),
+            "index_job_type": str(row[2] or ""),
+            "index_status": str(row[3] or "pending"),
+            "index_stage": str(row[4] or "pending"),
+            "index_progress": self._clamp_progress(row[5]),
+            "index_total_chunks": int(row[6] or 0),
+            "index_indexed_chunks": int(row[7] or 0),
+            "index_error_message": str(row[8]) if row[8] is not None else None,
+            "index_started_at": self._dt_to_iso(row[9]),
+            "index_finished_at": self._dt_to_iso(row[10]),
+            "index_updated_at": self._dt_to_iso(row[11]),
+        }
+
+    def _latest_index_task_map(self, session, user_id: int, file_ids: list[int]) -> dict[int, dict[str, Any]]:
+        if not file_ids:
+            return {}
+
+        tasks: dict[int, dict[str, Any]] = {}
+        try:
+            statement = text(
+                """
+                SELECT
+                    ijf.id,
+                    ijf.job_id,
+                    ij.job_type,
+                    ijf.status,
+                    ijf.stage,
+                    ijf.progress,
+                    ijf.total_chunks,
+                    ijf.indexed_chunks,
+                    ijf.error_message,
+                    ijf.started_at,
+                    ijf.finished_at,
+                    ijf.updated_at,
+                    ijf.document_file_id
+                FROM kop_index_job_file ijf
+                INNER JOIN kop_index_job ij ON ij.id = ijf.job_id
+                WHERE ijf.user_id = :user_id
+                  AND ijf.document_file_id = :file_id
+                ORDER BY ijf.created_at DESC, ijf.id DESC
+                LIMIT 1
+                """
+            )
+            for file_id in file_ids:
+                row = session.execute(statement, {"user_id": user_id, "file_id": int(file_id)}).first()
+                if row:
+                    tasks[int(row[12])] = self._index_task_payload_from_row(row)
+        except Exception as exc:
+            if self._is_index_job_table_error(exc):
+                return {}
+            raise
+        return tasks
+
+    def _file_rows_for_index_targets(self, session, user_id: int, file_ids: list[int]) -> list[DocumentFileRow]:
+        normalized_ids = sorted({int(file_id) for file_id in file_ids if file_id is not None})
+        if not normalized_ids:
+            return []
+        rows: list[DocumentFileRow] = []
+        for file_id in normalized_ids:
+            row = self._get_file_by_id(session, user_id, file_id)
+            if row is not None:
+                rows.append(row)
+        return rows
+
+    def list_document_index_targets(self, file_ids: list[int] | None = None) -> dict[str, Any]:
+        self._ensure_sql()
+        with session_scope() as session:
+            user_id = self._get_or_create_default_user_id(session)
+            rows = (
+                self._file_rows_for_index_targets(session, user_id, file_ids or [])
+                if file_ids is not None
+                else self._list_user_file_rows(session, user_id)
+            )
+            return {
+                "user_id": user_id,
+                "file_ids": [row.id for row in rows],
+                "source_paths": [row.file_path for row in rows],
+            }
+
+    def create_index_job(self, *, job_type: str, file_ids: list[int]) -> dict[str, Any]:
+        self._ensure_sql()
+        normalized_job_type = str(job_type or "files").strip().lower() or "files"
+        normalized_file_ids = sorted({int(file_id) for file_id in file_ids if file_id is not None})
+        try:
+            with session_scope() as session:
+                user_id = self._get_or_create_default_user_id(session)
+                rows = self._file_rows_for_index_targets(session, user_id, normalized_file_ids)
+                now_value = self._now()
+                result = session.execute(
+                    text(
+                        """
+                        INSERT INTO kop_index_job
+                            (user_id, job_type, status, total_files, finished_files, failed_files,
+                             total_chunks, indexed_chunks, message, error_message, started_at, finished_at,
+                             created_at, updated_at)
+                        VALUES
+                            (:user_id, :job_type, 'queued', :total_files, 0, 0,
+                             0, 0, :message, NULL, NULL, NULL, :created_at, :updated_at)
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                        "job_type": normalized_job_type,
+                        "total_files": len(rows),
+                        "message": "Index task queued.",
+                        "created_at": now_value,
+                        "updated_at": now_value,
+                    },
+                )
+                job_id = int(result.lastrowid)
+                for row in rows:
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO kop_index_job_file
+                                (job_id, user_id, document_file_id, file_path, display_name, status, stage,
+                                 progress, total_chunks, indexed_chunks, error_message, started_at, finished_at,
+                                 created_at, updated_at)
+                            VALUES
+                                (:job_id, :user_id, :document_file_id, :file_path, :display_name, 'queued', 'queued',
+                                 0, 0, 0, NULL, NULL, NULL, :created_at, :updated_at)
+                            """
+                        ),
+                        {
+                            "job_id": job_id,
+                            "user_id": user_id,
+                            "document_file_id": row.id,
+                            "file_path": row.file_path,
+                            "display_name": row.original_name,
+                            "created_at": now_value,
+                            "updated_at": now_value,
+                        },
+                    )
+
+                if rows:
+                    session.execute(
+                        text(
+                            """
+                            UPDATE kop_document_file
+                            SET index_status = 'queued',
+                                parse_status = 'queued',
+                                parse_error = NULL,
+                                updated_at = :updated_at
+                            WHERE user_id = :user_id
+                              AND id = :file_id
+                            """
+                        ),
+                        [
+                            {"user_id": user_id, "file_id": row.id, "updated_at": now_value}
+                            for row in rows
+                        ],
+                    )
+
+                return {
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "file_ids": [row.id for row in rows],
+                    "source_paths": [row.file_path for row in rows],
+                }
+        except Exception as exc:
+            if not self._is_index_job_table_error(exc):
+                raise
+            if normalized_file_ids:
+                self.update_file_index_states(
+                    normalized_file_ids,
+                    index_status="queued",
+                    parse_status="queued",
+                    parse_error=None,
+                )
+            fallback = self.list_document_index_targets(normalized_file_ids)
+            fallback["job_id"] = None
+            return fallback
+
+    def start_index_job(self, job_id: int | None) -> None:
+        if not job_id:
+            return
+        try:
+            with session_scope() as session:
+                now_value = self._now()
+                session.execute(
+                    text(
+                        """
+                        UPDATE kop_index_job
+                        SET status = 'running',
+                            started_at = COALESCE(started_at, :started_at),
+                            message = :message,
+                            updated_at = :updated_at
+                        WHERE id = :job_id
+                        """
+                    ),
+                    {
+                        "job_id": int(job_id),
+                        "started_at": now_value,
+                        "updated_at": now_value,
+                        "message": "Index task is running.",
+                    },
+                )
+        except Exception as exc:
+            if not self._is_index_job_table_error(exc):
+                raise
+
+    def _refresh_index_job_summary(self, session, job_id: int, *, force_status: str | None = None, error_message: str | None = None) -> None:
+        row = session.execute(
+            text(
+                """
+                SELECT
+                    COUNT(*) AS total_files,
+                    COALESCE(SUM(CASE WHEN status IN ('success', 'failed') THEN 1 ELSE 0 END), 0) AS finished_files,
+                    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_files,
+                    COALESCE(SUM(total_chunks), 0) AS total_chunks,
+                    COALESCE(SUM(indexed_chunks), 0) AS indexed_chunks
+                FROM kop_index_job_file
+                WHERE job_id = :job_id
+                """
+            ),
+            {"job_id": int(job_id)},
+        ).first()
+        if not row:
+            return
+
+        total_files = int(row[0] or 0)
+        finished_files = int(row[1] or 0)
+        failed_files = int(row[2] or 0)
+        total_chunks = int(row[3] or 0)
+        indexed_chunks = int(row[4] or 0)
+        status = force_status
+        if status is None:
+            status = "running"
+            if total_files > 0 and finished_files >= total_files:
+                status = "failed" if failed_files else "success"
+
+        now_value = self._now()
+        finished_at = now_value if status in {"success", "failed", "cancelled"} else None
+        session.execute(
+            text(
+                """
+                UPDATE kop_index_job
+                SET status = :status,
+                    total_files = :total_files,
+                    finished_files = :finished_files,
+                    failed_files = :failed_files,
+                    total_chunks = :total_chunks,
+                    indexed_chunks = :indexed_chunks,
+                    error_message = :error_message,
+                    finished_at = COALESCE(:finished_at, finished_at),
+                    updated_at = :updated_at
+                WHERE id = :job_id
+                """
+            ),
+            {
+                "job_id": int(job_id),
+                "status": status,
+                "total_files": total_files,
+                "finished_files": finished_files,
+                "failed_files": failed_files,
+                "total_chunks": total_chunks,
+                "indexed_chunks": indexed_chunks,
+                "error_message": error_message,
+                "finished_at": finished_at,
+                "updated_at": now_value,
+            },
+        )
+
+    def finish_index_job(self, job_id: int | None, *, status: str | None = None, error_message: str | None = None) -> None:
+        if not job_id:
+            return
+        try:
+            with session_scope() as session:
+                self._refresh_index_job_summary(
+                    session,
+                    int(job_id),
+                    force_status=str(status) if status else None,
+                    error_message=error_message,
+                )
+        except Exception as exc:
+            if not self._is_index_job_table_error(exc):
+                raise
+
+    def update_index_job_file(
+        self,
+        *,
+        job_id: int | None,
+        file_id: int | None,
+        status: str | None = None,
+        stage: str | None = None,
+        progress: int | None = None,
+        total_chunks: int | None = None,
+        indexed_chunks: int | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if not job_id or not file_id:
+            return
+
+        normalized_status = str(status).strip().lower() if status is not None else None
+        normalized_stage = str(stage).strip().lower() if stage is not None else None
+        now_value = self._now()
+        progress_value = self._clamp_progress(progress) if progress is not None else None
+        try:
+            with session_scope() as session:
+                set_clauses = ["updated_at = :updated_at"]
+                params: dict[str, Any] = {
+                    "job_id": int(job_id),
+                    "file_id": int(file_id),
+                    "updated_at": now_value,
+                }
+                if normalized_status:
+                    set_clauses.append("status = :status")
+                    params["status"] = normalized_status
+                    if normalized_status == "running":
+                        set_clauses.append("started_at = COALESCE(started_at, :started_at)")
+                        params["started_at"] = now_value
+                    if normalized_status in {"success", "failed", "cancelled"}:
+                        set_clauses.append("finished_at = :finished_at")
+                        params["finished_at"] = now_value
+                if normalized_stage:
+                    set_clauses.append("stage = :stage")
+                    params["stage"] = normalized_stage
+                if progress_value is not None:
+                    set_clauses.append("progress = :progress")
+                    params["progress"] = progress_value
+                if total_chunks is not None:
+                    set_clauses.append("total_chunks = :total_chunks")
+                    params["total_chunks"] = max(0, int(total_chunks or 0))
+                if indexed_chunks is not None:
+                    set_clauses.append("indexed_chunks = :indexed_chunks")
+                    params["indexed_chunks"] = max(0, int(indexed_chunks or 0))
+                if error_message is not None:
+                    set_clauses.append("error_message = :error_message")
+                    params["error_message"] = error_message
+                elif normalized_status in {"queued", "running", "success"}:
+                    set_clauses.append("error_message = NULL")
+
+                session.execute(
+                    text(
+                        f"""
+                        UPDATE kop_index_job_file
+                        SET {", ".join(set_clauses)}
+                        WHERE job_id = :job_id
+                          AND document_file_id = :file_id
+                        """
+                    ),
+                    params,
+                )
+
+                if normalized_status:
+                    file_status = normalized_status if normalized_status in {"queued", "running", "success", "failed"} else "running"
+                    file_set = [
+                        "index_status = :index_status",
+                        "parse_status = :parse_status",
+                        "updated_at = :updated_at",
+                    ]
+                    file_params: dict[str, Any] = {
+                        "file_id": int(file_id),
+                        "index_status": file_status,
+                        "parse_status": file_status,
+                        "updated_at": now_value,
+                    }
+                    if file_status == "success":
+                        file_set.append("last_indexed_at = :last_indexed_at")
+                        file_set.append("parse_error = NULL")
+                        file_params["last_indexed_at"] = now_value
+                    elif file_status in {"queued", "running"}:
+                        file_set.append("parse_error = NULL")
+                    elif file_status == "failed":
+                        file_set.append("parse_error = :parse_error")
+                        file_params["parse_error"] = error_message or "Index task failed."
+
+                    session.execute(
+                        text(
+                            f"""
+                            UPDATE kop_document_file
+                            SET {", ".join(file_set)}
+                            WHERE id = :file_id
+                            """
+                        ),
+                        file_params,
+                    )
+
+                self._refresh_index_job_summary(session, int(job_id))
+        except Exception as exc:
+            if not self._is_index_job_table_error(exc):
+                raise
+
     def update_file_index_states(
         self,
         file_ids: list[int],
@@ -995,7 +1407,8 @@ class DocumentLibraryService:
             if row is None:
                 raise FileNotFoundError(f"File not found: {file_id}")
             folder_cache = self._folder_path_cache(session, user_id, row.folder_id)
-            return self._file_to_payload(row, folder_cache=folder_cache)
+            index_tasks = self._latest_index_task_map(session, user_id, [row.id])
+            return self._file_to_payload(row, folder_cache=folder_cache, index_task=index_tasks.get(row.id))
 
     def get_document_metadata_for_agent(self, file_id: int) -> dict[str, Any]:
         self._ensure_sql()
@@ -1112,9 +1525,16 @@ class DocumentLibraryService:
                 payload.append(self._folder_row_to_payload(folder_row, folder_path))
 
             file_rows = self._list_user_file_rows(session, user_id)
+            index_tasks = self._latest_index_task_map(session, user_id, [row.id for row in file_rows])
             for file_row in file_rows:
                 folder_cache = self._folder_path_cache(session, user_id, file_row.folder_id)
-                payload.append(self._file_to_payload(file_row, folder_cache=folder_cache))
+                payload.append(
+                    self._file_to_payload(
+                        file_row,
+                        folder_cache=folder_cache,
+                        index_task=index_tasks.get(file_row.id),
+                    )
+                )
 
             return sorted(
                 payload,
@@ -1126,6 +1546,57 @@ class DocumentLibraryService:
 
     def _mark_stale_index_tasks_failed(self, session, user_id: int) -> int:
         cutoff = self._now() - timedelta(hours=2)
+        parse_error = "Index task was interrupted or expired. Please queue index rebuild again."
+        now_value = self._now()
+        try:
+            session.execute(
+                text(
+                    """
+                    UPDATE kop_index_job_file
+                    SET status = 'failed',
+                        stage = 'failed',
+                        progress = 100,
+                        error_message = :error_message,
+                        finished_at = COALESCE(finished_at, :finished_at),
+                        updated_at = :updated_at
+                    WHERE user_id = :user_id
+                      AND status IN ('queued', 'running')
+                      AND updated_at < :cutoff
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "cutoff": cutoff,
+                    "finished_at": now_value,
+                    "updated_at": now_value,
+                    "error_message": parse_error,
+                },
+            )
+            session.execute(
+                text(
+                    """
+                    UPDATE kop_index_job
+                    SET status = 'failed',
+                        error_message = :error_message,
+                        finished_at = COALESCE(finished_at, :finished_at),
+                        updated_at = :updated_at
+                    WHERE user_id = :user_id
+                      AND status IN ('queued', 'running')
+                      AND updated_at < :cutoff
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "cutoff": cutoff,
+                    "finished_at": now_value,
+                    "updated_at": now_value,
+                    "error_message": parse_error,
+                },
+            )
+        except Exception as exc:
+            if not self._is_index_job_table_error(exc):
+                raise
+
         result = session.execute(
             text(
                 """
@@ -1143,8 +1614,8 @@ class DocumentLibraryService:
             {
                 "user_id": user_id,
                 "cutoff": cutoff,
-                "updated_at": self._now(),
-                "parse_error": "Index task was interrupted or expired. Please queue index rebuild again.",
+                "updated_at": now_value,
+                "parse_error": parse_error,
             },
         )
         return int(result.rowcount or 0)

@@ -342,6 +342,17 @@ class DocumentInfo(BaseModel):
     index_status: str | None = None
     parse_error: str | None = None
     last_indexed_at: str | None = None
+    index_job_id: int | None = None
+    index_job_file_id: int | None = None
+    index_job_type: str | None = None
+    index_stage: str | None = None
+    index_progress: int | None = None
+    index_total_chunks: int | None = None
+    index_indexed_chunks: int | None = None
+    index_error_message: str | None = None
+    index_updated_at: str | None = None
+    index_started_at: str | None = None
+    index_finished_at: str | None = None
 
 
 class CreateDocumentFolderRequest(BaseModel):

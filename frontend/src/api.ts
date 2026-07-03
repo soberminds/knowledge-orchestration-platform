@@ -298,6 +298,17 @@ export interface DocumentInfo {
   index_status?: string | null;
   parse_error?: string | null;
   last_indexed_at?: string | null;
+  index_job_id?: number | null;
+  index_job_file_id?: number | null;
+  index_job_type?: string | null;
+  index_stage?: string | null;
+  index_progress?: number | null;
+  index_total_chunks?: number | null;
+  index_indexed_chunks?: number | null;
+  index_error_message?: string | null;
+  index_updated_at?: string | null;
+  index_started_at?: string | null;
+  index_finished_at?: string | null;
 }
 
 export interface CreateDocumentFolderResponse {

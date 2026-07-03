@@ -388,24 +388,31 @@ async def _reindex_mutated_document_files(
 ):
     normalized_ids = sorted({int(item) for item in file_ids if item is not None})
     normalized_sources = [str(item).strip() for item in source_paths if str(item).strip()]
-    if normalized_ids:
-        await run_in_threadpool(
-            library.update_file_index_states,
-            normalized_ids,
-            index_status="queued",
-            parse_error=None,
+    index_job = await run_in_threadpool(library.create_index_job, job_type="files", file_ids=normalized_ids)
+    job_id = index_job.get("job_id")
+    normalized_ids = [int(item) for item in index_job.get("file_ids", normalized_ids) if item is not None]
+    normalized_sources = [str(item) for item in index_job.get("source_paths", normalized_sources) if str(item).strip()]
+
+    await run_in_threadpool(library.start_index_job, int(job_id) if job_id is not None else None)
+
+    def progress_callback(event: dict[str, Any]) -> None:
+        library.update_index_job_file(
+            job_id=int(job_id) if job_id is not None else None,
+            file_id=event.get("file_id"),
+            status=event.get("status"),
+            stage=event.get("stage"),
+            progress=event.get("progress"),
+            total_chunks=event.get("total_chunks"),
+            indexed_chunks=event.get("indexed_chunks"),
+            error_message=event.get("error_message"),
         )
-        await run_in_threadpool(
-            library.update_file_index_states,
-            normalized_ids,
-            index_status="running",
-            parse_error=None,
-        )
+
     try:
         stats = await run_in_threadpool(
             service.reindex_document_files,
             file_ids=normalized_ids,
             source_paths=normalized_sources,
+            progress_callback=progress_callback,
         )
     except Exception as exc:
         if normalized_ids:
@@ -415,14 +422,14 @@ async def _reindex_mutated_document_files(
                 index_status="failed",
                 parse_error=str(exc),
             )
-        raise
-    if normalized_ids:
         await run_in_threadpool(
-            library.update_file_index_states,
-            normalized_ids,
-            index_status="success",
-            parse_error=None,
+            library.finish_index_job,
+            int(job_id) if job_id is not None else None,
+            status="failed",
+            error_message=str(exc),
         )
+        raise
+    await run_in_threadpool(library.finish_index_job, int(job_id) if job_id is not None else None)
     return stats
 
 
@@ -433,6 +440,7 @@ def _enqueue_index_job(
     *,
     user_id: int | None,
     kind: str,
+    job_id: int | None = None,
     file_ids: list[int] | None = None,
     source_paths: list[str] | None = None,
 ) -> None:
@@ -442,6 +450,7 @@ def _enqueue_index_job(
     normalized_source_paths = [str(item).strip() for item in (source_paths or []) if str(item).strip()]
     job = {
         "kind": kind,
+        "job_id": job_id,
         "user_id": user_id,
         "file_ids": normalized_file_ids,
         "source_paths": normalized_source_paths,
@@ -478,11 +487,31 @@ def _run_index_job_queue(library: DocumentLibraryService, service: KnowledgeBase
         token = set_current_user_id(int(user_id) if user_id is not None else None)
         try:
             kind = str(job.get("kind") or "")
+            raw_job_id = job.get("job_id")
+            job_id = int(raw_job_id) if raw_job_id is not None else None
             file_ids = [int(item) for item in job.get("file_ids", []) if item is not None]
             source_paths = [str(item) for item in job.get("source_paths", []) if str(item).strip()]
 
+            if job_id is not None:
+                library.start_index_job(job_id)
+
+            def progress_callback(event: dict[str, Any]) -> None:
+                library.update_index_job_file(
+                    job_id=job_id,
+                    file_id=event.get("file_id"),
+                    status=event.get("status"),
+                    stage=event.get("stage"),
+                    progress=event.get("progress"),
+                    total_chunks=event.get("total_chunks"),
+                    indexed_chunks=event.get("indexed_chunks"),
+                    error_message=event.get("error_message"),
+                )
+
             if kind == "full":
-                file_ids = library.list_document_file_ids()
+                if not file_ids:
+                    targets = library.list_document_index_targets()
+                    file_ids = [int(item) for item in targets.get("file_ids", []) if item is not None]
+                    source_paths = [str(item) for item in targets.get("source_paths", []) if str(item).strip()]
                 if file_ids:
                     library.update_file_index_states(
                         file_ids,
@@ -491,7 +520,14 @@ def _run_index_job_queue(library: DocumentLibraryService, service: KnowledgeBase
                         parse_error=None,
                     )
                 logger.info("Starting queued full index rebuild. user_id=%s", user_id)
-                stats = service.rebuild_index()
+                stats = service.reindex_document_files(
+                    file_ids=file_ids,
+                    source_paths=source_paths,
+                    reset_collection=True,
+                    progress_callback=progress_callback,
+                )
+                if job_id is not None:
+                    library.finish_index_job(job_id)
                 logger.info(
                     "Queued full index rebuild finished. documents=%s chunks=%s",
                     stats.documents_loaded,
@@ -508,14 +544,13 @@ def _run_index_job_queue(library: DocumentLibraryService, service: KnowledgeBase
                         parse_error=None,
                     )
                 logger.info("Starting queued file reindex. user_id=%s file_ids=%s", user_id, file_ids)
-                stats = service.reindex_document_files(file_ids=file_ids, source_paths=source_paths)
-                if file_ids:
-                    library.update_file_index_states(
-                        file_ids,
-                        index_status="success",
-                        parse_status="success",
-                        parse_error=None,
-                    )
+                stats = service.reindex_document_files(
+                    file_ids=file_ids,
+                    source_paths=source_paths,
+                    progress_callback=progress_callback,
+                )
+                if job_id is not None:
+                    library.finish_index_job(job_id)
                 logger.info(
                     "Queued file reindex finished. documents=%s chunks=%s file_ids=%s",
                     stats.documents_loaded,
@@ -525,7 +560,11 @@ def _run_index_job_queue(library: DocumentLibraryService, service: KnowledgeBase
                 continue
 
             logger.warning("Unknown queued index job kind: %s", kind)
+            if job_id is not None:
+                library.finish_index_job(job_id, status="failed", error_message=f"Unknown index job kind: {kind}")
         except Exception as exc:
+            raw_job_id = job.get("job_id")
+            job_id = int(raw_job_id) if raw_job_id is not None else None
             file_ids = [int(item) for item in job.get("file_ids", []) if item is not None]
             if not file_ids and str(job.get("kind") or "") == "full":
                 try:
@@ -542,6 +581,11 @@ def _run_index_job_queue(library: DocumentLibraryService, service: KnowledgeBase
                     )
                 except Exception:
                     logger.exception("Failed to mark queued index job as failed.")
+            if job_id is not None:
+                try:
+                    library.finish_index_job(job_id, status="failed", error_message=str(exc))
+                except Exception:
+                    logger.exception("Failed to mark index job as failed.")
             logger.exception("Queued index job failed: %s", exc)
         finally:
             reset_current_user_id(token)
@@ -1095,6 +1139,17 @@ def _document_info_from_payload(item: dict[str, Any]) -> DocumentInfo:
         index_status=str(item.get("index_status") or "") or None,
         parse_error=str(item.get("parse_error") or "") or None,
         last_indexed_at=str(item.get("last_indexed_at") or "") or None,
+        index_job_id=int(item["index_job_id"]) if item.get("index_job_id") is not None else None,
+        index_job_file_id=int(item["index_job_file_id"]) if item.get("index_job_file_id") is not None else None,
+        index_job_type=str(item.get("index_job_type") or "") or None,
+        index_stage=str(item.get("index_stage") or "") or None,
+        index_progress=int(item["index_progress"]) if item.get("index_progress") is not None else None,
+        index_total_chunks=int(item["index_total_chunks"]) if item.get("index_total_chunks") is not None else None,
+        index_indexed_chunks=int(item["index_indexed_chunks"]) if item.get("index_indexed_chunks") is not None else None,
+        index_error_message=str(item.get("index_error_message") or "") or None,
+        index_updated_at=str(item.get("index_updated_at") or "") or None,
+        index_started_at=str(item.get("index_started_at") or "") or None,
+        index_finished_at=str(item.get("index_finished_at") or "") or None,
     )
 
 
@@ -1673,20 +1728,19 @@ async def ingest(
     service: KnowledgeBaseService = Depends(get_knowledge_base_service),
 ) -> IngestResponse:
     file_ids = await run_in_threadpool(library.list_document_file_ids)
-    if file_ids:
-        await run_in_threadpool(
-            library.update_file_index_states,
-            file_ids,
-            index_status="queued",
-            parse_status="queued",
-            parse_error=None,
-        )
+    index_job = await run_in_threadpool(library.create_index_job, job_type="full", file_ids=file_ids)
+    job_id = index_job.get("job_id")
+    file_ids = [int(item) for item in index_job.get("file_ids", []) if item is not None]
+    source_paths = [str(item) for item in index_job.get("source_paths", []) if str(item).strip()]
     _enqueue_index_job(
         background_tasks,
         library,
         service,
         user_id=get_current_user_id(),
         kind="full",
+        job_id=int(job_id) if job_id is not None else None,
+        file_ids=file_ids,
+        source_paths=source_paths,
     )
     return IngestResponse(
         documents_loaded=0,
@@ -1720,17 +1774,10 @@ async def upload_files(
 
     saved_file_ids = [int(item["id"]) for item in saved_files if item.get("id") is not None]
     saved_paths = [str(item["path"]) for item in saved_files if item.get("path")]
-    if saved_file_ids:
-        try:
-            await run_in_threadpool(
-                library.update_file_index_states,
-                saved_file_ids,
-                index_status="queued",
-                parse_status="queued",
-                parse_error=None,
-            )
-        except Exception:
-            logger.exception("Failed to mark uploaded files as queued for indexing.")
+    index_job = await run_in_threadpool(library.create_index_job, job_type="files", file_ids=saved_file_ids)
+    job_id = index_job.get("job_id")
+    saved_file_ids = [int(item) for item in index_job.get("file_ids", saved_file_ids) if item is not None]
+    saved_paths = [str(item) for item in index_job.get("source_paths", saved_paths) if str(item).strip()]
 
     _enqueue_index_job(
         background_tasks,
@@ -1738,6 +1785,7 @@ async def upload_files(
         service,
         user_id=get_current_user_id(),
         kind="files",
+        job_id=int(job_id) if job_id is not None else None,
         file_ids=saved_file_ids,
         source_paths=saved_paths,
     )

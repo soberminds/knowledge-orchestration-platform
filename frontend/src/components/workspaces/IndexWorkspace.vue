@@ -22,16 +22,24 @@ const { locale, t } = useI18n();
 const fileRows = computed(() =>
   props.documents
     .filter((item) => !item.is_directory)
-    .map((item) => ({
-      ...item,
-      displayName: item.name || basenameOf(item.display_path || item.path),
-      displayPath: item.display_path || item.path,
-      folderPath: parentPathOf(item.display_path || item.path),
-      status: normalizeStatus(item.index_status || item.parse_status),
-      progress: indexProgress(item.index_status || item.parse_status),
-      updatedAt: item.last_indexed_at || item.modified_at,
-      errorText: item.parse_error || "",
-    }))
+    .map((item) => {
+      const status = normalizeStatus(item.index_status || item.parse_status);
+      const stage = normalizeStage(item.index_stage || item.index_status || item.parse_status);
+      const totalChunks = Number(item.index_total_chunks ?? 0);
+      const indexedChunks = Number(item.index_indexed_chunks ?? 0);
+      return {
+        ...item,
+        displayName: item.name || basenameOf(item.display_path || item.path),
+        displayPath: item.display_path || item.path,
+        folderPath: parentPathOf(item.display_path || item.path),
+        status,
+        stage,
+        progress: indexProgress(status, item.index_progress),
+        chunkText: chunkProgressText(indexedChunks, totalChunks),
+        updatedAt: item.index_updated_at || item.index_finished_at || item.last_indexed_at || item.modified_at,
+        errorText: item.index_error_message || item.parse_error || "",
+      };
+    })
     .sort((left, right) => {
       const rankDiff = statusRank(left.status) - statusRank(right.status);
       if (rankDiff !== 0) {
@@ -76,6 +84,14 @@ function normalizeStatus(status?: string | null) {
   return "pending";
 }
 
+function normalizeStage(stage?: string | null) {
+  const normalized = String(stage || "pending").trim().toLowerCase();
+  if (["queued", "loading", "parsing", "splitting", "embedding", "writing", "success", "failed", "pending"].includes(normalized)) {
+    return normalized;
+  }
+  return "pending";
+}
+
 function normalizePath(path?: string | null) {
   return String(path || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
 }
@@ -105,7 +121,10 @@ function statusRank(status: string) {
   return ranks[status] ?? 5;
 }
 
-function indexProgress(status?: string | null) {
+function indexProgress(status?: string | null, progress?: number | null) {
+  if (typeof progress === "number" && Number.isFinite(progress)) {
+    return Math.max(0, Math.min(100, Math.round(progress)));
+  }
   const normalized = normalizeStatus(status);
   if (normalized === "success") {
     return 100;
@@ -122,9 +141,21 @@ function indexProgress(status?: string | null) {
   return 0;
 }
 
+function chunkProgressText(indexedChunks: number, totalChunks: number) {
+  if (!totalChunks && !indexedChunks) {
+    return "";
+  }
+  return t("index.file_chunks", { indexed: Math.max(0, indexedChunks), total: Math.max(0, totalChunks) });
+}
+
 function statusLabel(status?: string | null) {
   const normalized = normalizeStatus(status);
   return t(`index.file_status_${normalized}`);
+}
+
+function stageLabel(stage?: string | null) {
+  const normalized = normalizeStage(stage);
+  return t(`index.file_stage_${normalized}`);
 }
 
 function statusTagType(status?: string | null) {
@@ -218,12 +249,14 @@ function formatDateTime(value?: string | null) {
             <el-tag size="small" effect="plain" round :type="statusTagType(row.status)">
               {{ statusLabel(row.status) }}
             </el-tag>
+            <small>{{ stageLabel(row.stage) }}</small>
           </div>
           <div class="progress-cell">
             <div class="progress-line" :class="progressToneClass(row.status)">
               <span class="progress-fill" :style="{ width: `${row.progress}%` }" />
             </div>
             <span class="progress-text">{{ row.progress }}%</span>
+            <span class="chunk-text">{{ row.chunkText || "-" }}</span>
           </div>
           <span class="muted">{{ formatDateTime(row.updatedAt) }}</span>
           <span class="error-cell" :title="row.errorText">
@@ -408,6 +441,23 @@ function formatDateTime(value?: string | null) {
   font-size: 0.88rem;
 }
 
+.status-cell {
+  min-width: 0;
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+}
+
+.status-cell small {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .file-name span,
 .muted {
   color: var(--text-muted);
@@ -417,9 +467,10 @@ function formatDateTime(value?: string | null) {
 .progress-cell {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(90px, 1fr) 38px;
+  grid-template-columns: minmax(90px, 1fr) 44px;
   align-items: center;
-  gap: 8px;
+  column-gap: 8px;
+  row-gap: 4px;
 }
 
 .progress-line {
@@ -456,6 +507,17 @@ function formatDateTime(value?: string | null) {
   font-size: 0.76rem;
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+.chunk-text {
+  grid-column: 1 / 3;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .error-cell {
