@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import type { ChatModelOption } from "../../api";
 import { useI18n } from "../../composables/useI18n";
+import { formatChinaDateTime } from "../../utils/dateTime";
 
 const props = defineProps<{
   modelOptions: ChatModelOption[];
@@ -26,7 +27,7 @@ const formattedCheckedAt = computed(() => {
   if (!props.lastCheckedAt) {
     return t("model_health.not_checked");
   }
-  return new Date(props.lastCheckedAt).toLocaleString(locale.value, { hour12: false });
+  return formatChinaDateTime(props.lastCheckedAt, locale.value);
 });
 
 function providerLabel(provider: string) {

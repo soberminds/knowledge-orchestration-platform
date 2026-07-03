@@ -10,8 +10,8 @@ import json
 import logging
 import mimetypes
 import os
+import time
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 from urllib import error as urllib_error
@@ -20,11 +20,13 @@ from urllib.parse import urlparse, urlunparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from sqlalchemy import text
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
-from app.core.database import DatabaseUnavailableError
+from app.core.database import DatabaseUnavailableError, session_scope
 from app.core.request_context import get_current_user_id, reset_current_user_id, set_current_user_id
 from app.core.settings import settings
+from app.core.time_utils import now_china_iso, timestamp_to_china_iso
 from app.dependencies import get_auth_service, get_chat_memory_service, get_document_library_service, get_knowledge_base_service
 from app.dependencies import get_agent_tool_confirmation_service
 from app.schemas import (
@@ -820,7 +822,7 @@ def _set_office_callback_status(
     message: str = "",
     callback_status: int | None = None,
 ) -> None:
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now_iso = now_china_iso()
     status = "success" if success else "failed"
     with _office_callback_status_lock:
         previous = dict(_office_callback_status_by_path.get(relative_path, {}))
@@ -853,7 +855,7 @@ def _set_office_index_status(
     index_status: str,
     index_message: str = "",
 ) -> None:
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now_iso = now_china_iso()
     with _office_callback_status_lock:
         previous = dict(_office_callback_status_by_path.get(relative_path, {}))
         payload: dict[str, Any] = {
@@ -950,7 +952,7 @@ def _resolve_callback_download_url(download_url: str) -> str:
 
 
 def _probe_onlyoffice_health() -> OfficeHealthResponse:
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now_iso = now_china_iso()
     ds_public_url = (settings.onlyoffice_document_server_url or "").strip().rstrip("/")
     ds_internal_url = (settings.onlyoffice_document_server_internal_url or "").strip().rstrip("/")
     ds_probe_url = ds_internal_url or ds_public_url
@@ -1111,17 +1113,37 @@ def _probe_onlyoffice_health() -> OfficeHealthResponse:
 async def health(service: KnowledgeBaseService = Depends(get_knowledge_base_service)) -> HealthResponse:
     indexed_chunks = 0
     status = "ok"
+    mysql_time: str | None = None
+    mysql_session_time_zone: str | None = None
     try:
         indexed_chunks = await run_in_threadpool(service.count_chunks)
     except Exception as exc:
         status = "degraded"
         logger.warning("Health chunk count failed, falling back to 0: %s", exc)
 
+    try:
+        mysql_time, mysql_session_time_zone = await run_in_threadpool(_mysql_time_snapshot)
+    except Exception as exc:
+        logger.warning("Health MySQL time snapshot failed: %s", exc)
+
     return HealthResponse(
         status=status,
         collection_name=service.settings.collection_name,
         indexed_chunks=indexed_chunks,
+        server_time=now_china_iso(),
+        server_tz=f"{os.getenv('TZ', '')} {'/'.join(time.tzname)}".strip(),
+        mysql_time=mysql_time,
+        mysql_session_time_zone=mysql_session_time_zone,
     )
+
+
+def _mysql_time_snapshot() -> tuple[str | None, str | None]:
+    with session_scope() as session:
+        row = session.execute(text("SELECT NOW(), @@session.time_zone")).first()
+        if not row:
+            return None, None
+        mysql_now = row[0].isoformat(timespec="seconds") if hasattr(row[0], "isoformat") else str(row[0])
+        return mysql_now, str(row[1] or "")
 
 
 def _document_info_from_payload(item: dict[str, Any]) -> DocumentInfo:
@@ -1503,7 +1525,7 @@ async def save_file_edit_text(
     file_path = _resolve_file_path(path_value)
     extension, _ = _validate_text_edit_file(file_path)
     size_bytes = _atomic_write_text(file_path, payload.content, encoding="utf-8")
-    modified_at = datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(timespec="seconds")
+    modified_at = timestamp_to_china_iso(file_path.stat().st_mtime)
     return FileEditTextSaveResponse(
         path=_relative_path_from_root(file_path),
         saved=True,

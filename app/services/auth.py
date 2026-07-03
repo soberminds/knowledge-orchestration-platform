@@ -15,6 +15,7 @@ from app.core.database import DatabaseUnavailableError, session_scope
 from app.core.redis_client import RedisUnavailableError, get_redis_client
 from app.core.request_context import get_current_user_id
 from app.core.settings import settings
+from app.core.time_utils import now_china
 
 try:
     from sqlalchemy import text
@@ -43,7 +44,7 @@ class UserAuthService:
             raise DatabaseUnavailableError("SQLAlchemy is not installed.")
 
     def _now(self) -> datetime:
-        return datetime.now()
+        return now_china()
 
     def _safe_redis(self):
         if self._redis_client is not None:
@@ -349,4 +350,3 @@ class UserAuthService:
         if not token:
             return
         self._delete_session_token(token)
-

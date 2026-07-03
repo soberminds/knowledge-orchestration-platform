@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import type { OfficeHealthResponse } from "../../api";
 import { useI18n } from "../../composables/useI18n";
+import { formatChinaDateTime } from "../../utils/dateTime";
 
 const props = defineProps<{
   health: OfficeHealthResponse | null;
@@ -21,11 +22,7 @@ const checkedAtText = computed(() => {
   if (!raw) {
     return t("documents.office_health_not_checked");
   }
-  const date = new Date(raw);
-  if (Number.isNaN(date.getTime())) {
-    return raw;
-  }
-  return date.toLocaleString(locale.value, { hour12: false });
+  return formatChinaDateTime(raw, locale.value);
 });
 
 function boolLabel(value: boolean | null | undefined) {

@@ -18,6 +18,7 @@ services:
     env_file:
       - ${KOP_ENV_FILE:-.env.prod}
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       MYSQL_HOST: ${MYSQL_HOST:-middleware-mysql}
       MYSQL_PORT: ${MYSQL_PORT:-3306}
       REDIS_HOST: ${REDIS_HOST:-middleware-redis}

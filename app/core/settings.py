@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import time
 
 
 def _strip_inline_comment(value: str) -> str:
@@ -58,6 +59,16 @@ _load_env_file(ROOT_DIR / ".env")
 
 # Silence Chroma telemetry by default to avoid noisy runtime logs.
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "FALSE")
+if os.name == "nt":
+    # Windows does not reliably understand IANA TZ names such as Asia/Shanghai.
+    # Keep Python's native local clock on Windows; app timestamps use time_utils.
+    os.environ.pop("TZ", None)
+else:
+    os.environ.setdefault("TZ", "Asia/Shanghai")
+    try:
+        time.tzset()
+    except AttributeError:
+        pass
 
 
 def _env_int(name: str, default: int) -> int:
@@ -167,6 +178,7 @@ class Settings:
     mysql_user: str = os.getenv("MYSQL_USER", "root").strip()
     mysql_password: str = os.getenv("MYSQL_PASSWORD", "").strip()
     mysql_charset: str = os.getenv("MYSQL_CHARSET", "utf8mb4").strip()
+    mysql_time_zone: str = os.getenv("MYSQL_TIME_ZONE", "+08:00").strip()
     mysql_connect_timeout_sec: int = _env_int("MYSQL_CONNECT_TIMEOUT_SEC", 5)
     mysql_read_timeout_sec: int = _env_int("MYSQL_READ_TIMEOUT_SEC", 5)
     mysql_write_timeout_sec: int = _env_int("MYSQL_WRITE_TIMEOUT_SEC", 5)

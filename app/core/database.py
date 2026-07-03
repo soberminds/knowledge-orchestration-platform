@@ -9,11 +9,12 @@ from urllib.parse import quote_plus
 from app.core.settings import settings
 
 try:  # Keep the app importable before optional DB dependencies are installed.
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import create_engine, event, text
     from sqlalchemy.engine import Engine
     from sqlalchemy.orm import Session, sessionmaker
 except Exception:  # pragma: no cover - depends on local optional packages
     create_engine = None
+    event = None
     text = None
     Engine = object  # type: ignore[assignment]
     Session = object  # type: ignore[assignment]
@@ -57,6 +58,17 @@ def get_engine():
             pool_recycle=1800,
             future=True,
         )
+        if event is not None and settings.mysql_time_zone:
+            mysql_time_zone = settings.mysql_time_zone
+
+            @event.listens_for(_engine, "connect")
+            def _set_mysql_session_time_zone(dbapi_connection, _connection_record):  # type: ignore[no-untyped-def]
+                cursor = dbapi_connection.cursor()
+                try:
+                    cursor.execute("SET time_zone = %s", (mysql_time_zone,))
+                finally:
+                    cursor.close()
+
         _session_factory = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
     return _engine
 

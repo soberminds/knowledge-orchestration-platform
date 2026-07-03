@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
 import { useI18n } from "./useI18n";
 import {
   createDocumentFolder as createDocumentFolderApi,
@@ -23,6 +23,7 @@ import {
 import { buildFolderScopeTree, type FolderScopeNode } from "../utils/documentTree";
 
 const RETRY_DELAYS_MS = [0, 600, 1200];
+const ACTIVE_INDEX_STATUSES = new Set(["queued", "running"]);
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => {
@@ -67,7 +68,17 @@ export function useDashboard() {
     }
   }
 
-  function scheduleIndexPolling(attempts = 8, delayMs = 3000) {
+  function hasProcessingIndexDocuments(items = documents.value) {
+    return items.some((item) => {
+      if (item.is_directory) {
+        return false;
+      }
+      const status = String(item.index_status || item.parse_status || "").trim().toLowerCase();
+      return ACTIVE_INDEX_STATUSES.has(status);
+    });
+  }
+
+  function scheduleIndexPolling(attempts = 240, delayMs = 3000) {
     clearIndexPolling();
     let remaining = attempts;
 
@@ -78,11 +89,11 @@ export function useDashboard() {
       }
       remaining -= 1;
       try {
-        await refreshDashboard();
+        await refreshDashboard({ skipIndexPolling: true });
       } catch {
         // Keep polling best-effort; explicit errors still surface on direct actions.
       }
-      if (remaining > 0) {
+      if (remaining > 0 && hasProcessingIndexDocuments()) {
         indexPollingTimer = window.setTimeout(tick, delayMs);
       }
     };
@@ -106,7 +117,7 @@ export function useDashboard() {
     officeHealthError.value = "";
   }
 
-  async function refreshDashboard(options?: { retries?: number }) {
+  async function refreshDashboard(options?: { retries?: number; skipIndexPolling?: boolean }) {
     refreshing.value = true;
     clearError();
     const retries = Math.max(0, options?.retries ?? 0);
@@ -127,6 +138,9 @@ export function useDashboard() {
           ]);
           health.value = healthData;
           documents.value = docs;
+          if (!options?.skipIndexPolling && hasProcessingIndexDocuments(docs)) {
+            scheduleIndexPolling();
+          }
           if (officeData) {
             officeHealth.value = officeData;
             officeHealthError.value = "";
@@ -164,7 +178,6 @@ export function useDashboard() {
       await uploadDocuments(selectedFiles.value, folderPath, parentId);
       selectedFiles.value = [];
       await refreshDashboard({ retries: 1 });
-      scheduleIndexPolling();
     } catch (error) {
       errorMessage.value = error instanceof Error ? error.message : t("error.upload_failed");
       throw error;
@@ -286,7 +299,6 @@ export function useDashboard() {
     try {
       await rebuildIndex();
       await refreshDashboard({ retries: 1 });
-      scheduleIndexPolling(10);
     } catch (error) {
       errorMessage.value = error instanceof Error ? error.message : t("error.rebuild_index_failed");
       throw error;
@@ -294,6 +306,10 @@ export function useDashboard() {
       ingesting.value = false;
     }
   }
+
+  onBeforeUnmount(() => {
+    clearIndexPolling();
+  });
 
   async function refreshOfficeHealth() {
     officeHealthLoading.value = true;

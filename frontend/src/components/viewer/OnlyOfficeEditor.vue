@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { getOfficeCallbackStatus, getOfficeEditorConfig, type OfficeCallbackStatusResponse } from "../../api";
 import { useI18n } from "../../composables/useI18n";
+import { formatChinaDateTime } from "../../utils/dateTime";
 
 type OfficeEditorMode = "edit" | "view";
 
@@ -53,11 +54,7 @@ const callbackStatusTimeText = computed(() => {
   if (!payload?.has_event || !payload.updated_at) {
     return t("documents.office_callback_not_saved");
   }
-  const parsed = new Date(payload.updated_at);
-  if (Number.isNaN(parsed.getTime())) {
-    return payload.updated_at;
-  }
-  return parsed.toLocaleString();
+  return formatChinaDateTime(payload.updated_at, locale.value);
 });
 
 const callbackStatusMessage = computed(() => {
@@ -106,11 +103,7 @@ const indexStatusTimeText = computed(() => {
   if (!payload?.index_updated_at) {
     return t("documents.office_index_not_updated");
   }
-  const parsed = new Date(payload.index_updated_at);
-  if (Number.isNaN(parsed.getTime())) {
-    return payload.index_updated_at;
-  }
-  return parsed.toLocaleString();
+  return formatChinaDateTime(payload.index_updated_at, locale.value);
 });
 
 const indexStatusMessage = computed(() => {

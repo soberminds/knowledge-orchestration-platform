@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { listIndexFiles, type DocumentInfo, type HealthResponse, type IndexFileStatusCounts } from "../../api";
 import { useI18n } from "../../composables/useI18n";
+import { formatChinaDateTime } from "../../utils/dateTime";
 
 const props = defineProps<{
   health: HealthResponse | null;
@@ -263,14 +264,7 @@ function progressToneClass(status?: string | null) {
 }
 
 function formatDateTime(value?: string | null) {
-  if (!value) {
-    return "-";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString(locale.value, { hour12: false });
+  return formatChinaDateTime(value, locale.value);
 }
 </script>
 

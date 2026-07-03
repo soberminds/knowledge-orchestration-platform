@@ -503,6 +503,10 @@ class HealthResponse(BaseModel):
     status: str
     collection_name: str
     indexed_chunks: int
+    server_time: str | None = None
+    server_tz: str | None = None
+    mysql_time: str | None = None
+    mysql_session_time_zone: str | None = None
 
 
 ChatResponse.model_rebuild()

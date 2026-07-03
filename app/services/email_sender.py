@@ -6,12 +6,12 @@ import re
 import smtplib
 import ssl
 from dataclasses import dataclass
-from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, parseaddr
 from typing import Any
 
 from app.core.settings import Settings, settings
+from app.core.time_utils import now_china_iso
 
 
 EMAIL_BODY_MAX_CHARS = 20000
@@ -151,7 +151,7 @@ class EmailSender:
             from_email=from_email,
             from_name=self.settings.smtp_from_name,
             smtp_host=self.settings.smtp_host,
-            sent_at=datetime.now().isoformat(timespec="seconds"),
+            sent_at=now_china_iso(),
         ).to_payload()
 
     def _from_email(self) -> str:

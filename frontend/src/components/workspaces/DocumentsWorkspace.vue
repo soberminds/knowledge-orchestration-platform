@@ -23,6 +23,7 @@ import {
 } from "../../api";
 import OnlyOfficeHealthPanel from "./OnlyOfficeHealthPanel.vue";
 import { useI18n } from "../../composables/useI18n";
+import { formatChinaDateTime } from "../../utils/dateTime";
 import { isEditableTextDocument, isOnlyOfficeDocument } from "../../utils/documentRouting";
 
 const props = defineProps<{
@@ -415,14 +416,7 @@ function onSelectFiles(event: Event) {
 }
 
 function formatDateTime(value: string) {
-  if (!value) {
-    return "";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString(locale.value, { hour12: false });
+  return formatChinaDateTime(value, locale.value, "");
 }
 
 function formatBytes(bytes: number) {

@@ -62,6 +62,15 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const imageUrlDraft = ref("");
 const pastedImageError = ref("");
+const previewImageUrl = ref("");
+const imagePreviewVisible = computed({
+  get: () => Boolean(previewImageUrl.value),
+  set: (value: boolean) => {
+    if (!value) {
+      previewImageUrl.value = "";
+    }
+  },
+});
 
 const totalModelCount = computed(() => props.modelGroups.reduce((sum, group) => sum + group.models.length, 0));
 const availableModelCount = computed(() =>
@@ -180,6 +189,7 @@ const attachmentChips = computed(() =>
           ? part.file_name || `#${part.file_id ?? ""}`
           : formatImagePartLabel(part.image_url || ""),
       type: part.type,
+      imageUrl: part.type === "image_url" ? part.image_url || "" : "",
       index,
     })),
 );
@@ -387,6 +397,14 @@ function removeAttachment(indexInFiltered: number) {
     }),
   );
 }
+
+function openAttachmentPreview(chip: { type: string; imageUrl?: string }) {
+  const imageUrl = String(chip.imageUrl || "");
+  if (chip.type !== "image_url" || !imageUrl) {
+    return;
+  }
+  previewImageUrl.value = imageUrl;
+}
 </script>
 
 <template>
@@ -417,12 +435,18 @@ function removeAttachment(indexInFiltered: number) {
           v-for="(chip, index) in attachmentChips"
           :key="chip.key"
           class="attachment-chip"
+          :class="{ 'is-previewable': chip.type === 'image_url' && chip.imageUrl }"
           :title="chip.label"
+          role="button"
+          tabindex="0"
+          @click="openAttachmentPreview(chip)"
+          @keydown.enter.prevent="openAttachmentPreview(chip)"
+          @keydown.space.prevent="openAttachmentPreview(chip)"
         >
           <el-icon v-if="chip.type === 'file_ref'"><Paperclip /></el-icon>
           <el-icon v-else><Picture /></el-icon>
           <span>{{ chip.label }}</span>
-          <button type="button" :aria-label="t('chat.remove_attachment')" @click="removeAttachment(index)">
+          <button type="button" :aria-label="t('chat.remove_attachment')" @click.stop="removeAttachment(index)">
             <el-icon><Close /></el-icon>
           </button>
         </span>
@@ -737,6 +761,16 @@ function removeAttachment(indexInFiltered: number) {
       </button>
     </div>
   </footer>
+
+  <el-dialog
+    v-model="imagePreviewVisible"
+    append-to-body
+    class="attachment-preview-dialog"
+    width="min(760px, 92vw)"
+    :title="t('chat.attachment_image_preview')"
+  >
+    <img v-if="previewImageUrl" class="attachment-preview-image" :src="previewImageUrl" :alt="t('chat.attachment_image_preview')" />
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -843,6 +877,15 @@ function removeAttachment(indexInFiltered: number) {
   font-size: 0.78rem;
 }
 
+.attachment-chip.is-previewable {
+  cursor: zoom-in;
+}
+
+.attachment-chip.is-previewable:hover {
+  border-color: var(--accent-strong);
+  background: rgba(204, 251, 241, 0.72);
+}
+
 .attachment-chip span {
   min-width: 0;
   overflow: hidden;
@@ -865,6 +908,15 @@ function removeAttachment(indexInFiltered: number) {
 
 .attachment-chip button:hover {
   background: rgba(15, 118, 110, 0.14);
+}
+
+.attachment-preview-image {
+  display: block;
+  width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #f8fafc;
 }
 
 .send-btn {

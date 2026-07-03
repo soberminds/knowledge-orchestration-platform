@@ -9,6 +9,7 @@ from threading import RLock
 from typing import Any, Callable, Literal
 
 from app.core.request_context import get_current_user_id
+from app.core.time_utils import now_china
 
 
 ConfirmationStatus = Literal["pending", "running", "confirmed", "cancelled", "expired", "failed"]
@@ -78,7 +79,7 @@ class AgentToolConfirmationService:
         message: str,
         user_id: int | None = None,
     ) -> ToolConfirmation:
-        now_value = datetime.now()
+        now_value = now_china()
         confirmation = ToolConfirmation(
             confirmation_id=f"confirm_{uuid.uuid4().hex}",
             user_id=user_id if user_id is not None else get_current_user_id(),
@@ -97,7 +98,7 @@ class AgentToolConfirmationService:
     def get(self, confirmation_id: str) -> ToolConfirmation | None:
         with self._lock:
             item = self._items.get(confirmation_id)
-            if item is not None and item.status == "pending" and item.expires_at < datetime.now():
+            if item is not None and item.status == "pending" and item.expires_at < now_china():
                 item.status = "expired"
                 item.error = "Confirmation expired."
             return item
@@ -114,7 +115,7 @@ class AgentToolConfirmationService:
             if item.status != "pending":
                 raise ValueError(f"Confirmation is not pending: {item.status}")
             item.status = "cancelled"
-            item.cancelled_at = datetime.now()
+            item.cancelled_at = now_china()
         return item
 
     def confirm(self, confirmation_id: str, *, user_id: int | None = None) -> ToolConfirmation:
@@ -148,7 +149,7 @@ class AgentToolConfirmationService:
 
         with self._lock:
             item.status = "confirmed"
-            item.confirmed_at = datetime.now()
+            item.confirmed_at = now_china()
             item.result = result
         return item
 

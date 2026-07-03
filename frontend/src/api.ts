@@ -350,6 +350,10 @@ export interface HealthResponse {
   status: string;
   collection_name: string;
   indexed_chunks: number;
+  server_time?: string | null;
+  server_tz?: string | null;
+  mysql_time?: string | null;
+  mysql_session_time_zone?: string | null;
 }
 
 export interface FilePageTextResponse {

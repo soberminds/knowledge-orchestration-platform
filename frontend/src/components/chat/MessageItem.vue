@@ -31,6 +31,15 @@ const officeViewerVisible = ref(false);
 const officeViewerSourcePath = ref("");
 const officeViewerError = ref("");
 const officeViewerRef = ref<InstanceType<typeof OnlyOfficeEditor> | null>(null);
+const imagePreviewUrl = ref("");
+const imagePreviewVisible = computed({
+  get: () => Boolean(imagePreviewUrl.value),
+  set: (value: boolean) => {
+    if (!value) {
+      imagePreviewUrl.value = "";
+    }
+  },
+});
 
 const { t } = useI18n();
 
@@ -425,6 +434,17 @@ function attachmentLabel(part: { type: string; file_id?: number | null; file_nam
   return imageUrl || t("message.attachment_image");
 }
 
+function isImageAttachment(part: { type: string; image_url?: string | null }) {
+  return part.type === "image_url" && Boolean(String(part.image_url || "").trim());
+}
+
+function openImageAttachment(part: { type: string; image_url?: string | null }) {
+  if (!isImageAttachment(part)) {
+    return;
+  }
+  imagePreviewUrl.value = String(part.image_url || "");
+}
+
 function resetTextViewerState() {
   viewerSourcePath.value = "";
   viewerPage.value = 1;
@@ -508,13 +528,16 @@ async function focusCitation(label: string) {
         <template v-else>
           <p class="user-text">{{ message.content }}</p>
           <div v-if="userAttachments.length" class="user-attachment-strip">
-            <span
+            <button
               v-for="(part, index) in userAttachments"
               :key="`${message.id}-attachment-${index}`"
               class="user-attachment-chip"
+              :class="{ 'is-previewable': isImageAttachment(part) }"
+              type="button"
+              @click="openImageAttachment(part)"
             >
               {{ attachmentLabel(part) }}
-            </span>
+            </button>
           </div>
         </template>
         <span v-if="message.streaming" class="stream-cursor">|</span>
@@ -748,6 +771,16 @@ async function focusCitation(label: string) {
       />
     </section>
   </el-dialog>
+
+  <el-dialog
+    v-model="imagePreviewVisible"
+    width="min(760px, 92vw)"
+    append-to-body
+    class="attachment-preview-dialog"
+    :title="t('chat.attachment_image_preview')"
+  >
+    <img v-if="imagePreviewUrl" class="attachment-preview-image" :src="imagePreviewUrl" :alt="t('chat.attachment_image_preview')" />
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -815,16 +848,38 @@ async function focusCitation(label: string) {
 }
 
 .user-attachment-chip {
+  appearance: none;
   max-width: min(360px, 100%);
   border-radius: 999px;
   padding: 4px 9px;
   background: var(--accent-soft);
   border: 1px solid var(--accent-border);
   color: var(--accent-strong);
+  font-family: inherit;
   font-size: 0.78rem;
+  line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: default;
+}
+
+.user-attachment-chip.is-previewable {
+  cursor: zoom-in;
+}
+
+.user-attachment-chip.is-previewable:hover {
+  border-color: var(--accent-strong);
+  background: rgba(204, 251, 241, 0.72);
+}
+
+.attachment-preview-image {
+  display: block;
+  width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #f8fafc;
 }
 
 .stream-cursor {

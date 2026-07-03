@@ -14,6 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DEFAULT_TIMEOUT=120 \
+    TZ=Asia/Shanghai \
     SOFFICE_BIN=/usr/bin/soffice
 
 RUN set -eux; \
@@ -23,6 +24,7 @@ RUN set -eux; \
       /etc/apt/sources.list.d/debian.sources; \
     apt-get -o Acquire::Retries=8 -o Acquire::http::Timeout=120 -o Acquire::https::Timeout=120 update; \
     apt-get -o Acquire::Retries=8 -o Acquire::http::Timeout=120 -o Acquire::https::Timeout=120 install -y --no-install-recommends \
+        tzdata \
         libreoffice-writer-nogui \
         libreoffice-calc-nogui \
         libreoffice-impress-nogui \

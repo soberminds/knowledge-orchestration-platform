@@ -15,6 +15,7 @@ from fastapi import UploadFile
 from app.core.database import DatabaseUnavailableError, session_scope
 from app.core.request_context import get_current_user_id
 from app.core.settings import settings
+from app.core.time_utils import now_china
 from app.services.files import read_file_page_text
 from app.services.preview_pdf import get_preview_pdf_cache_path
 
@@ -66,7 +67,7 @@ class DocumentLibraryService:
         self.settings = settings
 
     def _now(self) -> datetime:
-        return datetime.now()
+        return now_china()
 
     def _ensure_sql(self) -> None:
         if text is None:
