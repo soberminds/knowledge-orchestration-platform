@@ -1039,6 +1039,311 @@ class DocumentLibraryService:
                 "source_paths": [row.file_path for row in rows],
             }
 
+    def _document_file_row_from_sql_row(self, row, offset: int = 0) -> DocumentFileRow:
+        return DocumentFileRow(
+            id=int(row[offset + 0]),
+            user_id=int(row[offset + 1]),
+            folder_id=int(row[offset + 2] or 0),
+            kb_id=int(row[offset + 3] or 0),
+            original_name=str(row[offset + 4]),
+            stored_name=str(row[offset + 5]),
+            file_path=str(row[offset + 6]),
+            file_ext=str(row[offset + 7] or ""),
+            mime_type=str(row[offset + 8]) if row[offset + 8] is not None else None,
+            file_size=int(row[offset + 9] or 0),
+            file_hash=str(row[offset + 10]) if row[offset + 10] is not None else None,
+            source_type=str(row[offset + 11] or "upload"),
+            parse_status=str(row[offset + 12] or "pending"),
+            index_status=str(row[offset + 13] or "pending"),
+            parse_error=str(row[offset + 14]) if row[offset + 14] is not None else None,
+            last_indexed_at=row[offset + 15],
+            is_deleted=int(row[offset + 16] or 0),
+            created_at=row[offset + 17],
+            updated_at=row[offset + 18],
+        )
+
+    def _normalize_index_monitor_status(self, value: str | None) -> str:
+        normalized = str(value or "all").strip().lower()
+        if normalized in {"all", "processing", "pending", "queued", "running", "success", "failed"}:
+            return normalized
+        return "all"
+
+    def _status_counts_template(self) -> dict[str, int]:
+        return {
+            "total": 0,
+            "pending": 0,
+            "queued": 0,
+            "running": 0,
+            "success": 0,
+            "failed": 0,
+        }
+
+    def _status_matches_index_filter(self, status: str, status_filter: str) -> bool:
+        if status_filter == "all":
+            return True
+        if status_filter == "processing":
+            return status in {"queued", "running"}
+        return status == status_filter
+
+    def _index_status_rank(self, status: str) -> int:
+        ranks = {
+            "failed": 0,
+            "running": 1,
+            "queued": 2,
+            "pending": 3,
+            "success": 4,
+        }
+        return ranks.get(status, 5)
+
+    def _list_index_file_statuses_without_task_tables(
+        self,
+        session,
+        user_id: int,
+        *,
+        page: int,
+        page_size: int,
+        status_filter: str,
+        keyword: str,
+    ) -> dict[str, Any]:
+        normalized_keyword = keyword.lower()
+        folder_rows = self._list_user_folder_rows(session, user_id)
+        folder_paths = self._folder_payload_path_map(folder_rows)
+        rows = self._list_user_file_rows(session, user_id)
+
+        counts = self._status_counts_template()
+        filtered: list[DocumentFileRow] = []
+        for row in rows:
+            folder_cache = folder_paths.get(row.folder_id, "") if row.folder_id else ""
+            display_path = f"{folder_cache}/{row.original_name}" if folder_cache else row.original_name
+            searchable = f"{row.original_name} {display_path} {row.file_path} {row.file_ext}".lower()
+            if normalized_keyword and normalized_keyword not in searchable:
+                continue
+            effective_status = self._normalize_index_monitor_status(row.index_status or row.parse_status)
+            if effective_status == "all" or effective_status == "processing":
+                effective_status = "pending"
+            counts["total"] += 1
+            counts[effective_status] = counts.get(effective_status, 0) + 1
+            if self._status_matches_index_filter(effective_status, status_filter):
+                filtered.append(row)
+
+        def effective_row_status(row: DocumentFileRow) -> str:
+            status_value = self._normalize_index_monitor_status(row.index_status or row.parse_status)
+            return "pending" if status_value in {"all", "processing"} else status_value
+
+        filtered.sort(
+            key=lambda item: (
+                self._index_status_rank(effective_row_status(item)),
+                -float(item.updated_at.timestamp()) if hasattr(item.updated_at, "timestamp") else 0,
+                -item.id,
+            )
+        )
+        start = (page - 1) * page_size
+        page_rows = filtered[start : start + page_size]
+        items = [
+            self._file_to_payload(
+                row,
+                folder_cache=folder_paths.get(row.folder_id, "") if row.folder_id else "",
+            )
+            for row in page_rows
+        ]
+        return {
+            "items": items,
+            "total": len(filtered),
+            "page": page,
+            "page_size": page_size,
+            "status_counts": counts,
+        }
+
+    def list_index_file_statuses(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        status: str | None = None,
+        keyword: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_sql()
+        normalized_page = max(1, int(page or 1))
+        normalized_page_size = max(1, min(200, int(page_size or 50)))
+        status_filter = self._normalize_index_monitor_status(status)
+        normalized_keyword = str(keyword or "").strip().lower()
+        offset = (normalized_page - 1) * normalized_page_size
+
+        with session_scope() as session:
+            user_id = self._get_or_create_default_user_id(session)
+            self._mark_stale_index_tasks_failed(session, user_id)
+            folder_rows = self._list_user_folder_rows(session, user_id)
+            folder_paths = self._folder_payload_path_map(folder_rows)
+
+            file_columns = """
+                f.id, f.user_id, f.folder_id, f.kb_id, f.original_name, f.stored_name, f.file_path, f.file_ext,
+                f.mime_type, f.file_size, f.file_hash, f.source_type, f.parse_status, f.index_status,
+                f.parse_error, f.last_indexed_at, f.is_deleted, f.created_at, f.updated_at
+            """
+            latest_join = """
+                LEFT JOIN (
+                    SELECT ijf.*
+                    FROM kop_index_job_file ijf
+                    INNER JOIN (
+                        SELECT document_file_id, MAX(id) AS latest_id
+                        FROM kop_index_job_file
+                        WHERE user_id = :user_id
+                        GROUP BY document_file_id
+                    ) latest ON latest.latest_id = ijf.id
+                ) latest_job_file ON latest_job_file.document_file_id = f.id
+                LEFT JOIN kop_index_job ij ON ij.id = latest_job_file.job_id
+            """
+            raw_status_expr = "LOWER(COALESCE(latest_job_file.status, f.index_status, f.parse_status, 'pending'))"
+            status_expr = (
+                f"CASE WHEN {raw_status_expr} IN ('pending', 'queued', 'running', 'success', 'failed') "
+                f"THEN {raw_status_expr} ELSE 'pending' END"
+            )
+            base_where = [
+                "f.user_id = :user_id",
+                "f.is_deleted = 0",
+            ]
+            params: dict[str, Any] = {
+                "user_id": user_id,
+                "limit": normalized_page_size,
+                "offset": offset,
+            }
+            if normalized_keyword:
+                base_where.append(
+                    """
+                    (
+                        LOWER(f.original_name) LIKE :keyword_like
+                        OR LOWER(f.file_path) LIKE :keyword_like
+                        OR LOWER(COALESCE(f.file_ext, '')) LIKE :keyword_like
+                    )
+                    """
+                )
+                params["keyword_like"] = f"%{normalized_keyword}%"
+
+            filtered_where = list(base_where)
+            if status_filter == "processing":
+                filtered_where.append(f"{status_expr} IN ('queued', 'running')")
+            elif status_filter != "all":
+                filtered_where.append(f"{status_expr} = :status_filter")
+                params["status_filter"] = status_filter
+
+            base_where_sql = " AND ".join(base_where)
+            filtered_where_sql = " AND ".join(filtered_where)
+
+            try:
+                count_row = session.execute(
+                    text(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM kop_document_file f
+                        {latest_join}
+                        WHERE {filtered_where_sql}
+                        """
+                    ),
+                    params,
+                ).first()
+                total = int(count_row[0] or 0) if count_row else 0
+
+                count_rows = session.execute(
+                    text(
+                        f"""
+                        SELECT {status_expr} AS effective_status, COUNT(*)
+                        FROM kop_document_file f
+                        {latest_join}
+                        WHERE {base_where_sql}
+                        GROUP BY effective_status
+                        """
+                    ),
+                    params,
+                ).all()
+                counts = self._status_counts_template()
+                for row in count_rows:
+                    effective_status = self._normalize_index_monitor_status(str(row[0] or "pending"))
+                    if effective_status in {"all", "processing"}:
+                        effective_status = "pending"
+                    amount = int(row[1] or 0)
+                    counts["total"] += amount
+                    counts[effective_status] = counts.get(effective_status, 0) + amount
+
+                rows = session.execute(
+                    text(
+                        f"""
+                        SELECT
+                            {file_columns},
+                            latest_job_file.id AS index_job_file_id,
+                            latest_job_file.job_id AS index_job_id,
+                            ij.job_type AS index_job_type,
+                            latest_job_file.status AS index_status,
+                            latest_job_file.stage AS index_stage,
+                            latest_job_file.progress AS index_progress,
+                            latest_job_file.total_chunks AS index_total_chunks,
+                            latest_job_file.indexed_chunks AS index_indexed_chunks,
+                            latest_job_file.error_message AS index_error_message,
+                            latest_job_file.started_at AS index_started_at,
+                            latest_job_file.finished_at AS index_finished_at,
+                            latest_job_file.updated_at AS index_updated_at
+                        FROM kop_document_file f
+                        {latest_join}
+                        WHERE {filtered_where_sql}
+                        ORDER BY
+                            CASE {status_expr}
+                                WHEN 'failed' THEN 0
+                                WHEN 'running' THEN 1
+                                WHEN 'queued' THEN 2
+                                WHEN 'pending' THEN 3
+                                WHEN 'success' THEN 4
+                                ELSE 5
+                            END,
+                            COALESCE(latest_job_file.updated_at, f.updated_at) DESC,
+                            f.id DESC
+                        LIMIT :limit OFFSET :offset
+                        """
+                    ),
+                    params,
+                ).all()
+            except Exception as exc:
+                if not self._is_index_job_table_error(exc):
+                    raise
+                return self._list_index_file_statuses_without_task_tables(
+                    session,
+                    user_id,
+                    page=normalized_page,
+                    page_size=normalized_page_size,
+                    status_filter=status_filter,
+                    keyword=normalized_keyword,
+                )
+
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                file_row = self._document_file_row_from_sql_row(row)
+                index_task = None
+                if row[19] is not None:
+                    index_task = self._index_task_payload_from_row(
+                        [
+                            row[19],
+                            row[20],
+                            row[21],
+                            row[22],
+                            row[23],
+                            row[24],
+                            row[25],
+                            row[26],
+                            row[27],
+                            row[28],
+                            row[29],
+                            row[30],
+                        ]
+                    )
+                folder_cache = folder_paths.get(file_row.folder_id, "") if file_row.folder_id else ""
+                items.append(self._file_to_payload(file_row, folder_cache=folder_cache, index_task=index_task))
+
+            return {
+                "items": items,
+                "total": total,
+                "page": normalized_page,
+                "page_size": normalized_page_size,
+                "status_counts": counts,
+            }
+
     def create_index_job(self, *, job_type: str, file_ids: list[int]) -> dict[str, Any]:
         self._ensure_sql()
         normalized_job_type = str(job_type or "files").strip().lower() or "files"

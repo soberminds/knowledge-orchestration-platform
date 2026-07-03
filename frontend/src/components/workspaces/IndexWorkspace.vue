@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { DocumentInfo, HealthResponse } from "../../api";
+import { computed, onMounted, ref, watch } from "vue";
+import { listIndexFiles, type DocumentInfo, type HealthResponse, type IndexFileStatusCounts } from "../../api";
 import { useI18n } from "../../composables/useI18n";
 
 const props = defineProps<{
@@ -12,16 +12,54 @@ const props = defineProps<{
   refreshing: boolean;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   (event: "rebuild"): void;
   (event: "refresh"): void;
 }>();
 
 const { locale, t } = useI18n();
 
+const defaultStatusCounts = (): IndexFileStatusCounts => ({
+  total: 0,
+  pending: 0,
+  queued: 0,
+  running: 0,
+  success: 0,
+  failed: 0,
+});
+
+const indexFiles = ref<DocumentInfo[]>([]);
+const indexTotal = ref(0);
+const indexPage = ref(1);
+const indexPageSize = ref(20);
+const statusFilter = ref("all");
+const keyword = ref("");
+const submittedKeyword = ref("");
+const indexLoading = ref(false);
+const indexError = ref("");
+const statusCounts = ref<IndexFileStatusCounts>(defaultStatusCounts());
+
+let indexRequestId = 0;
+
+const statusFilterOptions = computed(() => [
+  { label: t("index.file_filter_all"), value: "all" },
+  { label: t("index.file_filter_processing"), value: "processing" },
+  { label: t("index.file_status_failed"), value: "failed" },
+  { label: t("index.file_status_queued"), value: "queued" },
+  { label: t("index.file_status_running"), value: "running" },
+  { label: t("index.file_status_pending"), value: "pending" },
+  { label: t("index.file_status_success"), value: "success" },
+]);
+
+const pageSizeOptions = computed(() =>
+  [10, 20, 50, 100, 200].map((size) => ({
+    label: t("index.file_page_size", { size }),
+    value: size,
+  })),
+);
+
 const fileRows = computed(() =>
-  props.documents
-    .filter((item) => !item.is_directory)
+  indexFiles.value
     .map((item) => {
       const status = normalizeStatus(item.index_status || item.parse_status);
       const stage = normalizeStage(item.index_stage || item.index_status || item.parse_status);
@@ -49,32 +87,80 @@ const fileRows = computed(() =>
     }),
 );
 
-const statusCounts = computed(() => {
-  const counts = {
-    total: fileRows.value.length,
-    pending: 0,
-    queued: 0,
-    running: 0,
-    success: 0,
-    failed: 0,
-  };
+onMounted(() => {
+  void fetchIndexFiles();
+});
 
-  for (const row of fileRows.value) {
-    if (row.status === "queued") {
-      counts.queued += 1;
-    } else if (row.status === "running") {
-      counts.running += 1;
-    } else if (row.status === "success") {
-      counts.success += 1;
-    } else if (row.status === "failed") {
-      counts.failed += 1;
-    } else {
-      counts.pending += 1;
+watch(
+  () => props.ingesting,
+  (nextValue, previousValue) => {
+    if (previousValue && !nextValue) {
+      void fetchIndexFiles();
+    }
+  },
+);
+
+async function fetchIndexFiles() {
+  const requestId = ++indexRequestId;
+  indexLoading.value = true;
+  indexError.value = "";
+  try {
+    const payload = await listIndexFiles({
+      page: indexPage.value,
+      page_size: indexPageSize.value,
+      status: statusFilter.value,
+      keyword: submittedKeyword.value,
+    });
+    if (requestId !== indexRequestId) {
+      return;
+    }
+    indexFiles.value = payload.items;
+    indexTotal.value = payload.total;
+    indexPage.value = payload.page;
+    indexPageSize.value = payload.page_size;
+    statusCounts.value = payload.status_counts || defaultStatusCounts();
+  } catch (error) {
+    if (requestId !== indexRequestId) {
+      return;
+    }
+    indexError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (requestId === indexRequestId) {
+      indexLoading.value = false;
     }
   }
+}
 
-  return counts;
-});
+function applyKeyword() {
+  submittedKeyword.value = keyword.value.trim();
+  indexPage.value = 1;
+  void fetchIndexFiles();
+}
+
+function handleStatusFilterChange() {
+  indexPage.value = 1;
+  void fetchIndexFiles();
+}
+
+function handlePageSizeChange(size: number | string) {
+  indexPageSize.value = Number(size) || 20;
+  indexPage.value = 1;
+  void fetchIndexFiles();
+}
+
+function handlePageChange(page: number) {
+  indexPage.value = page;
+  void fetchIndexFiles();
+}
+
+function handleRefresh() {
+  void fetchIndexFiles();
+  emit("refresh");
+}
+
+function handleRebuild() {
+  emit("rebuild");
+}
 
 function normalizeStatus(status?: string | null) {
   const normalized = String(status || "pending").trim().toLowerCase();
@@ -207,16 +293,16 @@ function formatDateTime(value?: string | null) {
       </div>
 
       <div class="index-actions">
-        <el-button class="action-btn action-btn--confirm" :loading="ingesting" @click="$emit('rebuild')">
+        <el-button class="action-btn action-btn--confirm" :loading="ingesting" @click="handleRebuild">
           {{ t("index.rebuild") }}
         </el-button>
-        <el-button class="action-btn action-btn--ghost" plain :loading="refreshing" @click="$emit('refresh')">
+        <el-button class="action-btn action-btn--ghost" plain :loading="refreshing || indexLoading" @click="handleRefresh">
           {{ t("index.refresh") }}
         </el-button>
       </div>
     </section>
 
-    <section class="index-monitor">
+    <section class="index-monitor" v-loading="indexLoading">
       <div class="monitor-head">
         <div>
           <h2>{{ t("index.file_monitor") }}</h2>
@@ -229,6 +315,30 @@ function formatDateTime(value?: string | null) {
           <span class="stat-pill is-failed">{{ t("index.file_failed", { count: statusCounts.failed }) }}</span>
         </div>
       </div>
+
+      <div class="monitor-tools">
+        <el-select v-model="statusFilter" class="status-filter" @change="handleStatusFilterChange">
+          <el-option
+            v-for="option in statusFilterOptions"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+        <el-input
+          v-model="keyword"
+          class="keyword-input"
+          clearable
+          :placeholder="t('index.file_search_placeholder')"
+          @clear="applyKeyword"
+          @keyup.enter.exact="applyKeyword"
+        />
+        <el-button class="action-btn action-btn--ghost" plain @click="applyKeyword">
+          {{ t("index.file_search") }}
+        </el-button>
+      </div>
+
+      <el-alert v-if="indexError" class="index-error" :title="indexError" type="error" show-icon :closable="false" />
 
       <div v-if="fileRows.length" class="index-table-wrap">
         <div class="index-table">
@@ -267,16 +377,39 @@ function formatDateTime(value?: string | null) {
       </div>
 
       <el-empty v-else :description="t('index.file_empty')" />
+
+      <div v-if="indexTotal" class="pagination-row">
+        <span class="pagination-total">{{ t("index.file_pagination_total", { total: indexTotal }) }}</span>
+        <el-select v-model="indexPageSize" class="page-size-select" @change="handlePageSizeChange">
+          <el-option
+            v-for="option in pageSizeOptions"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+        <el-pagination
+          :current-page="indexPage"
+          :page-size="indexPageSize"
+          :total="indexTotal"
+          layout="prev, pager, next"
+          @current-change="handlePageChange"
+        />
+      </div>
     </section>
   </section>
 </template>
 
 <style scoped>
 .workspace-standard {
+  box-sizing: border-box;
   height: 100%;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 18px 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .tool-card,
@@ -289,8 +422,24 @@ function formatDateTime(value?: string | null) {
   padding: 16px;
 }
 
+.tool-card {
+  flex: 0 0 auto;
+}
+
 .index-monitor {
-  margin-top: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.index-monitor :deep(.el-empty) {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .status-grid {
@@ -354,6 +503,24 @@ function formatDateTime(value?: string | null) {
   gap: 8px;
 }
 
+.monitor-tools {
+  display: grid;
+  grid-template-columns: 180px minmax(180px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.status-filter,
+.keyword-input {
+  min-width: 0;
+}
+
+.index-error {
+  margin-bottom: 12px;
+  border-radius: 8px;
+}
+
 .stat-pill {
   display: inline-flex;
   align-items: center;
@@ -387,10 +554,12 @@ function formatDateTime(value?: string | null) {
 }
 
 .index-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .index-table {
@@ -413,6 +582,9 @@ function formatDateTime(value?: string | null) {
 }
 
 .index-row--head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   min-height: 36px;
   background: #f8fafc;
   color: var(--text-muted);
@@ -525,6 +697,27 @@ function formatDateTime(value?: string | null) {
   font-size: 0.78rem;
 }
 
+.pagination-row {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 12px;
+  overflow-x: auto;
+}
+
+.pagination-total {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.page-size-select {
+  width: 108px;
+  flex: 0 0 auto;
+}
+
 .action-btn--confirm {
   --el-button-bg-color: #0f766e;
   --el-button-border-color: #0f766e;
@@ -568,6 +761,11 @@ function formatDateTime(value?: string | null) {
   .monitor-head {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .monitor-tools {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 
   .monitor-stats {

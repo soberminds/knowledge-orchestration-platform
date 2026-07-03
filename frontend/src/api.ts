@@ -311,6 +311,23 @@ export interface DocumentInfo {
   index_finished_at?: string | null;
 }
 
+export interface IndexFileStatusCounts {
+  total: number;
+  pending: number;
+  queued: number;
+  running: number;
+  success: number;
+  failed: number;
+}
+
+export interface IndexFileListResponse {
+  items: DocumentInfo[];
+  total: number;
+  page: number;
+  page_size: number;
+  status_counts: IndexFileStatusCounts;
+}
+
 export interface CreateDocumentFolderResponse {
   path: string;
   id?: number | null;
@@ -552,6 +569,29 @@ export async function getHealth(): Promise<HealthResponse> {
 
 export async function listDocuments(): Promise<DocumentInfo[]> {
   return requestJson<DocumentInfo[]>("/api/documents");
+}
+
+export async function listIndexFiles(params: {
+  page?: number;
+  page_size?: number;
+  status?: string;
+  keyword?: string;
+} = {}): Promise<IndexFileListResponse> {
+  const search = new URLSearchParams();
+  if (params.page) {
+    search.set("page", String(params.page));
+  }
+  if (params.page_size) {
+    search.set("page_size", String(params.page_size));
+  }
+  if (params.status) {
+    search.set("status", params.status);
+  }
+  if (params.keyword) {
+    search.set("keyword", params.keyword);
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<IndexFileListResponse>(`/api/index/files${suffix}`);
 }
 
 export async function deleteDocument(path: string): Promise<IngestResponse> {

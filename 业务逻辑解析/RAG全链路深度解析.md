@@ -3663,12 +3663,11 @@ _run_index_job_queue(...)
 
 前端看到的结果来自：
 
-- `GET /api/documents`
-- `DocumentLibraryService.list_documents()`
-- `_latest_index_task_map(...)`
+- `GET /api/index/files?page=1&page_size=50&status=all&keyword=...`
+- `DocumentLibraryService.list_index_file_statuses(...)`
 - `DocumentInfo.index_progress / index_stage / index_total_chunks / index_indexed_chunks / index_error_message`
 
-所以现在 `IndexWorkspace.vue` 不是自己猜百分比，而是优先展示后端返回的真实任务字段。
+所以现在 `IndexWorkspace.vue` 不是自己猜百分比，也不是一次性渲染全部文件，而是通过后端分页接口展示真实任务字段。
 
 ### 8.3 删除文件后的重建
 
@@ -3993,6 +3992,7 @@ LLM 生成回答
 - 上传后后台排队索引
 - 索引任务表持久化
 - 文件级索引阶段、进度、chunk 数和错误追踪
+- 索引监控页前后端分页、状态筛选和文件名搜索
 - 检索结果去重
 - 上下文分组与引用标签生成
 - 简单 code-heavy 片段识别

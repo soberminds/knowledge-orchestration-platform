@@ -355,6 +355,27 @@ class DocumentInfo(BaseModel):
     index_finished_at: str | None = None
 
 
+class IndexFileStatusCounts(BaseModel):
+    """Status counters for the paged index monitor."""
+
+    total: int = 0
+    pending: int = 0
+    queued: int = 0
+    running: int = 0
+    success: int = 0
+    failed: int = 0
+
+
+class IndexFileListResponse(BaseModel):
+    """Paged file index monitor response."""
+
+    items: list[DocumentInfo]
+    total: int
+    page: int
+    page_size: int
+    status_counts: IndexFileStatusCounts
+
+
 class CreateDocumentFolderRequest(BaseModel):
     """Request payload for creating a document folder."""
 

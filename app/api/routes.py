@@ -52,6 +52,8 @@ from app.schemas import (
     FileEditTextSaveRequest,
     FileEditTextSaveResponse,
     HealthResponse,
+    IndexFileListResponse,
+    IndexFileStatusCounts,
     IngestResponse,
     OfficeEditorConfigResponse,
     OfficeCallbackStatusResponse,
@@ -1210,6 +1212,35 @@ async def list_documents(
                 (item.display_path or item.path).lower(),
                 not item.is_directory,
             ),
+        )
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/index/files", response_model=IndexFileListResponse)
+async def list_index_files(
+    page: int = 1,
+    page_size: int = 50,
+    status: str = "all",
+    keyword: str = "",
+    library: DocumentLibraryService = Depends(get_document_library_service),
+) -> IndexFileListResponse:
+    try:
+        payload = await run_in_threadpool(
+            library.list_index_file_statuses,
+            page=page,
+            page_size=page_size,
+            status=status,
+            keyword=keyword,
+        )
+        return IndexFileListResponse(
+            items=[_document_info_from_payload(item) for item in payload.get("items", [])],
+            total=int(payload.get("total", 0) or 0),
+            page=int(payload.get("page", page) or page),
+            page_size=int(payload.get("page_size", page_size) or page_size),
+            status_counts=IndexFileStatusCounts(**dict(payload.get("status_counts", {}) or {})),
         )
     except DatabaseUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
