@@ -37,7 +37,7 @@ const capabilityCards = [
   },
   {
     title: "文档工作闭环",
-    text: "上传、预览、在线编辑、切片索引和检索一气贯通。",
+    text: "上传、预览、在线编辑到后台索引一气贯通，解析、切片、向量写入和失败原因逐文件可见。",
   },
   {
     title: "多模型编排",
@@ -55,7 +55,7 @@ const capabilityCards = [
 
 const metrics = [
   { value: "Scoped RAG", label: "范围可控" },
-  { value: "Human Check", label: "执行确认" },
+  { value: "Traceable Index", label: "索引可追踪" },
   { value: "Multi Model", label: "模型编排" },
 ];
 
@@ -108,7 +108,7 @@ function switchMode(nextMode: AuthMode) {
           </p>
           <h1>从检索到执行，一次完成。</h1>
           <p class="hero-copy">
-            把文档、范围、模型和工具放进同一个工作台，用更可控的方式构建 RAG 与 Agent 工作流。
+            把文档、范围、模型和工具放进同一个工作台，上传后后台建索引，回答时保留引用和可追踪状态。
           </p>
         </div>
 
