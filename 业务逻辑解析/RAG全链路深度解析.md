@@ -2082,6 +2082,103 @@ Agent 生成层
 - 会话回显
 - 最近上下文缓存
 
+### 2.8 时间与前端体验层
+
+这层不直接决定 RAG 检索质量，但会直接影响上线后的可用性：
+
+- 用户看到的时间是否一致
+- 首屏是不是空白
+- 上传后的索引状态是不是会自动刷新
+- 粘贴图片后是否能确认自己传了什么
+
+#### A. 中国时间统一
+
+当前项目不再依赖前端硬加 8 小时，也不再只依赖容器系统时区。
+
+后端统一入口是：
+
+- `app/core/time_utils.py`
+  - `now_china()`
+  - `now_china_iso()`
+  - `timestamp_to_china_iso(...)`
+- `app/core/settings.py`
+  - Windows 本地会移除不稳定的 `TZ=Asia/Shanghai`
+  - Linux / Docker 环境保留 `TZ=Asia/Shanghai`
+- `app/core/database.py`
+  - MySQL 连接后执行 `SET time_zone = '+08:00'`
+- `app/api/routes.py`
+  - `/api/health` 会返回 `server_time`、`mysql_time`、`mysql_session_time_zone` 方便排查
+
+前端统一入口是：
+
+- `frontend/src/utils/dateTime.ts::formatChinaDateTime(...)`
+
+规则是：
+
+```text
+后端返回带 Z / +00:00 / +08:00 这类明确时区的时间
+└─ 前端按 Asia/Shanghai 显示
+
+后端返回 2026-07-03T14:20:47 这种不带时区的时间
+└─ 前端把它视为中国本地业务时间，而不是再加 8 小时
+```
+
+这样本地 Windows 开发、Linux 服务器、Docker 容器部署都能按同一套规则展示时间。
+
+#### B. 首屏统一加载态
+
+当前前端不是把所有接口都挂到一个全局 loading 计数器上。
+
+它只把“进入主系统时必须准备的第一轮数据”收口到一个入口：
+
+- `frontend/src/App.vue::initializeWorkspaceData()`
+
+里面主要做：
+
+```text
+initializeWorkspaceData()
+├─ chatWorkspace.initialize()
+│  ├─ loadConversations()
+│  └─ loadChatOptions()
+└─ dashboard.refreshDashboard()
+   ├─ getHealth()
+   ├─ listDocuments()
+   └─ getOfficeHealth()
+```
+
+控制状态是：
+
+```text
+workspaceInitializing
+workspaceReady
+```
+
+所以它只在这些场景显示主工作区统一等待提示：
+
+- 首次进入系统
+- 登录成功后
+- 注册成功后
+- 游客继续进入后
+
+后续发消息、上传、刷新、重建索引、打开文件预览仍然走各自模块已有的局部 loading，不会让整个主界面反复遮罩。
+
+#### C. 图片输入与预览
+
+当前聊天输入已经支持：
+
+- 图片 URL
+- 直接粘贴图片，前端转成 `data:image/...;base64,...`
+
+为了避免用户只看到一串超长 base64，现在前端做了两层展示优化：
+
+- `ChatComposer.vue`
+  - 粘贴后的图片附件 chip 可以点击预览
+- `MessageItem.vue`
+  - 已发送用户消息里的图片附件也可以点击预览
+  - data URL 显示为“粘贴图片”，不直接把 base64 铺到界面上
+
+这只是前端确认和展示优化，不改变模型是否真正能看图。模型是否接收图片仍然由 `ModelCapability.supports_multimodal_input` 决定。
+
 ---
 
 ## 3. 完整主流程图
@@ -3669,6 +3766,20 @@ _run_index_job_queue(...)
 
 所以现在 `IndexWorkspace.vue` 不是自己猜百分比，也不是一次性渲染全部文件，而是通过后端分页接口展示真实任务字段。
 
+`DocumentsWorkspace.vue` 的“上传与查看”列表也会复用这些状态字段。
+
+为了避免“索引监控页已经完成，但上传与查看还停留在索引中”，前端在 `useDashboard.ts` 里增加了轻量轮询：
+
+```text
+refreshDashboard()
+├─ listDocuments()
+├─ 如果发现文件 index_status / parse_status 是 queued 或 running
+│  └─ scheduleIndexPolling()
+└─ 后续每隔几秒刷新一次文档列表，直到没有活跃索引文件或达到最大轮询次数
+```
+
+这个轮询只刷新文档 / 索引状态，不触发主工作区全屏 loading。
+
 ### 8.3 删除文件后的重建
 
 对应函数：
@@ -3964,15 +4075,15 @@ LLM 生成回答
    - 当前用于减少每次聊天都从 MySQL 回读最近消息的成本
 
 9. 前端 Vue 组件层
-   - `App.vue`：应用总壳、登录入口、主题、侧边栏、viewer / ONLYOFFICE 弹窗控制
+   - `App.vue`：应用总壳、登录入口、主题、侧边栏、首屏工作区统一 loading、viewer / ONLYOFFICE 弹窗控制
    - `AuthScreen.vue`：登录 / 注册界面
    - `LeftSidebar.vue`：工作区导航、最近会话列表、范围标签、用户菜单
    - `ChatWorkspace.vue`：聊天主界面
-   - `ChatComposer.vue`：模型、深度思考、联网、会话范围选择、发送入口
-   - `MessageList.vue` / `MessageItem.vue`：消息列表、引用、usage、cost、模型诊断展示
+   - `ChatComposer.vue`：模型、深度思考、联网、会话范围选择、发送入口、粘贴图片附件预览
+   - `MessageList.vue` / `MessageItem.vue`：消息列表、图片附件预览、引用、usage、cost、模型诊断展示
    - `ModelHealthPanel.vue`：模型健康检查弹窗内容
    - `DocumentsWorkspace.vue`：文档库文件系统式界面、文件夹树、文件 / 文件夹操作、ONLYOFFICE 健康弹窗
-   - `IndexWorkspace.vue`：索引概览、重建入口、文件级任务进度和错误展示
+   - `IndexWorkspace.vue`：索引概览、重建入口、文件级任务分页、进度和错误展示
    - `SearchWorkspace.vue`：检索实验场
    - `UnifiedFileViewer.vue`：普通文件 / PDF / Markdown / 表格预览
    - `OnlyOfficeEditor.vue`：ONLYOFFICE 在线编辑器
@@ -3993,6 +4104,7 @@ LLM 生成回答
 - 索引任务表持久化
 - 文件级索引阶段、进度、chunk 数和错误追踪
 - 索引监控页前后端分页、状态筛选和文件名搜索
+- 文档列表在发现文件索引中时会轻量轮询，避免上传与查看状态长期滞后
 - 检索结果去重
 - 上下文分组与引用标签生成
 - 简单 code-heavy 片段识别
@@ -4019,10 +4131,14 @@ LLM 生成回答
 - 非流式 `/api/chat` 和流式 `/api/chat/stream` 都支持基础 tool calling
 - `ChatMessagePart` 支持 `text` / `image_url` / `file_ref`
 - 聊天输入支持图片 URL 和直接粘贴图片
+- 粘贴图片和已发送图片附件支持点击预览，data URL 不再直接铺满消息界面
 - `ModelCapability` 支持按模型能力自动判断图片、工具、Responses API 等能力
 - 模型不支持图片 / 工具 / Responses API 时可以自动降级并写入 warning
 - 助手消息可以展示 reasoning、tool calls、provider_api、warnings
 - ONLYOFFICE 健康检查弹窗
+- 后端业务时间统一走 `now_china()` / `now_china_iso()`，MySQL session 固定 `+08:00`
+- 前端统一使用 `formatChinaDateTime(...)` 显示中国时间，避免本地和 Docker 部署相差 8 小时
+- `App.vue` 首屏统一工作区加载态，聚合会话、模型配置、文档、索引和 ONLYOFFICE 健康首轮请求
 - 检索时按当前用户过滤
 - 检索时按 scope 限定范围
 - folder scope 会自动包含子文件夹
@@ -4352,6 +4468,94 @@ LLM 生成回答
 - `.env.example`
 - `业务逻辑解析/模型能力思考.md`
 
+### 13.14 时间显示少 8 小时或多 8 小时
+
+影响：
+
+- 本地开发时间正常，但 Docker 服务器显示 UTC
+- 或者前端把本来已经是中国时间的值又加了 8 小时
+- 文档上传时间、ONLYOFFICE 最近检查时间、索引更新时间不一致
+
+当前原则：
+
+- 后端业务写入时间统一用 `app/core/time_utils.py`
+- MySQL session time zone 固定为 `+08:00`
+- 前端只负责按 `Asia/Shanghai` 格式化，不负责无脑加 8 小时
+
+排查顺序：
+
+1. 看后端健康接口：
+
+   ```bash
+   curl http://127.0.0.1:8000/api/health
+   ```
+
+   重点看：
+
+   ```text
+   server_time
+   mysql_time
+   mysql_session_time_zone
+   ```
+
+   正常情况下，`server_time` 和 `mysql_time` 应该都是中国当前时间，最多只差几秒。
+
+2. 如果本地 Windows 少 8 小时：
+
+   - 检查是否已经重启后端进程
+   - `settings.py` 应该在 Windows 下移除 `TZ`
+   - 业务代码不要直接新增 `datetime.now()`，应该用 `now_china()`
+
+3. 如果服务器 Docker 少 8 小时：
+
+   - `.env.prod` 应该有 `TZ=Asia/Shanghai`
+   - `docker-compose.prod.yml` 应该把 `TZ` 传给后端容器
+   - Dockerfile 应安装 `tzdata`
+   - 但业务时间仍以 `now_china()` 为准，容器时区只是辅助
+
+4. 如果旧数据时间仍然不对：
+
+   - 先确认它是不是旧逻辑写入的记录
+   - 旧记录不会因为前端格式化自动变正确
+   - 需要按受影响的记录范围单独修正数据库，不建议全表无差别加 8 小时
+
+### 13.15 首屏空白或一直没有数据
+
+影响：
+
+- 刚进入系统右侧主工作区像是没有加载
+- 最近会话、文档数量、索引状态需要等一段时间才出现
+
+当前设计：
+
+- `App.vue::initializeWorkspaceData()` 聚合首轮初始化请求
+- `workspaceInitializing` / `workspaceReady` 控制主工作区统一 loading
+- 只在首次进入、登录、注册、游客进入时显示
+- 后续按钮操作仍然走局部 loading，不触发主遮罩
+
+排查：
+
+- `chatWorkspace.initialize()` 是否正常完成
+- `loadConversations()` 是否请求 `/api/chat/conversations`
+- `loadChatOptions()` 是否请求 `/api/chat/options`
+- `dashboard.refreshDashboard()` 是否请求 `/api/health`、`/api/documents`、`/api/office/health`
+- 浏览器 Network 里是否有 401 / 500 / CORS
+- 如果接口失败，错误会进入 `activeErrorMessage`，不应该无限只显示 loading
+
+### 13.16 图片可以预览，但模型仍然没看图
+
+这里要区分两个概念：
+
+- 前端图片预览：说明 `ChatComposer.vue` / `MessageItem.vue` 收到了图片附件
+- 模型看图：说明后端把 `image_url` 传给了支持多模态的 provider
+
+如果图片可以点击预览，但回答像没看图，优先查：
+
+- 当前模型是否支持 `supports_multimodal_input`
+- `model_diagnostics.warnings` 是否提示图片已降级
+- provider 是否支持 `data:image/...;base64,...`
+- 粘贴图片是否超过前端限制
+
 ## 14. 一句话记忆版
 
 你可以把这套项目的 RAG 链路记成下面这几句话：
@@ -4380,6 +4584,9 @@ LLM 生成回答
 19. `ChatMemoryService` 先按当前用户和 `conversation_id` 回读最近会话窗口
 20. `routes.py` 把最近窗口和当前 scope 交给 `KnowledgeBaseService`
 21. 回答结束后，把本轮 user / assistant 消息、引用、usage、模型诊断、message_parts 写回 MySQL，并刷新 Redis 缓存
+22. `time_utils.py` 统一生成中国业务时间，前端 `dateTime.ts` 只负责稳定格式化显示
+23. `App.vue` 只对首轮工作区初始化显示统一 loading，后续交互继续使用局部 loading
+24. 图片附件在输入区和已发送消息里都能点击预览，但模型是否看图仍由 `ModelCapability` 决定
 
 ---
 
