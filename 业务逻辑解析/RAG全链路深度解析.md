@@ -8,6 +8,7 @@
 - Chroma 到底是什么角色
 - DeepSeek 在哪一步进入
 - 上传、重建索引、聊天、ONLYOFFICE 保存后更新索引分别走什么路径
+- 后台索引任务如何排队、如何记录每个文件的进度和错误
 - 中间有哪些优化、兜底和失败点
 
 ---
@@ -176,7 +177,48 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 
 - 给建索引接口、增量重建接口返回统计信息
 
-#### G. `ChatHistoryItem`
+#### G. `kop_index_job` / `kop_index_job_file`
+这是当前后台索引任务追踪的两张持久化表。
+
+位置：
+
+- 初始化脚本：`sql/KOP_v1_init.sql`
+- 已有数据库增量迁移：`sql/KOP_v1_add_index_jobs.sql`
+
+它们解决的问题是：
+
+- 上传文件不再阻塞等待完整索引完成
+- 手动重建索引可以先入队，再由后端后台任务执行
+- 前端 `IndexWorkspace.vue` 能看到每个文件真实的阶段、进度、切片数和错误
+- 服务中断后，任务状态不会只存在内存里，页面刷新后还能看到最近一次任务结果
+
+两张表的分工是：
+
+```text
+kop_index_job
+├─ 记录一次后台索引任务
+├─ job_type：files / full / office
+├─ status：queued / running / success / failed
+├─ total_files / finished_files / failed_files
+└─ total_chunks / indexed_chunks
+
+kop_index_job_file
+├─ 记录这次任务里的单个文件
+├─ document_file_id：对应 kop_document_file.id
+├─ stage：queued / loading / parsing / splitting / embedding / writing / success / failed
+├─ progress：0-100
+├─ total_chunks / indexed_chunks
+└─ error_message：这个文件自己的失败原因
+```
+
+注意：
+
+- 这里的进度是“文件级任务进度”，不是整个任务平均假进度
+- 解析阶段本身很难做到逐字符精确百分比，所以用阶段进度
+- 进入写入向量库阶段后，会按实际写入的 chunk 批次更新 `indexed_chunks`
+- `kop_document_file.index_status` 仍然保留，用作文件最终状态和旧逻辑兼容
+
+#### H. `ChatHistoryItem`
 这是聊天历史里单条消息的标准结构。
 
 位置：
@@ -200,7 +242,7 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 
 - “进入 RAG 问答链路前，聊天历史的统一消息格式”
 
-#### H. `conversation_id`
+#### I. `conversation_id`
 这是新增的“后端会话 ID”。
 
 位置：
@@ -237,7 +279,7 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 └─ 回答结束后继续把本轮消息写入同一条会话
 ```
 
-#### I. `scope_type` / `scope_id` / `workspace_key` / `scope_name`
+#### J. `scope_type` / `scope_id` / `workspace_key` / `scope_name`
 这几个字段是现在会话“作用域”的核心补充。
 
 - `scope_type`
@@ -267,7 +309,7 @@ chunk 不是一个单独的新类名，而是“切片后的 `Document` 单元�
 - `LeftSidebar.vue`
   - 最近会话列表会展示范围标签，方便区分这条会话问的是全部、文件夹、知识库还是工作区
 
-#### J. `ChatMessagePart`
+#### K. `ChatMessagePart`
 这是当前聊天多模态输入的结构化消息片段。
 
 位置：
@@ -304,7 +346,7 @@ ChatMessagePart
 - 支持图片输入：把 `image_url` 原样传给 provider
 - 不支持图片输入：只把图片降级成文本摘要，并写入 `model_diagnostics.warnings`
 
-#### K. `ModelCapability`
+#### L. `ModelCapability`
 这是当前模型能力判断的核心结构。
 
 位置：
@@ -341,7 +383,7 @@ ChatMessagePart
 - `gpt-4o*`、`gpt-4.1*`、`gpt-5*`、`o3*`、`o4*` 会自动标记为支持图片输入
 - 具体模型能力可以通过 `.env` 的 `MODEL_CAPABILITIES_JSON` 覆盖
 
-#### L. `StreamingEvent`
+#### M. `StreamingEvent`
 这是当前后端内部的统一流式事件结构。
 
 位置：
@@ -374,7 +416,7 @@ StreamingEvent
 
 然后 `routes.py` 再把它转换成前端能消费的 SSE payload。
 
-#### M. `model_diagnostics`
+#### N. `model_diagnostics`
 这是每次模型调用返回给前端和落库的诊断信息。
 
 位置：
@@ -680,6 +722,10 @@ KnowledgeBaseService
 - 按 `file_id` 做文件查看、编辑、删除、移动、重命名
 - 移动 / 重命名文件或文件夹后，返回需要重建索引的 `file_ids` 和 `source_files`
 - 给 `KnowledgeBaseService` 提供写入 Chroma 所需的索引 metadata
+- 创建索引任务：`create_index_job(...)`
+- 更新单文件索引进度：`update_index_job_file(...)`
+- 查询文档列表时合并最近一次任务进度，让前端能展示真实阶段和错误
+- 清理长时间卡住的 `queued` / `running` 任务，把中断任务标记为 failed
 
 它和 `files.py` 的关系是：
 
@@ -1092,7 +1138,7 @@ RAG 主流程
 - 初始化 `Chroma`
 - 把 `embedding_function=self.embedder` 挂进去
 
-#### E. `_upsert_chunks(chunks)`
+#### E. `_upsert_chunks(chunks, progress_callback=None)`
 位置：
 
 - `app/services/knowledge_base.py`
@@ -1100,24 +1146,31 @@ RAG 主流程
 作用：
 
 - 把切好的 chunk 批量写入 Chroma
+- 每写完一批 chunk 后，可以通过 `progress_callback(indexed, total)` 回报写入进度
+- 这个回调会被后台索引任务用来更新 `kop_index_job_file.indexed_chunks`
 
 #### F. `rebuild_index()`
 作用：
 
 - 全量重建索引
+- 这是旧的全量入口，仍可用
+- 现在手动全量重建任务更偏向走队列：先创建 `kop_index_job`，再调用 `reindex_document_files(..., reset_collection=True)`
 
 #### G. `reindex_source_file(path)`
 作用：
 
 - 只重建单个文件对应的 chunk
 
-#### H. `reindex_document_files(file_ids, source_paths)`
+#### H. `reindex_document_files(file_ids, source_paths, reset_collection=False, progress_callback=None)`
 作用：
 
 - 第三阶段后更推荐的“按数据库文件 ID 重建索引”入口
-- 先按 `file_id` 删除旧 chunk
+- 默认先按 `file_id` 删除旧 chunk
+- 如果 `reset_collection=True`，会先清空整个 Chroma collection，再按传入文件逐个重建
 - 再按当前数据库 metadata 和真实文件路径重新解析、切片、写入 Chroma
+- 在 `loading` / `parsing` / `splitting` / `embedding` / `writing` / `success` / `failed` 阶段回调进度
 - 文件移动、重命名、文件夹移动、文件夹重命名后都会优先走这条链路
+- 上传后的后台索引、手动全量重建、Agent 确认重建单文件也会走这条链路
 
 #### I. `delete_chunks_by_file_ids(file_ids)`
 作用：
@@ -3424,13 +3477,55 @@ Chroma record
 
 ## 8. 建索引的几条业务路径
 
+### 8.0 当前索引任务的总原则
+
+现在索引链路已经从“只能靠接口同步跑完整索引”调整成“索引过程先落库成任务，再按场景执行”。
+
+上传和手动全量重建的核心原则是：
+
+```text
+上传 / 手动重建
+├─ 先写 MySQL 文档元数据或变更元数据
+├─ 创建 kop_index_job
+├─ 为每个文件创建 kop_index_job_file
+├─ 把任务放入后端内存队列
+├─ 接口先返回 queued
+└─ 后台线程逐文件解析、切片、写入 Chroma，并持续更新任务进度
+```
+
+文件移动、重命名、Agent 确认重建单文件这类已有同步入口，也会创建 `kop_index_job` / `kop_index_job_file` 并写入真实进度；区别只是它们不一定先进入 `_index_job_queue` 后再返回。
+
+这样做的目的：
+
+- 上传 80KB 文件也不需要等完整解析和向量写入完成才返回
+- 前端可以刷新或轮询文档列表，看到每个文件真实状态
+- 一个文件失败不会把其他文件全部拖死
+- 服务器重启后，最近任务记录仍在 MySQL 里，能看到失败原因
+
+这里要区分两类状态：
+
+```text
+kop_document_file.index_status
+└─ 文件最终状态，用于兼容旧逻辑和文件列表快速判断
+
+kop_index_job_file.status / stage / progress
+└─ 某一次具体索引任务中，这个文件当前跑到哪一步
+```
+
+也就是说：
+
+- `index_status=running` 只说明这个文件正在索引或最近任务未结束
+- `index_stage=writing` 才说明它已经进入写入 Chroma 阶段
+- `index_indexed_chunks / index_total_chunks` 才说明实际 chunk 写入进度
+
 ### 8.1 全量重建索引
 
 对应函数：
 
 - `rebuild_index()`
+- 当前手动全量任务更常走：`reindex_document_files(..., reset_collection=True, progress_callback=...)`
 
-流程：
+旧 `rebuild_index()` 流程：
 
 1. 扫描所有 source files
 2. 每个文件 `load_documents_from_file()`
@@ -3441,11 +3536,35 @@ Chroma record
 7. `_upsert_chunks(chunks)` 全量写入
 8. 写入成功后更新 `kop_document_file.index_status` 和 `last_indexed_at`
 
+现在后台全量任务的流程更细：
+
+```text
+/api/ingest
+├─ library.list_document_file_ids()
+├─ library.create_index_job(job_type="full", file_ids=...)
+│  ├─ 写 kop_index_job
+│  └─ 写多条 kop_index_job_file
+├─ _enqueue_index_job(kind="full", job_id=...)
+└─ 立即返回 status=queued
+
+后台任务
+├─ library.start_index_job(job_id)
+├─ service.reindex_document_files(
+│    file_ids=...,
+│    source_paths=...,
+│    reset_collection=True,
+│    progress_callback=...
+│  )
+├─ reset_collection() 清空旧 Chroma collection
+├─ 按文件逐个解析、切片、写入 Chroma
+├─ 每个文件持续更新 kop_index_job_file
+└─ library.finish_index_job(job_id)
+```
+
 触发场景：
 
 - 启动时自动重建（取决于启动逻辑）
 - 手动点击重建索引
-- 上传后走全量重建的接口
 - ONLYOFFICE 保存后如果配置 `full`
 
 ### 8.2 单文件增量重建索引
@@ -3477,27 +3596,79 @@ Chroma record
 - ONLYOFFICE 保存后的默认增量更新
 - 后续如果扩展成“单文件重建”按钮，也会走这条
 
-`reindex_document_files(file_ids, source_paths)` 是现在文档库 mutation 更推荐的入口：
+`reindex_document_files(file_ids, source_paths, reset_collection=False, progress_callback=None)` 是现在文档库 mutation 更推荐的入口：
 
 1. 先按 `file_id` 删除旧 chunk
 2. 再按新的 `source_paths` 读取真实文件
 3. 重新查询最新数据库 metadata
-4. 重新解析、切片、写入 Chroma
-5. 更新文件索引状态
+4. 标记任务文件进入 `loading`
+5. 调 `load_documents_from_file(...)` 解析原文件，标记 `parsing`
+6. 调 `split_documents(...)` 切片，标记 `splitting`
+7. 初始化 vector store / embedding，标记 `embedding`
+8. 批量 `_upsert_chunks(...)` 写入 Chroma，标记 `writing`，并更新 `indexed_chunks`
+9. 成功后标记 `success`，失败时只标记这个文件 `failed`
 
 触发场景：
 
+- 上传文件后的后台索引
+- 手动全量重建中的逐文件处理
 - 文件重命名
 - 文件移动
 - 文件夹重命名
 - 文件夹移动
 - 文本编辑保存后重建
+- Agent 工具确认重建单文件
 
 这就是“移动 / 重命名文件之后，索引 metadata 更新策略”的当前落地方式：
 
 - 不直接在 Chroma 里原地改 metadata
 - 而是删除旧 `file_id` 对应 chunks
 - 再按最新数据库 metadata 重新写入
+
+### 8.2.1 上传文件后的异步索引
+
+上传接口现在不再同步等待建索引完成。
+
+对应入口：
+
+- `routes.py::upload_files(...)`
+- `DocumentLibraryService.save_uploaded_files(...)`
+- `DocumentLibraryService.create_index_job(job_type="files", file_ids=...)`
+- `_enqueue_index_job(kind="files", job_id=...)`
+
+流程：
+
+```text
+用户上传文件
+├─ 后端校验扩展名和大小
+├─ 写真实文件到 data/user_docs/{user_id}/{folder_id}/...
+├─ 写 kop_document_file
+├─ 创建 kop_index_job：job_type=files
+├─ 为每个上传文件创建 kop_index_job_file
+├─ 把任务放入内存队列
+└─ 接口返回：Files uploaded. Indexing has been queued...
+```
+
+后台执行：
+
+```text
+_run_index_job_queue(...)
+├─ 取出 files 任务
+├─ update_file_index_states(..., running)
+├─ reindex_document_files(..., progress_callback=...)
+├─ 单文件成功：kop_index_job_file.status=success，progress=100
+├─ 单文件失败：kop_index_job_file.status=failed，写 error_message
+└─ finish_index_job(job_id)
+```
+
+前端看到的结果来自：
+
+- `GET /api/documents`
+- `DocumentLibraryService.list_documents()`
+- `_latest_index_task_map(...)`
+- `DocumentInfo.index_progress / index_stage / index_total_chunks / index_indexed_chunks / index_error_message`
+
+所以现在 `IndexWorkspace.vue` 不是自己猜百分比，而是优先展示后端返回的真实任务字段。
 
 ### 8.3 删除文件后的重建
 
@@ -3802,7 +3973,7 @@ LLM 生成回答
    - `MessageList.vue` / `MessageItem.vue`：消息列表、引用、usage、cost、模型诊断展示
    - `ModelHealthPanel.vue`：模型健康检查弹窗内容
    - `DocumentsWorkspace.vue`：文档库文件系统式界面、文件夹树、文件 / 文件夹操作、ONLYOFFICE 健康弹窗
-   - `IndexWorkspace.vue`：索引概览和重建入口
+   - `IndexWorkspace.vue`：索引概览、重建入口、文件级任务进度和错误展示
    - `SearchWorkspace.vue`：检索实验场
    - `UnifiedFileViewer.vue`：普通文件 / PDF / Markdown / 表格预览
    - `OnlyOfficeEditor.vue`：ONLYOFFICE 在线编辑器
@@ -3819,6 +3990,9 @@ LLM 生成回答
 - 中文 + 英文分隔符
 - 按 source 增量删除与重建
 - 保存后增量索引
+- 上传后后台排队索引
+- 索引任务表持久化
+- 文件级索引阶段、进度、chunk 数和错误追踪
 - 检索结果去重
 - 上下文分组与引用标签生成
 - 简单 code-heavy 片段识别
@@ -3922,6 +4096,67 @@ LLM 生成回答
 - `data/chroma_db` 是否正常
 - collection 是否可访问
 - metadata 是否异常
+
+### 13.3.1 索引任务进度不显示或一直卡住
+
+影响：
+
+- 上传接口已经返回 queued，但索引监控页没有真实阶段
+- 文件一直显示 `queued` / `running`
+- 前端只能看到旧的 `index_status`，看不到 `index_stage` / `index_progress`
+- 某个文件失败后没有清晰错误原因
+
+排查：
+
+1. 确认数据库是否有任务表：
+
+   ```sql
+   SHOW TABLES LIKE 'kop_index_job%';
+   ```
+
+   正常应该有：
+
+   ```text
+   kop_index_job
+   kop_index_job_file
+   ```
+
+2. 如果是已有生产库，需要执行增量迁移：
+
+   ```bash
+   docker exec -i middleware-mysql mysql -uroot -p你的MySQL密码 KOP < KOP_v1_add_index_jobs.sql
+   ```
+
+3. 看最近任务：
+
+   ```sql
+   SELECT id, job_type, status, total_files, finished_files, failed_files, total_chunks, indexed_chunks, created_at, updated_at
+   FROM kop_index_job
+   ORDER BY id DESC
+   LIMIT 10;
+   ```
+
+4. 看某个任务的文件明细：
+
+   ```sql
+   SELECT document_file_id, display_name, status, stage, progress, indexed_chunks, total_chunks, error_message, updated_at
+   FROM kop_index_job_file
+   WHERE job_id = 任务ID
+   ORDER BY id;
+   ```
+
+5. 看后端日志：
+
+   - 是否有 `Failed to reindex document file`
+   - 是否有 Hugging Face 模型下载超时
+   - 是否有 LibreOffice / 文件解析错误
+   - 是否有 Chroma 写入异常
+
+当前代码还有一个兜底：
+
+- `DocumentLibraryService.list_documents()` 会清理超过 2 小时仍处于 `queued` / `running` 的陈旧任务
+- 这类任务会被标成 `failed`
+- 错误信息是：`Index task was interrupted or expired. Please queue index rebuild again.`
 
 ### 13.4 生成模型失败
 
@@ -4123,26 +4358,28 @@ LLM 生成回答
 
 1. `CurrentUserContextMiddleware` 先解析当前用户；未登录时回落到游客用户 `local-user`
 2. `DocumentLibraryService` 管文件夹、文件、`file_id`、`folder_id` 和真实存储路径
-3. 文件内容由 `files.py` 抽取成统一 `Document`
-4. `KnowledgeBaseService` 给 `Document` 合并数据库 metadata
-5. `knowledge_base.py` 用 `RecursiveCharacterTextSplitter` 切 chunk
-6. `embeddings.py` 用本地 sentence-transformers 模型做向量化
-7. Chroma 存 chunk、向量和 metadata
-8. 用户提问时，也先转成向量
-9. Chroma 按当前用户和 scope 过滤后，再按向量相似度找最相关 chunk
-10. `knowledge_base.py` 再把命中结果整理成上下文和引用
-11. `message_parts` 让用户消息可以携带文本、图片、文件引用
-12. `ModelCapability` 判断当前模型是否支持图片、工具、Responses API、思考参数
-13. `ToolRegistry` 在模型需要时执行只读工具调用
-14. `LLMProviderAdapter` 负责真正调用 DeepSeek / Qwen / OpenAI-compatible provider
-15. `StreamingEvent` 把正文、思考、工具调用、usage、diagnostics 分开返回
-16. `model_diagnostics` 告诉前端这次实际 provider、model、联网、思考、工具、图片和 fallback 是否生效
+3. 上传 / 重建索引会先创建 `kop_index_job` 和 `kop_index_job_file`
+4. 后台队列逐文件执行索引，并把阶段、进度、chunk 数和错误写回 MySQL
+5. 文件内容由 `files.py` 抽取成统一 `Document`
+6. `KnowledgeBaseService` 给 `Document` 合并数据库 metadata
+7. `knowledge_base.py` 用 `RecursiveCharacterTextSplitter` 切 chunk
+8. `embeddings.py` 用本地 sentence-transformers 模型做向量化
+9. Chroma 存 chunk、向量和 metadata
+10. 用户提问时，也先转成向量
+11. Chroma 按当前用户和 scope 过滤后，再按向量相似度找最相关 chunk
+12. `knowledge_base.py` 再把命中结果整理成上下文和引用
+13. `message_parts` 让用户消息可以携带文本、图片、文件引用
+14. `ModelCapability` 判断当前模型是否支持图片、工具、Responses API、思考参数
+15. `ToolRegistry` 在模型需要时执行只读工具调用
+16. `LLMProviderAdapter` 负责真正调用 DeepSeek / Qwen / OpenAI-compatible provider
+17. `StreamingEvent` 把正文、思考、工具调用、usage、diagnostics 分开返回
+18. `model_diagnostics` 告诉前端这次实际 provider、model、联网、思考、工具、图片和 fallback 是否生效
 
 如果把最近新增的聊天记忆也一起放进去，可以继续记成：
 
-17. `ChatMemoryService` 先按当前用户和 `conversation_id` 回读最近会话窗口
-18. `routes.py` 把最近窗口和当前 scope 交给 `KnowledgeBaseService`
-19. 回答结束后，把本轮 user / assistant 消息、引用、usage、模型诊断、message_parts 写回 MySQL，并刷新 Redis 缓存
+19. `ChatMemoryService` 先按当前用户和 `conversation_id` 回读最近会话窗口
+20. `routes.py` 把最近窗口和当前 scope 交给 `KnowledgeBaseService`
+21. 回答结束后，把本轮 user / assistant 消息、引用、usage、模型诊断、message_parts 写回 MySQL，并刷新 Redis 缓存
 
 ---
 
