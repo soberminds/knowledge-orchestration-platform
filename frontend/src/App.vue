@@ -69,6 +69,8 @@ const officeEditorRef = ref<InstanceType<typeof OnlyOfficeEditor> | null>(null);
 const authScreenMode = ref<"login" | "register">("login");
 const authEntryMode = ref<"auth" | "app">("auth");
 const authBootstrapped = ref(false);
+const workspaceInitializing = ref(false);
+const workspaceReady = ref(false);
 const sidebarCollapsed = ref(false);
 const isDarkMode = ref(readInitialDarkMode());
 
@@ -117,6 +119,18 @@ const userMenuPopperClass = computed(() =>
   ["user-dropdown-popper", isDarkMode.value ? "is-dark-mode" : ""].filter(Boolean).join(" "),
 );
 const showAuthScreen = computed(() => authBootstrapped.value && !isAuthenticated.value && authEntryMode.value === "auth");
+const showWorkspaceLoading = computed(
+  () => authBootstrapped.value && authEntryMode.value === "app" && workspaceInitializing.value && !workspaceReady.value,
+);
+const workspaceLoadingHint = computed(() => {
+  if (chatWorkspace.conversationsLoading.value || chatWorkspace.optionsLoading.value) {
+    return "正在准备会话和模型配置";
+  }
+  if (dashboard.refreshing.value) {
+    return "正在同步文档、索引和服务状态";
+  }
+  return "正在加载工作区数据";
+});
 
 const activeErrorMessage = computed(() => {
   if (auth.errorMessage.value) {
@@ -213,6 +227,7 @@ async function continueAsGuest() {
 }
 
 function resetWorkspaceForUserChange() {
+  workspaceReady.value = false;
   chatWorkspace.resetForUserChange();
   searchWorkspace.resetForUserChange();
   dashboard.resetForUserChange();
@@ -221,10 +236,25 @@ function resetWorkspaceForUserChange() {
   activeTab.value = "chat";
 }
 
+async function initializeWorkspaceData() {
+  workspaceInitializing.value = true;
+  workspaceReady.value = false;
+  try {
+    await chatWorkspace.initialize();
+    try {
+      await dashboard.refreshDashboard({ retries: 2 });
+    } catch {
+      // Error text is already captured in composable state.
+    }
+  } finally {
+    workspaceReady.value = true;
+    workspaceInitializing.value = false;
+  }
+}
+
 async function refreshDataAfterAuthChange() {
   resetWorkspaceForUserChange();
-  await chatWorkspace.initialize();
-  await dashboard.refreshDashboard({ retries: 2 });
+  await initializeWorkspaceData();
 }
 
 async function syncCurrentUser() {
@@ -530,12 +560,7 @@ onMounted(async () => {
   authBootstrapped.value = true;
   if (isAuthenticated.value || authEntryMode.value === "app") {
     setEntryMode("app");
-    await chatWorkspace.initialize();
-    try {
-      await dashboard.refreshDashboard({ retries: 2 });
-    } catch {
-      // Error text is already captured in composable state.
-    }
+    await initializeWorkspaceData();
   }
 });
 </script>
@@ -667,6 +692,14 @@ onMounted(async () => {
 
       <section v-if="activeErrorMessage" class="notice-row">
         <el-alert :title="activeErrorMessage" type="error" show-icon :closable="false" />
+      </section>
+
+      <section v-if="showWorkspaceLoading" class="workspace-loading-mask" aria-live="polite">
+        <div class="workspace-loading-card">
+          <span class="workspace-loading-spinner" aria-hidden="true"></span>
+          <strong>正在加载工作区</strong>
+          <small>{{ workspaceLoadingHint }}</small>
+        </div>
       </section>
 
       <ChatWorkspace
@@ -908,6 +941,64 @@ onMounted(async () => {
 .app-boot-card small {
   color: var(--text-muted);
   font-size: 0.82rem;
+}
+
+.main-workspace {
+  position: relative;
+}
+
+.workspace-loading-mask {
+  position: absolute;
+  inset: 72px 0 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(at 40% 24%, rgba(20, 184, 166, 0.16) 0px, transparent 46%),
+    linear-gradient(180deg, rgba(248, 252, 251, 0.86), rgba(238, 248, 247, 0.92));
+  backdrop-filter: blur(4px);
+}
+
+.workspace-loading-card {
+  min-width: 260px;
+  max-width: min(360px, calc(100vw - 48px));
+  padding: 22px 24px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+  color: var(--text);
+  text-align: center;
+}
+
+.workspace-loading-spinner {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 3px solid rgba(20, 184, 166, 0.18);
+  border-top-color: var(--accent-strong);
+  animation: workspace-spin 0.8s linear infinite;
+}
+
+.workspace-loading-card strong {
+  font-size: 0.98rem;
+  font-weight: 700;
+}
+
+.workspace-loading-card small {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+@keyframes workspace-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .workspace-topbar {
@@ -1216,6 +1307,17 @@ onMounted(async () => {
 
 .app-shell.is-dark-mode .workspace-topbar {
   background: rgba(16, 24, 33, 0.8);
+}
+
+.app-shell.is-dark-mode .workspace-loading-mask {
+  background:
+    radial-gradient(at 40% 24%, rgba(45, 212, 191, 0.14) 0px, transparent 46%),
+    linear-gradient(180deg, rgba(16, 24, 33, 0.86), rgba(16, 24, 33, 0.94));
+}
+
+.app-shell.is-dark-mode .workspace-loading-card {
+  background: var(--surface);
+  border-color: var(--border-strong);
 }
 
 .app-shell.is-dark-mode .topbar-icon-btn,
